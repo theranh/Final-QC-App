@@ -23,19 +23,6 @@ export function saveLS(key, value) {
   }
 }
 
-export const SEED_USERS = [
-  { id: 1, name: 'R. Delgado', title: 'VRA', email: 'rdelgado@truckranch.com' },
-  { id: 2, name: 'Theran', title: 'Dir. Bus Dev.', email: 'theran@truckranch.com' },
-  { id: 3, name: 'Ryan', title: 'Director', email: 'ryan@truckranch.com' },
-];
-
-export function loadUsers() {
-  const users = loadLS('users', null);
-  if (users && users.length) return users;
-  saveLS('users', SEED_USERS);
-  return SEED_USERS.map((u) => ({ ...u }));
-}
-
 // Ensure older/imported records carry the re-check fields the app relies on.
 export function migrateRecord(r) {
   if (!r.status) r.status = r.result === 'pass' ? 'pass' : 'open';
@@ -44,12 +31,6 @@ export function migrateRecord(r) {
     r.openItems = r.status === 'open' ? failList(r, CATS).map((f) => ({ cat: f.k, item: f.item, note: f.note, photos: f.photos })) : [];
   }
   return r;
-}
-
-export function loadInspections() {
-  const recs = loadLS('inspections', []);
-  recs.forEach(migrateRecord);
-  return recs;
 }
 
 export function newDraft(uid) {
@@ -77,19 +58,12 @@ export function persistDraftBundle({ draft, marks, notes, photos, optOut, stage 
   });
 }
 
-// One-time read of everything localStorage needs to seed initial React state on mount.
-export function initBoot() {
-  const users = loadUsers();
-  const defaultUid = loadLS('default', users[0] && users[0].id);
-  const recs = loadInspections();
-  const seq = loadLS('seq', 1001);
+// In-progress drafts are device-local scratch space; committed inspections live
+// in the shared database. This only restores an unfinished draft on this device.
+export function initDraftBoot() {
   const draftBlob = loadLS('draft', null);
   if (draftBlob && draftBlob.draft) {
     return {
-      users,
-      defaultUid,
-      recs,
-      seq,
       draft: draftBlob.draft,
       marks: draftBlob.marks || {},
       notes: draftBlob.notes || {},
@@ -98,5 +72,26 @@ export function initBoot() {
       stage: draftBlob.stage === 'sheet' ? 'sheet' : draftBlob.stage === 'form' ? 'form' : null,
     };
   }
-  return { users, defaultUid, recs, seq, draft: newDraft(defaultUid), marks: {}, notes: {}, photos: {}, optOut: {}, stage: null };
+  return { draft: newDraft('me'), marks: {}, notes: {}, photos: {}, optOut: {}, stage: null };
+}
+
+// ---------- legacy on-device data (pre-database versions) ----------
+
+export function hasLegacyData() {
+  const recs = loadLS('inspections', null);
+  return Array.isArray(recs) && recs.length > 0;
+}
+
+export function loadLegacyData() {
+  const recs = loadLS('inspections', []) || [];
+  recs.forEach(migrateRecord);
+  return { inspections: recs, seq: loadLS('seq', 1001) };
+}
+
+export function legacyImportDone() {
+  return !!loadLS('legacyImported', false);
+}
+
+export function markLegacyImported() {
+  saveLS('legacyImported', true);
 }

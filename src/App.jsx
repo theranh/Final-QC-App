@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { CATS, CHECKLIST } from './lib/constants';
-import { initBoot, newDraft, persistDraftBundle, saveLS, loadLS, stripRc, migrateRecord } from './lib/storage';
-import { failList } from './lib/records';
+import { initDraftBoot, newDraft, persistDraftBundle, saveLS, loadLS, stripRc } from './lib/storage';
 import { curPeriod } from './lib/stats';
-import { exportCsv, exportBackup, parseBackupFile } from './lib/exports';
+import { exportCsv, exportBackup } from './lib/exports';
 import { compressImageFile } from './lib/photo';
+import { api } from './lib/api';
+import { useAuth } from './hooks/useAuth';
 
 import Header from './components/Header';
 import BottomNav from './components/BottomNav';
-import StaleTabBanner from './components/StaleTabBanner';
 import Toast from './components/Toast';
 import Lightbox from './components/Lightbox';
 import VinScanner from './components/VinScanner';
@@ -23,14 +23,33 @@ import RecordDetail from './components/RecordDetail';
 import ReportsScreen from './components/ReportsScreen';
 import PrintReport from './components/PrintReport';
 import SettingsScreen from './components/SettingsScreen';
+import { LoadingScreen, LoginScreen, AccessScreen, ErrorScreen } from './components/AuthScreens';
 
 export default function App() {
-  const [boot] = useState(() => initBoot());
+  const auth = useAuth();
 
-  const [users, setUsers] = useState(() => boot.users);
-  const [defaultUid, setDefaultUid] = useState(() => boot.defaultUid);
-  const [recs, setRecs] = useState(() => boot.recs);
-  const [seq, setSeq] = useState(() => boot.seq);
+  if (auth.status === 'loading') return <LoadingScreen />;
+  if (auth.status === 'signed_out') return <LoginScreen />;
+  if (auth.status === 'error') return <ErrorScreen onRetry={auth.refresh} />;
+  if (auth.status !== 'active') return <AccessScreen status={auth.status} email={auth.email} />;
+
+  return <AuthedApp me={auth.employee} onAuthRefresh={auth.refresh} />;
+}
+
+function AuthedApp({ me }) {
+  const [boot] = useState(() => initDraftBoot());
+
+  // The signed-in employee IS the inspector — identity comes from Replit Auth,
+  // it can never be picked or typed in.
+  const meUser = useMemo(
+    () => ({ id: 'me', name: me.name, title: me.title, email: me.email }),
+    [me.name, me.title, me.email]
+  );
+
+  const [recs, setRecs] = useState([]);
+  const [nextQc, setNextQc] = useState(null);
+  const [loadState, setLoadState] = useState('loading'); // loading | ready | error
+  const [saving, setSaving] = useState(false);
 
   const [tab, setTab] = useState('inspect');
   const [stage, setStage] = useState(() => boot.stage);
@@ -43,7 +62,6 @@ export default function App() {
   const [sigSigned, setSigSigned] = useState(false);
 
   const [recheckId, setRecheckId] = useState(null);
-  const [rcUid, setRcUid] = useState(null);
   const [scanning, setScanning] = useState(false);
 
   const [q, setQ] = useState('');
@@ -55,14 +73,8 @@ export default function App() {
   const [period, setPeriod] = useState('mtd');
   const [printing, setPrinting] = useState(false);
 
-  const [editUser, setEditUser] = useState(null);
-  const [uName, setUName] = useState('');
-  const [uTitle, setUTitle] = useState('');
-  const [uEmail, setUEmail] = useState('');
-
   const [toastMsg, setToastMsg] = useState(null);
   const [lightbox, setLightbox] = useState(null);
-  const [staleTabWarning, setStaleTabWarning] = useState(false);
   const [lastBackupAt, setLastBackupAt] = useState(() => loadLS('lastBackupAt', null));
 
   const sigRef = useRef(null);
@@ -78,42 +90,30 @@ export default function App() {
     toastTimerRef.current = setTimeout(() => setToastMsg(null), 2600);
   }, []);
 
-  // A failed localStorage write is otherwise silent — surface it so nobody believes
-  // an inspection is safely committed when the device is actually out of storage.
-  const warnIfStorageFailed = useCallback(
-    (ok) => {
-      if (!ok) showToast('Storage full — could not save. Export a backup and free up space (Settings).');
-    },
-    [showToast]
-  );
+  // ---------- initial data load (shared database) ----------
+  const loadData = useCallback(() => {
+    setLoadState('loading');
+    api
+      .bootstrap()
+      .then((data) => {
+        setRecs(data.inspections);
+        setNextQc(data.nextQc);
+        setLoadState('ready');
+      })
+      .catch(() => setLoadState('error'));
+  }, []);
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
-  // ---------- persistence ----------
-  useEffect(() => { warnIfStorageFailed(saveLS('users', users)); }, [users, warnIfStorageFailed]);
-  useEffect(() => { warnIfStorageFailed(saveLS('inspections', recs)); }, [recs, warnIfStorageFailed]);
-  useEffect(() => { warnIfStorageFailed(saveLS('seq', seq)); }, [seq, warnIfStorageFailed]);
-  useEffect(() => { warnIfStorageFailed(saveLS('default', defaultUid)); }, [defaultUid, warnIfStorageFailed]);
+  // ---------- draft persistence (device-local scratch space only) ----------
   useEffect(() => {
     clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
-      warnIfStorageFailed(persistDraftBundle({ draft, marks, notes, photos: photosMap, optOut, stage }));
+      persistDraftBundle({ draft, marks, notes, photos: photosMap, optOut, stage });
     }, 250);
     return () => clearTimeout(persistTimerRef.current);
-  }, [draft, marks, notes, photosMap, optOut, stage, warnIfStorageFailed]);
-
-  // ---------- multi-tab / multi-window safety net ----------
-  // All inspections live under one localStorage key with a full read-modify-write cycle per
-  // change, so two tabs of the same browser open at once can silently clobber each other's
-  // writes. We can't merge them safely, so make the collision visible instead of silent.
-  useEffect(() => {
-    const onStorage = (e) => {
-      // The 'storage' event only fires in OTHER tabs/windows than the one that wrote —
-      // exactly the case we need to warn about.
-      if (!e.key || !e.key.startsWith('fqc_') || e.key === 'fqc_draft') return;
-      setStaleTabWarning(true);
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, []);
+  }, [draft, marks, notes, photosMap, optOut, stage]);
 
   // ---------- photos ----------
   const takePhoto = useCallback((key) => {
@@ -177,7 +177,7 @@ export default function App() {
     setOptOut((prev) => ({ ...prev, [k]: !prev[k] }));
   }, []);
 
-  const insp = users.find((u) => u.id === draft.uid) || users[0];
+  const insp = meUser;
 
   // ---------- VIN scan ----------
   const onVinDetected = (vin, ok) => {
@@ -188,8 +188,7 @@ export default function App() {
 
   // ---------- commit original inspection ----------
   const commit = () => {
-    if (!sigSigned) return;
-    const u = insp;
+    if (!sigSigned || saving) return;
     const items = {};
     let checked = 0;
     let failCount = 0;
@@ -207,48 +206,46 @@ export default function App() {
         return it;
       });
     });
-    const id = 'FQ-' + seq;
-    const rec = {
-      id,
-      ts: Date.now(),
+    const payload = {
       stock: draft.stock.trim(),
       vehicle: draft.vehicle.trim(),
       vin: (draft.vin || '').trim().toUpperCase(),
       vinPhoto: (photosMap['vin'] || [])[0] || null,
-      inspector: u.name,
-      title: u.title,
-      result: failCount ? 'fail' : 'pass',
-      status: failCount ? 'open' : 'pass',
-      clearedTs: null,
-      rechecks: [],
       optOut: { ...optOut },
       items,
       checked,
       failCount,
       sig: sigRef.current ? sigRef.current.toDataURL() : null,
-      committed: true,
     };
-    rec.openItems = failCount ? failList(rec, CATS).map((f) => ({ cat: f.k, item: f.item, note: f.note, photos: f.photos })) : [];
-    setRecs((prev) => [rec, ...prev]);
-    setSeq((prev) => prev + 1);
-    saveLS('draft', null);
-    setDraft(newDraft(defaultUid));
-    setMarks({});
-    setNotes({});
-    setPhotosMap({});
-    setOptOut({});
-    setSigSigned(false);
-    setStage(null);
-    setTab('records');
-    setViewRec(id);
-    showToast(id + (failCount ? ' committed — open re-check' : ' committed & locked ✓'));
+    setSaving(true);
+    api
+      .createInspection(payload)
+      .then(({ record, nextQc: nq }) => {
+        setRecs((prev) => [record, ...prev]);
+        setNextQc(nq);
+        saveLS('draft', null);
+        setDraft(newDraft('me'));
+        setMarks({});
+        setNotes({});
+        setPhotosMap({});
+        setOptOut({});
+        setSigSigned(false);
+        setStage(null);
+        setTab('records');
+        setViewRec(record.id);
+        showToast(record.id + (record.failCount ? ' committed — open re-check' : ' committed & locked ✓'));
+      })
+      .catch((err) => {
+        if (err.status === 401) window.location.href = '/api/login';
+        else showToast('Could not save: ' + err.message);
+      })
+      .finally(() => setSaving(false));
   };
 
   // ---------- re-check ----------
   const openRecheck = (id) => {
     setStage('recheck');
     setRecheckId(id);
-    setRcUid(defaultUid);
     setSigSigned(false);
     setMarks((prev) => stripRc(prev));
     setNotes((prev) => stripRc(prev));
@@ -265,10 +262,9 @@ export default function App() {
     setRepairs({});
   };
   const commitRecheck = () => {
-    if (!sigSigned) return;
+    if (!sigSigned || saving) return;
     const r = recs.find((x) => x.id === recheckId);
     if (!r || r.status !== 'open') return;
-    const u = users.find((x) => x.id === rcUid) || users[0];
     const open = r.openItems || [];
     for (let i = 0; i < open.length; i++) {
       const key = 'rc|' + i;
@@ -288,13 +284,25 @@ export default function App() {
       }
       return it;
     });
-    const cycle = { ts: Date.now(), inspector: u.name, title: u.title, sig: rcSigRef.current ? rcSigRef.current.toDataURL() : null, items: cycleItems };
-    const still = cycleItems.filter((x) => x.outcome === 'fail').map((x) => ({ cat: x.cat, item: x.item, note: x.note || '', photos: x.photos || [] }));
-    const updated = { ...r, rechecks: (r.rechecks || []).concat([cycle]), openItems: still, status: still.length ? 'open' : 'cleared', clearedTs: still.length ? null : cycle.ts };
-    setRecs((prev) => prev.map((x) => (x.id === r.id ? updated : x)));
-    const msg = still.length ? `${r.id} re-check committed — ${still.length} item${still.length === 1 ? '' : 's'} still open` : `${r.id} cleared — PASS on re-check ✓`;
-    closeRecheck();
-    showToast(msg);
+    setSaving(true);
+    api
+      .commitRecheck(r.id, { sig: rcSigRef.current ? rcSigRef.current.toDataURL() : null, items: cycleItems })
+      .then(({ record }) => {
+        setRecs((prev) => prev.map((x) => (x.id === record.id ? record : x)));
+        const still = (record.openItems || []).length;
+        const msg = still ? `${record.id} re-check committed — ${still} item${still === 1 ? '' : 's'} still open` : `${record.id} cleared — PASS on re-check ✓`;
+        closeRecheck();
+        showToast(msg);
+      })
+      .catch((err) => {
+        if (err.status === 401) window.location.href = '/api/login';
+        else if (err.status === 409) {
+          showToast('This inspection was already updated — reloading');
+          loadData();
+          closeRecheck();
+        } else showToast('Could not save: ' + err.message);
+      })
+      .finally(() => setSaving(false));
   };
 
   // ---------- reports ----------
@@ -311,64 +319,13 @@ export default function App() {
     setPrinting(true);
   };
 
-  // ---------- settings / users ----------
-  const editUserStart = (u) => {
-    setEditUser(u ? u.id : 'new');
-    setUName(u ? u.name : '');
-    setUTitle(u ? u.title : '');
-    setUEmail(u ? u.email : '');
-  };
-  const saveUser = () => {
-    const name = uName.trim();
-    const title = uTitle.trim();
-    const email = uEmail.trim();
-    if (!name || !title) return;
-    if (editUser === 'new') setUsers((prev) => prev.concat([{ id: Date.now(), name, title, email }]));
-    else setUsers((prev) => prev.map((u) => (u.id === editUser ? { ...u, name, title, email } : u)));
-    setEditUser(null);
-    showToast('Inspector saved ✓');
-  };
-  const deleteUser = () => {
-    if (editUser === 'new') return;
-    if (users.length <= 1) {
-      showToast('Keep at least one inspector');
-      return;
-    }
-    if (!window.confirm('Delete this inspector? Past inspections keep their recorded name.')) return;
-    const remaining = users.filter((u) => u.id !== editUser);
-    setUsers(remaining);
-    if (defaultUid === editUser) setDefaultUid(remaining[0].id);
-    if (draft.uid === editUser) dset({ uid: remaining[0].id });
-    setEditUser(null);
-    showToast('Inspector deleted');
-  };
-  const makeDefault = (id) => {
-    setDefaultUid(id);
-    showToast('Default inspector set ✓');
-  };
-
   // ---------- backup ----------
   const onExportBackup = () => {
-    exportBackup(users, recs, seq, defaultUid);
+    exportBackup([meUser], recs, nextQc || 1001, meUser.id);
     const ts = Date.now();
     setLastBackupAt(ts);
     saveLS('lastBackupAt', ts);
     showToast('Backup downloaded ✓');
-  };
-  const onImportFile = (file) => {
-    parseBackupFile(file)
-      .then((data) => {
-        if (!window.confirm(`Replace ALL data on this device with this backup?\n${data.inspections.length} inspections · ${data.users.length} users`)) return;
-        const migrated = data.inspections.map((r) => migrateRecord({ ...r }));
-        setUsers(data.users);
-        setRecs(migrated);
-        setSeq(data.seq || 1001);
-        setDefaultUid(data.defaultUid || (data.users[0] && data.users[0].id));
-        setViewRec(null);
-        setEditUser(null);
-        showToast('Backup restored ✓');
-      })
-      .catch((err) => showToast(err.message));
   };
 
   // ---------- nav ----------
@@ -377,12 +334,16 @@ export default function App() {
   const onNavChange = (k) => {
     setTab(k);
     setViewRec((prev) => (k === 'records' ? prev : null));
-    setEditUser(null);
   };
+
+  if (loadState === 'loading') return <LoadingScreen />;
+  if (loadState === 'error') return <ErrorScreen onRetry={loadData} />;
 
   if (printing) {
     return <PrintReport recs={recs} period={period} onClose={() => setPrinting(false)} onPrint={() => window.print()} />;
   }
+
+  const nextId = nextQc ? 'FQ-' + nextQc : 'FQ-…';
 
   let content = null;
   if (stage === 'form') {
@@ -390,7 +351,7 @@ export default function App() {
       <NewInspectionForm
         draft={draft}
         onDraftChange={dset}
-        users={users}
+        users={[meUser]}
         optOut={optOut}
         onToggleOptOut={toggleOptOut}
         photosMap={photosMap}
@@ -400,7 +361,7 @@ export default function App() {
         onClose={() => setStage(null)}
         onGoSettings={() => { setTab('settings'); setStage(null); }}
         onStart={() => setStage('sheet')}
-        nextId={'FQ-' + seq}
+        nextId={nextId}
       />
     );
   } else if (stage === 'sheet') {
@@ -427,7 +388,7 @@ export default function App() {
         insp={insp}
         marks={marks}
         optOut={optOut}
-        seq={seq}
+        seq={nextQc || '…'}
         sigRef={sigRef}
         sigSigned={sigSigned}
         onSigChange={setSigSigned}
@@ -441,9 +402,9 @@ export default function App() {
     content = record ? (
       <RecheckSheet
         record={record}
-        users={users}
-        rcUid={rcUid}
-        onSetRcUid={setRcUid}
+        users={[meUser]}
+        rcUid={meUser.id}
+        onSetRcUid={() => {}}
         marks={marks}
         notes={notes}
         photosMap={photosMap}
@@ -467,7 +428,7 @@ export default function App() {
       <HomeScreen
         recs={recs}
         openRecs={openRecs}
-        nextId={'FQ-' + seq}
+        nextId={nextId}
         onNewInspection={() => setStage('form')}
         onOpenRecheck={openRecheck}
         onOpenRecord={(id) => { setTab('records'); setViewRec(id); }}
@@ -486,26 +447,13 @@ export default function App() {
   } else if (tab === 'settings') {
     content = (
       <SettingsScreen
-        users={users}
-        defaultUid={defaultUid}
-        onMakeDefault={makeDefault}
-        editUser={editUser}
-        uName={uName}
-        uTitle={uTitle}
-        uEmail={uEmail}
-        onUName={setUName}
-        onUTitle={setUTitle}
-        onUEmail={setUEmail}
-        onAddUser={() => editUserStart(null)}
-        onEditUser={editUserStart}
-        onSaveUser={saveUser}
-        onCancelUser={() => setEditUser(null)}
-        onDeleteUser={deleteUser}
+        me={me}
         lastBackupAt={lastBackupAt}
         recs={recs}
-        seq={seq}
+        nextQc={nextQc || 1001}
         onExportBackup={onExportBackup}
-        onImportFile={onImportFile}
+        onImported={loadData}
+        showToast={showToast}
       />
     );
   }
@@ -513,7 +461,6 @@ export default function App() {
   return (
     <div className="app-shell">
       <div className="app-frame">
-        {staleTabWarning && <StaleTabBanner onReload={() => window.location.reload()} />}
         <Header tab={tab} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}

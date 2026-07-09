@@ -55,6 +55,12 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
     { k: 'INSPECTOR', v: `${r.inspector} — ${r.title}` },
     { k: 'ITEMS CHECKED', v: String(r.checked) },
   ];
+  if (r.createdBy && r.createdBy.email) {
+    meta.push({ k: 'ENTERED BY', v: `${r.createdBy.name} · ${r.createdBy.email}${r.imported ? ' · imported' : ''}` });
+  }
+  if (r.updatedBy && r.updatedBy.email && r.updatedAt && r.updatedAt !== r.createdAt) {
+    meta.push({ k: 'LAST MODIFIED', v: `${r.updatedBy.name} · ${fmtDT(r.updatedAt)}` });
+  }
 
   return (
     <div className="screen">

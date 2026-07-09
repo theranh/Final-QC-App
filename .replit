@@ -10,17 +10,18 @@ channel = "stable-24_05"
 PORT = "5173"
 
 [[ports]]
-localPort = 5173
-externalPort = 80
-
-[[ports]]
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 5173
+externalPort = 80
+
 [deployment]
-deploymentTarget = "static"
+deploymentTarget = "autoscale"
 publicDir = "dist"
 build = ["npm", "run", "build"]
+run = ["npm", "run", "start"]
 
 [workflows]
 runButton = "Project"
@@ -48,3 +49,4 @@ outputType = "webview"
 
 [agent]
 expertMode = true
+integrations = ["javascript_log_in_with_replit:2.0.0"]

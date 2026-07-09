@@ -1,0 +1,1 @@
+- [Express 5 + TS quirks](express5-ts-quirks.md) — no "*" route strings in Express 5; passing middleware arrays breaks TS overload inference, compose into one handler instead.

@@ -1,5 +1,17 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { loadLS, saveLS, loadUsers, migrateRecord, newDraft, stripRc, persistDraftBundle, initBoot, SEED_USERS } from './storage';
+import {
+  loadLS,
+  saveLS,
+  migrateRecord,
+  newDraft,
+  stripRc,
+  persistDraftBundle,
+  initDraftBoot,
+  hasLegacyData,
+  loadLegacyData,
+  legacyImportDone,
+  markLegacyImported,
+} from './storage';
 
 beforeEach(() => {
   localStorage.clear();
@@ -18,21 +30,6 @@ describe('loadLS / saveLS', () => {
   it('returns the fallback (not a crash) when stored JSON is corrupt', () => {
     localStorage.setItem('fqc_broken', '{not json');
     expect(loadLS('broken', 'fallback')).toBe('fallback');
-  });
-});
-
-describe('loadUsers', () => {
-  it('seeds the three named default inspectors when no users are stored', () => {
-    const users = loadUsers();
-    expect(users).toHaveLength(3);
-    expect(users.map((u) => u.name)).toEqual(SEED_USERS.map((u) => u.name));
-    // seeding must also persist, so a second load sees the same data without re-seeding
-    expect(loadLS('users', null)).toHaveLength(3);
-  });
-
-  it('does not re-seed when users already exist', () => {
-    saveLS('users', [{ id: 1, name: 'Solo Inspector', title: 'QA', email: '' }]);
-    expect(loadUsers()).toHaveLength(1);
   });
 });
 
@@ -72,14 +69,14 @@ describe('stripRc', () => {
 
 describe('newDraft', () => {
   it('creates an empty draft pre-assigned to the given inspector', () => {
-    expect(newDraft(2)).toEqual({ stock: '', vehicle: '', vin: '', uid: 2 });
+    expect(newDraft('me')).toEqual({ stock: '', vehicle: '', vin: '', uid: 'me' });
   });
 });
 
 describe('persistDraftBundle', () => {
   it('only keeps stage when it is "sheet" or "form", and strips rc| scoped state', () => {
     const ok = persistDraftBundle({
-      draft: { stock: 'T-1', vehicle: 'Truck', vin: '', uid: 1 },
+      draft: { stock: 'T-1', vehicle: 'Truck', vin: '', uid: 'me' },
       marks: { 'mech|0': 'p', 'rc|0': 'f' },
       notes: { 'rc|0': 'note' },
       photos: {},
@@ -94,25 +91,42 @@ describe('persistDraftBundle', () => {
   });
 
   it('keeps stage "form" as-is', () => {
-    persistDraftBundle({ draft: newDraft(1), marks: {}, notes: {}, photos: {}, optOut: {}, stage: 'form' });
+    persistDraftBundle({ draft: newDraft('me'), marks: {}, notes: {}, photos: {}, optOut: {}, stage: 'form' });
     expect(loadLS('draft', null).stage).toBe('form');
   });
 });
 
-describe('initBoot', () => {
-  it('boots with zero inspections and a sequential ID starting at 1001 on a fresh device', () => {
-    const boot = initBoot();
-    expect(boot.recs).toEqual([]);
-    expect(boot.seq).toBe(1001);
-    expect(boot.users).toHaveLength(3);
+describe('initDraftBoot', () => {
+  it('boots with an empty draft and no stage on a fresh device', () => {
+    const boot = initDraftBoot();
+    expect(boot.draft).toEqual({ stock: '', vehicle: '', vin: '', uid: 'me' });
     expect(boot.stage).toBeNull();
+    expect(boot.marks).toEqual({});
   });
 
   it('resumes an in-progress draft that was mid-checklist when last saved', () => {
-    saveLS('draft', { draft: { stock: 'T-1', vehicle: 'Truck', vin: '', uid: 1 }, marks: { 'mech|0': 'p' }, notes: {}, photos: {}, optOut: {}, stage: 'sheet' });
-    const boot = initBoot();
+    saveLS('draft', { draft: { stock: 'T-1', vehicle: 'Truck', vin: '', uid: 'me' }, marks: { 'mech|0': 'p' }, notes: {}, photos: {}, optOut: {}, stage: 'sheet' });
+    const boot = initDraftBoot();
     expect(boot.stage).toBe('sheet');
     expect(boot.draft.stock).toBe('T-1');
     expect(boot.marks).toEqual({ 'mech|0': 'p' });
+  });
+});
+
+describe('legacy on-device data', () => {
+  it('detects legacy inspections and migrates them for import', () => {
+    expect(hasLegacyData()).toBe(false);
+    saveLS('inspections', [{ id: 'FQ-1001', ts: 1, result: 'fail', items: {} }]);
+    saveLS('seq', 1002);
+    expect(hasLegacyData()).toBe(true);
+    const data = loadLegacyData();
+    expect(data.seq).toBe(1002);
+    expect(data.inspections[0].status).toBe('open');
+  });
+
+  it('tracks the one-time import flag', () => {
+    expect(legacyImportDone()).toBe(false);
+    markLegacyImported();
+    expect(legacyImportDone()).toBe(true);
   });
 });
