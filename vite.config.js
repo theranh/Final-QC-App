@@ -30,6 +30,10 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Never serve the cached SPA shell for backend routes — /api/login and
+        // /api/logout are real server redirects (Replit Auth), not app pages.
+        navigateFallbackDenylist: [/^\/api\//],
+        cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
