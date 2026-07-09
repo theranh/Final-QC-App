@@ -1,4 +1,4 @@
-modules = ["nodejs-20"]
+modules = ["nodejs-20", "postgresql-16"]
 run = "npm run dev"
 entrypoint = "src/App.jsx"
 hidden = [".config", "node_modules", "dist"]
