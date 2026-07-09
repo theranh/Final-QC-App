@@ -2,7 +2,7 @@ import { chipStyle, catByKey } from '../lib/constants';
 import { fmtDT, fmtShort } from '../lib/format';
 import { statusMeta } from '../lib/records';
 
-export default function HomeScreen({ recs, openRecs, nextId, onNewInspection, onOpenRecheck, onOpenRecord, onGoRecords }) {
+export default function HomeScreen({ recs, openRecs, onNewInspection, onOpenRecheck, onOpenRecord, onGoRecords }) {
   const historyRows = recs.slice(0, 10);
 
   return (
@@ -15,7 +15,7 @@ export default function HomeScreen({ recs, openRecs, nextId, onNewInspection, on
       </div>
       <div className="screen-body">
         <div className="btn btn-red" style={{ flex: '0 0 auto', height: 56 }} onClick={onNewInspection}>
-          + New Inspection <span className="mono" style={{ fontSize: 10.5, fontWeight: 400, opacity: 0.8 }}>{nextId}</span>
+          + New Inspection
         </div>
 
         {openRecs.length > 0 && (

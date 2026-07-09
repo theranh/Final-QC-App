@@ -114,6 +114,38 @@ export function fallbackDecodeFrame(video, scratchCanvas) {
   return null;
 }
 
+// Build a "Year Make Model Trim" description from a vPIC DecodeVinValues result row.
+export function vehicleDescFromDecode(r) {
+  r = r || {};
+  const clean = (v) => String(v || '').trim();
+  const year = clean(r.ModelYear);
+  const rawMake = clean(r.Make);
+  // vPIC returns makes in ALL CAPS ("FORD", "GMC"). Title-case long names, keep short ones (GMC, RAM, BMW) as-is.
+  const make = rawMake
+    .split(/\s+/)
+    .map((w) => (w.length <= 3 ? w : w.charAt(0) + w.slice(1).toLowerCase()))
+    .join(' ');
+  const model = clean(r.Model);
+  const trim = clean(r.Trim);
+  const desc = [year, make, model, trim].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  return year || make || model ? desc : null;
+}
+
+// Decode a VIN into "Year Make Model Trim" via the free NHTSA vPIC API.
+// Returns null on any failure (offline, API down, unknown VIN) — callers must treat it as best-effort.
+export async function decodeVinInfo(vin) {
+  try {
+    const res = await fetch(
+      `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return vehicleDescFromDecode(data && data.Results && data.Results[0]);
+  } catch {
+    return null;
+  }
+}
+
 export function extractVin17(text) {
   const cleaned = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const m = cleaned.match(/[A-HJ-NPR-Z0-9]{17}/);

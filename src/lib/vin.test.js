@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { vinValid, extractVin17 } from './vin';
+import { vinValid, extractVin17, vehicleDescFromDecode } from './vin';
 
 describe('vinValid', () => {
   it('accepts a real, correctly-checksummed 17-character VIN', () => {
@@ -27,6 +27,28 @@ describe('vinValid', () => {
     expect(vinValid('1HGCM8263IA004352')).toBe(false);
     expect(vinValid('1HGCM8263OA004352')).toBe(false);
     expect(vinValid('1HGCM8263QA004352')).toBe(false);
+  });
+});
+
+describe('vehicleDescFromDecode', () => {
+  it('builds "Year Make Model Trim" from a vPIC result row', () => {
+    expect(vehicleDescFromDecode({ ModelYear: '2013', Make: 'FORD', Model: 'F-150', Trim: 'XLT' })).toBe('2013 Ford F-150 XLT');
+  });
+
+  it('keeps short all-caps makes like GMC and RAM as-is', () => {
+    expect(vehicleDescFromDecode({ ModelYear: '2021', Make: 'GMC', Model: 'Sierra 2500HD' })).toBe('2021 GMC Sierra 2500HD');
+    expect(vehicleDescFromDecode({ ModelYear: '2019', Make: 'RAM', Model: '2500' })).toBe('2019 RAM 2500');
+  });
+
+  it('omits missing parts without extra whitespace', () => {
+    expect(vehicleDescFromDecode({ ModelYear: '2013', Make: 'FORD', Model: 'F-150', Trim: '' })).toBe('2013 Ford F-150');
+    expect(vehicleDescFromDecode({ Make: 'FORD' })).toBe('Ford');
+  });
+
+  it('returns null when the decode has no useful fields', () => {
+    expect(vehicleDescFromDecode({})).toBeNull();
+    expect(vehicleDescFromDecode(null)).toBeNull();
+    expect(vehicleDescFromDecode({ Trim: 'XLT' })).toBeNull();
   });
 });
 

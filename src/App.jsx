@@ -5,6 +5,7 @@ import { initDraftBoot, newDraft, persistDraftBundle, saveLS, loadLS, stripRc } 
 import { curPeriod } from './lib/stats';
 import { exportCsv, exportBackup } from './lib/exports';
 import { compressImageFile } from './lib/photo';
+import { vinValid, decodeVinInfo } from './lib/vin';
 import { api } from './lib/api';
 import { useAuth } from './hooks/useAuth';
 
@@ -185,6 +186,33 @@ function AuthedApp({ me }) {
     dset({ vin });
     showToast(ok ? 'VIN scanned — check digit OK ✓' : 'VIN scanned — check digit FAILED, verify against the label');
   };
+
+  // ---------- VIN → auto-fill Year / Make / Model ----------
+  // Once a valid 17-char VIN is scanned or typed, decode it (NHTSA vPIC, best-effort)
+  // and fill the vehicle field — but never overwrite text the inspector typed themselves.
+  const autoVehicleRef = useRef({ vin: null, value: null });
+  const draftVin = stage === 'form' ? (draft.vin || '').toUpperCase() : '';
+  useEffect(() => {
+    if (draftVin.length !== 17 || !vinValid(draftVin)) return;
+    if (autoVehicleRef.current.vin === draftVin) return;
+    let cancelled = false;
+    decodeVinInfo(draftVin).then((desc) => {
+      if (cancelled || !desc) return;
+      const prevAuto = autoVehicleRef.current.value;
+      autoVehicleRef.current = { vin: draftVin, value: desc };
+      setDraft((prev) => {
+        const cur = (prev.vehicle || '').trim();
+        if (cur && cur !== prevAuto) return prev; // inspector typed their own — leave it
+        if (cur === desc) return prev;
+        return { ...prev, vehicle: desc };
+      });
+      showToast('Vehicle filled from VIN ✓');
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftVin]);
 
   // ---------- commit original inspection ----------
   const commit = () => {
@@ -428,7 +456,6 @@ function AuthedApp({ me }) {
       <HomeScreen
         recs={recs}
         openRecs={openRecs}
-        nextId={nextId}
         onNewInspection={() => setStage('form')}
         onOpenRecheck={openRecheck}
         onOpenRecord={(id) => { setTab('records'); setViewRec(id); }}
