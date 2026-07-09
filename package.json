@@ -17,6 +17,7 @@
     "@types/express-session": "^1.19.0",
     "@types/memoizee": "^0.4.12",
     "@types/passport": "^1.0.17",
+    "@zxing/library": "^0.21.3",
     "connect-pg-simple": "^10.0.0",
     "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
