@@ -1,0 +1,130 @@
+Upgrade the current Final QC App into a shared employee application.
+
+Do not redesign the app. Preserve the current interface, navigation, inspection questions, workflow, PWA behavior, and existing functionality.
+
+AUTHENTICATION
+
+1. Add Clerk authentication using Replit's managed Clerk integration.
+2. Require every user to sign in before accessing any part of the app.
+3. Only allow verified email addresses ending exactly in:
+
+   @truckranch.com
+
+4. Block Gmail, Outlook, personal emails, and every other email domain.
+5. Require email verification before access is granted.
+6. Enforce the domain restriction on the server, not only in the frontend.
+7. Do not allow users to enter an employee name manually as their identity.
+8. Use the authenticated Clerk user ID as the permanent user identifier.
+9. Save the employee's verified email address and display name in the app.
+10. Add a sign-out button.
+11. Provide a clear unauthorized message if someone attempts to use a non-truckranch.com email.
+
+SHARED DATABASE
+
+1. Add Replit's managed PostgreSQL database.
+2. Move all inspection data out of localStorage and into the database.
+3. All authenticated @truckranch.com users must be able to view all inspections.
+4. Inspections must be shared across all phones, tablets, computers, and browsers.
+5. Do not use localStorage for inspections, numbering, employee identity, or permanent company records.
+6. localStorage may only be used for harmless temporary UI preferences.
+
+INSPECTION ATTRIBUTION
+
+For every inspection, permanently store:
+
+- Unique inspection ID
+- Final QC number
+- Employee's Clerk user ID
+- Employee's verified @truckranch.com email
+- Employee display name
+- Date and time created
+- Date and time last modified
+- User ID, email, and display name of the person who last modified it
+- Inspection status
+- All inspection answers, notes, results, and related data
+
+Display on each inspection:
+
+- Inspected by: employee name
+- Employee email
+- Inspection date and time
+- Last modified by
+- Last modified date and time
+
+NUMBERING AND AUDIT HISTORY
+
+1. Generate Final QC numbers in the database.
+2. Make the number unique so two employees cannot receive the same number.
+3. Use a database transaction or equivalent safe method when generating numbers.
+4. Add an inspection activity-history table.
+5. Record creation, edits, status changes, completion, reopening, and deletion attempts.
+6. Do not allow audit records to be edited or deleted through the normal app interface.
+
+ACCESS RULES
+
+1. Every authenticated @truckranch.com employee can:
+   - View all inspections
+   - Search all inspections
+   - Filter all inspections
+   - Open inspection details
+   - Create a new inspection
+
+2. Preserve the app's current edit and completion behavior.
+3. Any edit must record who made the change and when.
+4. Do not add public registration for other email domains.
+5. Add a basic admin mechanism so a designated admin can deactivate a user without deleting their historical inspection records.
+6. Do not build a complex role system unless required for the existing workflow.
+
+DATA MIGRATION
+
+1. Detect whether the current browser contains inspections in localStorage.
+2. Provide a one-time, clearly labeled import option for an authorized user.
+3. Prevent duplicate imports.
+4. Do not silently import sample, demo, or test records.
+5. Keep the original localStorage data until the import is confirmed successful.
+
+BACKEND AND DEPLOYMENT
+
+1. Add the required backend/API.
+2. Validate all requests on the server.
+3. Do not trust employee IDs, emails, inspection numbers, timestamps, or permissions sent by the browser.
+4. Add database schema and migration files.
+5. Add appropriate request validation and error handling.
+6. Add a health-check endpoint.
+7. Change publishing from Static deployment to Autoscale because the app will now contain server-side authentication and database operations.
+8. Ensure the server listens on 0.0.0.0 and uses the PORT environment variable.
+9. Configure separate development and production database/auth environments correctly.
+10. Do not publish until I approve it.
+
+TESTING
+
+Test all of the following:
+
+- Non-truckranch.com email is rejected
+- Unverified email is rejected
+- Verified truckranch.com employee can sign in
+- Employee A can create an inspection
+- Employee B can see Employee A's inspection
+- The inspection correctly identifies Employee A as the creator
+- Employee B's changes are attributed to Employee B
+- Two simultaneous inspections cannot receive the same QC number
+- Inspections remain after refresh, logout, restart, and a different device login
+- Unauthorized API calls are rejected
+- Existing unit tests still pass
+- Production build succeeds
+
+Before making changes, create a checkpoint.
+
+When finished, report:
+
+1. Files changed
+2. Database tables created
+3. Authentication method used
+4. How the @truckranch.com restriction is enforced
+5. How employee attribution is protected
+6. Test results
+7. Any manual action I must complete
+8. Exact deployment type and commands
+9. Whether it is ready for me to test in Preview
+
+Do not publish the app.
