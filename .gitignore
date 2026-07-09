@@ -1,0 +1,14 @@
+node_modules
+dist
+dev-dist
+.DS_Store
+*.local
+
+# Environment files — never commit real secrets. See .env.example for the template.
+.env
+.env.*
+!.env.example
+
+# Editor/test tooling artifacts
+coverage
+.vitest-cache
