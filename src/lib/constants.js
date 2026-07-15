@@ -10,7 +10,7 @@ export const CATS = [
 ];
 
 export const CHECKLIST = {
-  mech: ['Cold start & idle', 'Brakes — pads & rotors', '4×4 engagement Hi/Lo', 'Fluid leaks', 'Dash warning lights', 'Tires & TPMS', 'HVAC heat & A/C'],
+  mech: ['Cold start & idle', 'Brakes — pads & rotors', '4×4 engagement Hi/Lo', 'Fluid leaks', 'Dash warning lights', 'Tires & TPMS', 'HVAC heat & A/C', 'All exterior lights'],
   cosm: ['Panel paint match', 'Dents / PDR spots', 'Bumper condition', 'Wheel finish', 'Windshield chips'],
   detail: ['Interior surfaces', 'Glass & mirrors inside', 'Engine bay', 'Odor check', 'Carpets & mats'],
   bed: ['Coverage & thickness', 'Tailgate coverage', 'Overspray check'],
