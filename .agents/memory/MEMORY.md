@@ -1,1 +1,2 @@
 - [Express 5 + TS quirks](express5-ts-quirks.md) — no "*" route strings in Express 5; passing middleware arrays breaks TS overload inference, compose into one handler instead.
+- [Deployment port pinning](deploy-port-pinning.md) — .replit [env] forces PORT=5173; prod start script must pin PORT=5000 or the published app is unreachable.
