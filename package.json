@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "NODE_ENV=production PORT=5000 tsx server/index.ts",
     "db:push": "drizzle-kit push",
     "lint": "eslint .",
     "test": "vitest run"
