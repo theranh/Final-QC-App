@@ -1,0 +1,19 @@
+uploads = []
+
+[[generated]]
+id = "jwmM3-s9MB82FasdR2dq7"
+uri = "file://attached_assets/generated_images/final_qc_icon.png"
+type = "image"
+title = "Final QC app icon"
+
+[[generated]]
+id = "c4uQ7daqP2Boq0VKUe3tR"
+uri = "file://attached_assets/generated_images/final_qc_icon2.png"
+type = "image"
+title = "Final QC app icon v2"
+
+[[outputs]]
+id = "9mSNwe1aYYzEKfhjPEh7m"
+uri = "file://public/icon-512.png"
+type = "image"
+title = "Final QC home-screen icon"
