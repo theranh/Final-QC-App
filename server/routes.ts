@@ -242,7 +242,7 @@ export function registerAppRoutes(app: Express) {
       });
 
       // Fire-and-forget: sheet export never blocks or fails the inspection.
-      void exportInspectionToSheet(created, "Finalized");
+      void exportInspectionToSheet(created);
       res.status(201).json({ record: toClientRecord(created), nextQc: await nextQcPreview() });
     } catch (err) {
       next(err);
@@ -339,8 +339,6 @@ export function registerAppRoutes(app: Express) {
             : "Inspection is not open for re-check.";
         return res.status(code).json({ message });
       }
-      // Fire-and-forget: sheet export never blocks or fails the re-check.
-      void exportInspectionToSheet(updated.row!, "Re-check");
       res.json({ record: toClientRecord(updated.row!) });
     } catch (err) {
       next(err);
