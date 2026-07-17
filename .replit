@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "postgresql-16"]
+modules = ["nodejs-20", "postgresql-16", "python-3.11"]
 run = "npm run dev"
 entrypoint = "src/App.jsx"
 hidden = [".config", "node_modules", "dist"]
@@ -48,4 +48,4 @@ waitForPort = 5000
 
 [agent]
 expertMode = true
-integrations = ["javascript_log_in_with_replit:2.0.0", "github:1.0.0"]
+integrations = ["javascript_log_in_with_replit:2.0.0", "github:1.0.0", "google-sheet:1.0.0"]
