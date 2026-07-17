@@ -6,8 +6,8 @@
   "description": "Truck Ranch FRPS Final QC — offline-first vehicle quality-control inspection app",
   "scripts": {
     "dev": "NODE_ENV=development tsx server/index.ts",
-    "build": "vite build",
-    "start": "NODE_ENV=production PORT=5000 tsx server/index.ts",
+    "build": "vite build && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.js",
+    "start": "NODE_ENV=production PORT=5000 node dist-server/index.js",
     "db:push": "drizzle-kit push",
     "lint": "eslint .",
     "test": "vitest run"
@@ -39,6 +39,7 @@
     "@types/pg": "^8.20.0",
     "@vitejs/plugin-react": "^4.3.4",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.1",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.5.3",

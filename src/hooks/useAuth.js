@@ -11,7 +11,9 @@ export function useAuth() {
   const refresh = useCallback(async () => {
     // Retry transient failures (network blips, cold starts, brief 5xx) with
     // backoff before surfacing the error screen. 401 is definitive: signed out.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Autoscale cold starts can take ~10s, so keep trying for ~20s total.
+    const MAX_ATTEMPTS = 6;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const me = await api.me();
         setState({ status: me.access, email: me.email, employee: me.employee });
@@ -21,7 +23,7 @@ export function useAuth() {
           setState({ status: 'signed_out', email: '', employee: null });
           return;
         }
-        if (attempt < 2) await sleep(1000 * (attempt + 1));
+        if (attempt < MAX_ATTEMPTS - 1) await sleep(1000 * Math.min(attempt + 1, 5));
         else setState({ status: 'error', email: '', employee: null });
       }
     }

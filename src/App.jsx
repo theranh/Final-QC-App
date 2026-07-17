@@ -96,7 +96,9 @@ function AuthedApp({ me }) {
     setLoadState('loading');
     // Retry transient failures (network blips, cold starts, brief 5xx) with
     // backoff before surfacing the error screen.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Autoscale cold starts can take ~10s, so keep trying for ~20s total.
+    const MAX_ATTEMPTS = 6;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const data = await api.bootstrap();
         setRecs(data.inspections);
@@ -104,11 +106,11 @@ function AuthedApp({ me }) {
         setLoadState('ready');
         return;
       } catch (err) {
-        if (err.status === 401 || attempt === 2) {
+        if (err.status === 401 || attempt === MAX_ATTEMPTS - 1) {
           setLoadState('error');
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.min(attempt + 1, 5)));
       }
     }
   }, []);

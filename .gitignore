@@ -12,3 +12,4 @@ dev-dist
 # Editor/test tooling artifacts
 coverage
 .vitest-cache
+dist-server/
