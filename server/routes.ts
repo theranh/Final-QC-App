@@ -5,6 +5,7 @@ import { db } from "./db";
 import { auditLog, employees, inspections, qcCounter, type Employee, type Inspection } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
+import { exportInspectionToSheet } from "./googleSheets";
 
 // ---------- helpers ----------
 
@@ -240,6 +241,8 @@ export function registerAppRoutes(app: Express) {
         return row;
       });
 
+      // Fire-and-forget: sheet export never blocks or fails the inspection.
+      void exportInspectionToSheet(created, "Finalized");
       res.status(201).json({ record: toClientRecord(created), nextQc: await nextQcPreview() });
     } catch (err) {
       next(err);
@@ -336,6 +339,8 @@ export function registerAppRoutes(app: Express) {
             : "Inspection is not open for re-check.";
         return res.status(code).json({ message });
       }
+      // Fire-and-forget: sheet export never blocks or fails the re-check.
+      void exportInspectionToSheet(updated.row!, "Re-check");
       res.json({ record: toClientRecord(updated.row!) });
     } catch (err) {
       next(err);
