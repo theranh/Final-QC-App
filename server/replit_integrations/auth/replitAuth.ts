@@ -6,6 +6,7 @@ import session from "express-session";
 import type { Express, RequestHandler } from "express";
 import memoize from "memoizee";
 import connectPg from "connect-pg-simple";
+import { pool } from "../../db";
 import { authStorage } from "./storage";
 
 const getOidcConfig = memoize(
@@ -22,7 +23,9 @@ export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
   const pgStore = connectPg(session);
   const sessionStore = new pgStore({
-    conString: process.env.DATABASE_URL,
+    // Share the app pool (which has an error handler and idle-connection
+    // recycling) instead of an unmanaged private connection.
+    pool,
     createTableIfMissing: false,
     ttl: sessionTtl,
     tableName: "sessions",

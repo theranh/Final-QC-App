@@ -92,16 +92,25 @@ function AuthedApp({ me }) {
   }, []);
 
   // ---------- initial data load (shared database) ----------
-  const loadData = useCallback(() => {
+  const loadData = useCallback(async () => {
     setLoadState('loading');
-    api
-      .bootstrap()
-      .then((data) => {
+    // Retry transient failures (network blips, cold starts, brief 5xx) with
+    // backoff before surfacing the error screen.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await api.bootstrap();
         setRecs(data.inspections);
         setNextQc(data.nextQc);
         setLoadState('ready');
-      })
-      .catch(() => setLoadState('error'));
+        return;
+      } catch (err) {
+        if (err.status === 401 || attempt === 2) {
+          setLoadState('error');
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+      }
+    }
   }, []);
   useEffect(() => {
     loadData();
