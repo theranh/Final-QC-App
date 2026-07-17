@@ -339,6 +339,9 @@ export function registerAppRoutes(app: Express) {
             : "Inspection is not open for re-check.";
         return res.status(code).json({ message });
       }
+      // A clearing re-check means the unit finally passed QC — export it now.
+      // Fire-and-forget: sheet export never blocks or fails the re-check.
+      if (updated.row!.status === "cleared") void exportInspectionToSheet(updated.row!);
       res.json({ record: toClientRecord(updated.row!) });
     } catch (err) {
       next(err);

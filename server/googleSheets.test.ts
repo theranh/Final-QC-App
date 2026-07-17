@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRow } from "./googleSheets";
+import { buildRow, isExportable } from "./googleSheets";
 import type { Inspection } from "@shared/schema";
 
 function fakeRecord(overrides: Partial<Inspection> & { data?: any } = {}): Inspection {
@@ -9,8 +9,8 @@ function fakeRecord(overrides: Partial<Inspection> & { data?: any } = {}): Inspe
     stock: "S1",
     vehicle: "2024 F-150",
     vin: "1FTFW1E81NKD72360",
-    result: "fail",
-    status: "open",
+    result: "pass",
+    status: "pass",
     imported: false,
     createdById: "u1",
     createdByEmail: "a@truckranch.com",
@@ -24,7 +24,7 @@ function fakeRecord(overrides: Partial<Inspection> & { data?: any } = {}): Inspe
       ts: new Date("2026-07-17T12:00:00-05:00").getTime(),
       optOut: { ceramic: true, under: true },
       items: {
-        mech: [{ item: "Cold start & idle", mark: "f" }],
+        mech: [{ item: "Cold start & idle", mark: "p" }],
         cosm: [{ item: "Panel paint match", mark: "p" }],
         detail: [{ item: "Interior surfaces", mark: "p" }],
         bed: [{ item: "Coverage & thickness", mark: "p" }],
@@ -34,8 +34,20 @@ function fakeRecord(overrides: Partial<Inspection> & { data?: any } = {}): Inspe
   } as Inspection;
 }
 
+describe("isExportable (pass-only rule)", () => {
+  it("exports outright passes", () => {
+    expect(isExportable(fakeRecord({ result: "pass", status: "pass" }))).toBe(true);
+  });
+  it("does NOT export failed/open inspections", () => {
+    expect(isExportable(fakeRecord({ result: "fail", status: "open" }))).toBe(false);
+  });
+  it("exports failed inspections once cleared by re-check", () => {
+    expect(isExportable(fakeRecord({ result: "fail", status: "cleared" }))).toBe(true);
+  });
+});
+
 describe("buildRow (VPC tracker mapping)", () => {
-  it("maps VIN, date, category outcomes, QC result, and notes to A..Q", () => {
+  it("fills only VIN, date, K-O, and notes — never formula columns G-J or P", () => {
     const rec = fakeRecord();
     const row = buildRow(rec, new Date((rec.data as any).ts));
     expect(row).toHaveLength(17);
@@ -43,19 +55,17 @@ describe("buildRow (VPC tracker mapping)", () => {
     expect(row[1]).toBeNull(); // B: RO Open Date untouched
     expect(row[2]).toBe("07/17/2026"); // C: Completed Date (Central)
     for (const i of [3, 4, 5, 6, 7, 8, 9]) expect(row[i]).toBeNull(); // D-J untouched
-    expect(row[10]).toBe("Fail"); // K: Mechanic
+    expect(row[10]).toBe("Pass"); // K: Mechanic
     expect(row[11]).toBe("Pass"); // L: Paint & Body
     expect(row[12]).toBe("Pass"); // M: Detail
     expect(row[13]).toBe("N/A"); // N: Undercoat (opted out)
     expect(row[14]).toBe("Pass"); // O: Bedliner
-    expect(row[15]).toBe("Fail"); // P: QC Result
+    expect(row[15]).toBeNull(); // P: QC Result is the sheet's formula — untouched
     expect(row[16]).toBe("FQ-1234"); // Q: Notes carries the FQ number
   });
 
-  it("marks all-pass inspections Pass and missing categories N/A", () => {
+  it("marks categories with no items N/A", () => {
     const rec = fakeRecord({
-      result: "pass",
-      status: "pass",
       data: {
         ts: Date.now(),
         optOut: {},
@@ -65,21 +75,25 @@ describe("buildRow (VPC tracker mapping)", () => {
     const row = buildRow(rec, new Date());
     expect(row[10]).toBe("Pass"); // mech
     expect(row[11]).toBe("N/A"); // cosm absent
-    expect(row[15]).toBe("Pass");
+    expect(row[13]).toBe("N/A"); // under absent
   });
 
-  it("surfaces ceramic-coating fails in the notes column", () => {
+  it("shows Pass for originally-failed categories once cleared, and notes the re-check", () => {
     const rec = fakeRecord({
+      result: "fail",
+      status: "cleared",
       data: {
         ts: Date.now(),
+        clearedTs: Date.now(),
         optOut: {},
         items: {
-          mech: [{ item: "Cold start & idle", mark: "p" }],
-          ceramic: [{ item: "Water bead test", mark: "f" }],
+          mech: [{ item: "Cold start & idle", mark: "f" }],
+          cosm: [{ item: "Panel paint match", mark: "p" }],
         },
       },
     });
     const row = buildRow(rec, new Date());
-    expect(row[16]).toBe("FQ-1234 — Ceramic Coating: Fail");
+    expect(row[10]).toBe("Pass"); // mech failed originally but was repaired & cleared
+    expect(row[16]).toBe("FQ-1234 — Passed after re-check");
   });
 });
