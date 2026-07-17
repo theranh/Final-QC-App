@@ -8,6 +8,7 @@ import { compressImageFile } from './lib/photo';
 import { vinValid, decodeVinInfo } from './lib/vin';
 import { api } from './lib/api';
 import { useAuth } from './hooks/useAuth';
+import useAppUpdate from './hooks/useAppUpdate';
 
 import Header from './components/Header';
 import BottomNav from './components/BottomNav';
@@ -25,6 +26,7 @@ import ReportsScreen from './components/ReportsScreen';
 import PrintReport from './components/PrintReport';
 import SettingsScreen from './components/SettingsScreen';
 import { LoadingScreen, LoginScreen, AccessScreen, ErrorScreen } from './components/AuthScreens';
+import UpdateBanner from './components/UpdateBanner';
 
 export default function App() {
   const auth = useAuth();
@@ -38,6 +40,7 @@ export default function App() {
 }
 
 function AuthedApp({ me }) {
+  const { updateReady, applyUpdate } = useAppUpdate();
   const [boot] = useState(() => initDraftBoot());
 
   // The signed-in employee IS the inspector — identity comes from Replit Auth,
@@ -499,6 +502,7 @@ function AuthedApp({ me }) {
   return (
     <div className="app-shell">
       <div className="app-frame">
+        {updateReady && <UpdateBanner onRefresh={applyUpdate} />}
         <Header tab={tab} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}

@@ -13,7 +13,7 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       includeAssets: ['favicon.svg'],
       manifest: {
         name: 'Truck Ranch — Final QC',
