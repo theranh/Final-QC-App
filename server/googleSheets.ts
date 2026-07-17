@@ -11,7 +11,7 @@
 //   G–J: sheet formulas   K: Mechanic           L: Paint & Body
 //   M: Detail             N: Undercoat          O: Bedliner
 //   P: QC Result (sheet formula)                Q: Notes
-// The app only fills A, C, K–O, and Q. It NEVER writes G–J or P (those hold
+// The app only fills A, C, D, K–O, and Q. It NEVER writes G–J or P (those hold
 // the sheet's own formulas) and never inserts rows — it updates the next
 // pre-formatted empty row in place, so every formula stays intact.
 //
@@ -104,12 +104,13 @@ function categoryOutcome(record: Inspection, key: string): string {
 
 /**
  * Cell values for A..Q — null cells are skipped by the Sheets API and stay
- * untouched (B, D–F manual; G–J and P are the sheet's own formulas).
+ * untouched (B, E–F manual; G–J and P are the sheet's own formulas).
  */
 export function buildRow(record: Inspection, finalized: Date): (string | null)[] {
   const row: (string | null)[] = new Array(17).fill(null);
   row[0] = record.vin; // A: VIN
   row[2] = DATE_FMT.format(finalized); // C: Completed Date
+  row[3] = DATE_FMT.format(finalized); // D: Picture Received — same date QC passed
   CATEGORY_COLUMNS.forEach((cat, i) => {
     row[10 + i] = categoryOutcome(record, cat.key); // K..O
   });

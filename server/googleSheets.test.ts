@@ -47,14 +47,15 @@ describe("isExportable (pass-only rule)", () => {
 });
 
 describe("buildRow (VPC tracker mapping)", () => {
-  it("fills only VIN, date, K-O, and notes — never formula columns G-J or P", () => {
+  it("fills only VIN, dates, K-O, and notes — never formula columns G-J or P", () => {
     const rec = fakeRecord();
     const row = buildRow(rec, new Date((rec.data as any).ts));
     expect(row).toHaveLength(17);
     expect(row[0]).toBe(rec.vin); // A: VIN
     expect(row[1]).toBeNull(); // B: RO Open Date untouched
     expect(row[2]).toBe("07/17/2026"); // C: Completed Date (Central)
-    for (const i of [3, 4, 5, 6, 7, 8, 9]) expect(row[i]).toBeNull(); // D-J untouched
+    expect(row[3]).toBe("07/17/2026"); // D: Picture Received — auto-filled with QC pass date
+    for (const i of [4, 5, 6, 7, 8, 9]) expect(row[i]).toBeNull(); // E-J untouched
     expect(row[10]).toBe("Pass"); // K: Mechanic
     expect(row[11]).toBe("Pass"); // L: Paint & Body
     expect(row[12]).toBe("Pass"); // M: Detail
