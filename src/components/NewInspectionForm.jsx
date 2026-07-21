@@ -3,9 +3,14 @@ import { initials } from '../lib/format';
 import { vinValid } from '../lib/vin';
 import PhotoRow from './PhotoRow';
 
-export default function NewInspectionForm({ draft, onDraftChange, users, optOut, onToggleOptOut, photosMap, onTakePhoto, onRemovePhoto, onScanVin, onClose, onGoSettings, onStart, nextId }) {
+export default function NewInspectionForm({ draft, onDraftChange, users, optOut, onToggleOptOut, photosMap, onTakePhoto, onRemovePhoto, onScanVin, onClose, onGoSettings, onStart, nextId, openRecs = [], onOpenRecheck }) {
   const vin = (draft.vin || '').toUpperCase();
   const vinOk = vinValid(vin);
+
+  // Guard against a duplicate QC: if this VIN already has a failed inspection
+  // with an open re-check, the right move is to finish that re-check instead.
+  const openMatch =
+    vin.length >= 8 ? openRecs.find((r) => (r.vin || '').toUpperCase().startsWith(vin) || vin.startsWith((r.vin || '').toUpperCase())) : null;
   const vinPhotos = photosMap['vin'] || [];
   const insp = users.find((u) => u.id === draft.uid) || users[0];
 
@@ -49,6 +54,24 @@ export default function NewInspectionForm({ draft, onDraftChange, users, optOut,
         <span className="mono" style={{ fontSize: 11, color: 'var(--muted)', flex: '0 0 auto' }}>{nextId}</span>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>
+        {openMatch && (
+          <div className="card" style={{ border: '1.5px solid var(--red)', background: '#FBEFEF' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>⚠ THIS UNIT HAS AN OPEN RE-CHECK</div>
+            <div style={{ fontSize: 11.5, marginTop: 6, lineHeight: 1.45 }}>
+              {openMatch.qcNumber || openMatch.id} — {openMatch.vehicle || 'this vehicle'} failed QC and is waiting on a re-check.
+              Don&apos;t start a new QC for it — finish the re-check so the fixed items are cleared on the original record.
+            </div>
+            {onOpenRecheck && (
+              <div
+                className="btn btn-red"
+                style={{ marginTop: 9, height: 40, fontSize: 12 }}
+                onClick={() => onOpenRecheck(openMatch.id)}
+              >
+                Open the re-check instead →
+              </div>
+            )}
+          </div>
+        )}
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <span className="card-title" style={{ flex: 1 }}>STEP 1 — VIN · PRIMARY ID</span>

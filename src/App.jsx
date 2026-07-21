@@ -404,6 +404,8 @@ function AuthedApp({ me }) {
         onGoSettings={() => { setTab('settings'); setStage(null); }}
         onStart={() => setStage('sheet')}
         nextId={nextId}
+        openRecs={openRecs}
+        onOpenRecheck={openRecheck}
       />
     );
   } else if (stage === 'sheet') {
