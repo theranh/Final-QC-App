@@ -61,6 +61,10 @@ export function parseBackupFile(file) {
     rd.onload = () => {
       try {
         const data = JSON.parse(rd.result);
+        if (isOldReconRecord(data && data[0]) || isOldReconRecord(data && data.inspections && data.inspections[0])) {
+          resolve({ oldRecon: true, records: Array.isArray(data) ? data : data.inspections });
+          return;
+        }
         if (!data || !Array.isArray(data.inspections) || !Array.isArray(data.users)) throw new Error('bad');
         resolve(data);
       } catch {
@@ -70,4 +74,76 @@ export function parseBackupFile(file) {
     rd.onerror = () => reject(new Error('Could not read that file'));
     rd.readAsText(file);
   });
+}
+
+// ---------- old "Truck Recon Checklist" app (truck-recon-checklist Repl) ----------
+// That app stored records on-device as an array of:
+//   { id, stockNumber, mileage, truckInfo:{year,make,model,vin}, inspector, notes,
+//     status: 'in-progress'|'passed'|'failed', createdAt, completedAt,
+//     checklist: [{ category, label, checked, failed, deferred, note, photos }] }
+
+function isOldReconRecord(r) {
+  return !!(r && typeof r === 'object' && r.truckInfo && Array.isArray(r.checklist));
+}
+
+// Old category names -> this app's category keys. Anything unrecognized lands in
+// Mechanical so no failed item is ever dropped from the record.
+function oldCatToKey(cat) {
+  const c = String(cat || '').toLowerCase();
+  if (/cosm|paint|body|exterior|glass/.test(c)) return 'cosm';
+  if (/detail|interior|odor|clean/.test(c)) return 'detail';
+  if (/bed/.test(c)) return 'bed';
+  if (/ceramic|coat/.test(c)) return 'ceramic';
+  if (/under/.test(c)) return 'under';
+  return 'mech'; // Mechanical, Electrical, Road Test, etc.
+}
+
+const isPortablePhoto = (p) => typeof p === 'string' && p.startsWith('data:') && p.length <= 2_000_000;
+
+// Convert old-app records into this app's import payload. Only completed
+// inspections with a usable date are converted (in-progress drafts have nothing
+// final to record). FQ numbers are NOT assigned here — the server allocates them
+// atomically on import so they can never collide with other inspections.
+export function convertOldReconBackup(records) {
+  const usableTs = (r) => new Date(r.completedAt || r.createdAt || NaN).getTime();
+  const done = records
+    .filter((r) => isOldReconRecord(r) && (r.status === 'passed' || r.status === 'failed') && Number.isFinite(usableTs(r)) && usableTs(r) > 0)
+    .sort((a, b) => usableTs(a) - usableTs(b));
+  const skipped = records.length - done.length;
+  const inspections = done.map((r) => {
+    const items = { mech: [], cosm: [], detail: [], bed: [], ceramic: [], under: [] };
+    let checked = 0;
+    let failCount = 0;
+    (r.checklist || []).forEach((ci) => {
+      const mark = ci.failed ? 'f' : ci.checked ? 'p' : 'n';
+      if (mark !== 'n') checked++;
+      const it = { item: ci.label || 'Item', mark };
+      if (mark === 'f') {
+        failCount++;
+        it.note = (ci.note || '').trim();
+        it.photos = (ci.photos || []).filter(isPortablePhoto).slice(0, 12);
+      }
+      items[oldCatToKey(ci.category)].push(it);
+    });
+    const t = r.truckInfo || {};
+    const failed = r.status === 'failed';
+    return {
+      ts: usableTs(r),
+      stock: String(r.stockNumber || '').trim(),
+      vehicle: [t.year, t.make, t.model].filter(Boolean).join(' '),
+      vin: String(t.vin || '').trim().toUpperCase().slice(0, 17),
+      result: failed ? 'fail' : 'pass',
+      status: failed ? 'open' : 'pass',
+      items,
+      checked,
+      failCount,
+      optOut: {},
+      sig: null,
+      inspector: r.inspector || '',
+      generalNote: (r.notes || '').trim() || undefined,
+      mileage: r.mileage || undefined,
+      legacyApp: 'truck-recon-checklist',
+    };
+  });
+  return { inspections, skippedInProgress: skipped };
 }

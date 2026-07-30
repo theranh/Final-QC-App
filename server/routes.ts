@@ -91,7 +91,9 @@ const importSchema = z.object({
     .array(
       z
         .object({
-          id: z.string().regex(/^FQ-\d{1,7}$/),
+          // Backups from this app carry their FQ number; converted backups from
+          // the old Truck Recon Checklist app omit it and the server assigns one.
+          id: z.string().regex(/^FQ-\d{1,7}$/).optional(),
           ts: z.number().int().positive(),
           stock: z.string().max(120).default(""),
           vehicle: z.string().max(200).default(""),
@@ -378,7 +380,17 @@ export function registerAppRoutes(app: Express) {
 
       await db.transaction(async (tx) => {
         for (const rec of body.inspections) {
-          const { id, ts, stock, vehicle, vin, result, status, ...rest } = rec as any;
+          let { id } = rec as any;
+          const { ts, stock, vehicle, vin, result, status, ...rest } = rec as any;
+          delete rest.id;
+          if (!id) {
+            // Legacy record without an FQ number — allocate one atomically so it
+            // can never collide with concurrent inspections or other imports.
+            const counterRes = await tx.execute(
+              sql`UPDATE qc_counter SET value = value + 1 WHERE id = 1 RETURNING value`
+            );
+            id = `FQ-${Number((counterRes.rows[0] as any).value)}`;
+          }
           const [row] = await tx
             .insert(inspections)
             .values({

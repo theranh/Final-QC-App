@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CATS } from '../lib/constants';
 import { initials, fmtDT } from '../lib/format';
 import { loadLegacyData, hasLegacyData, markLegacyImported, legacyImportDone } from '../lib/storage';
-import { parseBackupFile } from '../lib/exports';
+import { parseBackupFile, convertOldReconBackup } from '../lib/exports';
 import { api } from '../lib/api';
 
 const STATUS_META = {
@@ -96,6 +96,17 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
   const onImportFile = (file) => {
     parseBackupFile(file)
       .then((data) => {
+        if (data.oldRecon) {
+          const { inspections, skippedInProgress } = convertOldReconBackup(data.records);
+          if (!inspections.length) {
+            showToast('No completed inspections found in that file' + (skippedInProgress ? ` (${skippedInProgress} unfinished/unreadable skipped)` : ''));
+            return;
+          }
+          const extra = skippedInProgress ? `\n${skippedInProgress} unfinished or unreadable inspection${skippedInProgress === 1 ? '' : 's'} will be skipped.` : '';
+          if (!window.confirm(`This looks like a backup from the old Truck Recon Checklist app.\nImport ${inspections.length} completed inspection${inspections.length === 1 ? '' : 's'}? Each gets a new FQ number automatically.${extra}\nNothing already in the database is overwritten.`)) return;
+          runImport({ inspections }, 'file');
+          return;
+        }
         if (!window.confirm(`Import ${data.inspections.length} inspection${data.inspections.length === 1 ? '' : 's'} from this backup into the shared database?\nRecords already in the database are skipped — nothing is overwritten.`)) return;
         runImport({ inspections: data.inspections, seq: data.seq }, 'file');
       })
