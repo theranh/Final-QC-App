@@ -379,11 +379,25 @@ export function registerAppRoutes(app: Express) {
       let skipped = 0;
 
       await db.transaction(async (tx) => {
+        // For legacy records (no FQ number), duplicates are recognized by
+        // VIN + original timestamp of previously imported records — re-importing
+        // the same old-app file must not create a second copy.
+        const seenRes = await tx.execute(
+          sql`SELECT vin, data->>'ts' AS ts FROM inspections WHERE imported = true`
+        );
+        const seen = new Set((seenRes.rows as any[]).map((r) => `${r.vin}|${r.ts}`));
+
         for (const rec of body.inspections) {
           let { id } = rec as any;
           const { ts, stock, vehicle, vin, result, status, ...rest } = rec as any;
           delete rest.id;
           if (!id) {
+            const key = `${(vin || "").toUpperCase()}|${ts}`;
+            if (seen.has(key)) {
+              skipped++;
+              continue;
+            }
+            seen.add(key);
             // Legacy record without an FQ number — allocate one atomically so it
             // can never collide with concurrent inspections or other imports.
             const counterRes = await tx.execute(
