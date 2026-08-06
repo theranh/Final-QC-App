@@ -1,6 +1,7 @@
 import { CATS, CHECKLIST, OPTIONAL_CATS, catByKey, chipStyle } from '../lib/constants';
 import { initials } from '../lib/format';
 import { vinValid } from '../lib/vin';
+import IntakeQuoteCard from './IntakeQuoteCard';
 import PhotoRow from './PhotoRow';
 
 export default function NewInspectionForm({ draft, onDraftChange, users, optOut, onToggleOptOut, photosMap, onTakePhoto, onRemovePhoto, onScanVin, onClose, onGoSettings, onStart, nextId, openRecs = [], onOpenRecheck }) {
@@ -119,6 +120,8 @@ export default function NewInspectionForm({ draft, onDraftChange, users, optOut,
             <input className="input" value={draft.vehicle} onChange={(e) => onDraftChange({ vehicle: e.target.value })} placeholder="2021 F-150 XLT" />
           </div>
         </div>
+
+        <IntakeQuoteCard vin={vin} />
 
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center' }}>
