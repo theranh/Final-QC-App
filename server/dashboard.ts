@@ -5,6 +5,7 @@ import { inspections, type Inspection } from "@shared/schema";
 import { desc } from "drizzle-orm";
 import { requireEmployee } from "./access";
 import { monthTabName, readTrackerRange } from "./googleSheets";
+import { lookupQuoteByVin } from "./intakeQuote";
 
 // Read-only aggregate feed for the VPC live dashboard. One endpoint, three
 // sources: the inspections table, the Body Quoter (per-VIN quote lookups via
@@ -91,37 +92,22 @@ function quoterConfig(): { base: string; key: string } | null {
 async function fetchQuote(vin: string): Promise<IntakeSummary> {
   const hit = quoteCache.get(vin);
   if (hit && Date.now() - hit.at < QUOTE_CACHE_MS) return hit.body;
-  const cfg = quoterConfig();
-  if (!cfg) return { found: false };
-  try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 8000);
-    try {
-      const r = await fetch(`${cfg.base}/api/quote-by-vin?vin=${encodeURIComponent(vin)}`, {
-        headers: { "x-fleet-key": cfg.key },
-        signal: ctl.signal,
-      });
-      if (!r.ok) return { found: false };
-      const d: any = await r.json();
-      const body: IntakeSummary = d?.found
-        ? {
-            found: true,
-            estimator: d.estimator,
-            stock: d.stock,
-            quotedAt: d.quotedAt,
-            totals: { hrs: d.totals?.hrs, usd: d.totals?.usd },
-            lineCount: Array.isArray(d.lines) ? d.lines.length : d.lineCount,
-          }
-        : { found: false };
-      quoteCache.set(vin, { at: Date.now(), body });
-      if (quoteCache.size > 1000) quoteCache.delete(quoteCache.keys().next().value as string);
-      return body;
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return { found: false };
-  }
+  // Shared lookup + 60s cache in intakeQuote.ts (same FLEET_KEY code path the
+  // per-VIN card uses); this layer only trims the payload for the dashboard.
+  const d: any = await lookupQuoteByVin(vin);
+  const body: IntakeSummary = d?.found
+    ? {
+        found: true,
+        estimator: d.estimator,
+        stock: d.stock,
+        quotedAt: d.quotedAt,
+        totals: { hrs: d.totals?.hrs, usd: d.totals?.usd },
+        lineCount: Array.isArray(d.lines) ? d.lines.length : d.lineCount,
+      }
+    : { found: false };
+  quoteCache.set(vin, { at: Date.now(), body });
+  if (quoteCache.size > 1000) quoteCache.delete(quoteCache.keys().next().value as string);
+  return body;
 }
 
 async function fetchQuotes(vins: string[]): Promise<Map<string, IntakeSummary>> {
@@ -286,17 +272,32 @@ export async function buildPayload(): Promise<unknown> {
   let summary: Record<string, number> = { completed: 0, retailPlan: 0, closedRO: 0, variance: 0, claimsApproved: 0 };
   let trackerByVin = new Map<string, TrackerRow>();
   try {
-    const tab = monthTabName(new Date());
-    const [summaryRows, vehicleRows] = await withTimeout(
+    // Current month's tab drives the summary block; vehicle rows come from the
+    // current AND previous month's tabs (today: "Aug 2026" and "Jul 2026") so
+    // trucks finished late last month still show their tracker columns.
+    const now = new Date();
+    const curTab = monthTabName(now);
+    const prev = new Date(now);
+    prev.setDate(0); // last day of previous month
+    const prevTab = monthTabName(prev);
+    const [summaryRows, curRows, prevRows] = await withTimeout(
       Promise.all([
-        readTrackerRange(tab, "A1:H19"),
-        readTrackerRange(tab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`),
+        readTrackerRange(curTab, "A1:H19"),
+        readTrackerRange(curTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`),
+        readTrackerRange(prevTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`).catch((err) => {
+          // A missing previous-month tab must not take down the feed.
+          console.error(`Dashboard: could not read tab "${prevTab}":`, err?.message || err);
+          return null;
+        }),
       ]),
       SHEETS_TIMEOUT_MS,
       "Tracker sheet read"
     );
     summary = parseSummary(summaryRows);
-    trackerByVin = parseVehicleRows(vehicleRows);
+    // Current month's rows first: parseVehicleRows keeps the first occurrence,
+    // so a repeat VIN prefers its current-month row.
+    const combined = [...(curRows || []), ...(prevRows || [])];
+    trackerByVin = parseVehicleRows(combined.length ? combined : null);
   } catch (err: any) {
     console.error("Dashboard: tracker sheet read failed:", err?.message || err);
   }
