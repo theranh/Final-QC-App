@@ -1,13 +1,12 @@
 ---
-name: gitPush INDEX_LOCKED
-description: The gitPush callback repeatedly fails with INDEX_LOCKED in this repl even when no .git lock file exists.
+name: gitPush INDEX_LOCKED / BRANCH_ALREADY_EXISTS
+description: How to unstick agent git pushes that fail with INDEX_LOCKED or BRANCH_ALREADY_EXISTS.
 ---
 
-The `gitPush` callback returns `CLI_ERROR: INDEX_LOCKED` persistently (across sessions, many retries over minutes), while:
-- no `.git/index.lock` exists in the workspace,
-- the working tree is clean and the remote commit is an ancestor (fast-forward would be fine),
-- direct `git push` from the shell fails auth (credentials only exist in the platform git service).
+`gitPush` (and the Git pane) can fail with `INDEX_LOCKED` even when `.git/index.lock` is absent.
 
-**Why:** the lock appears to live on the platform's git service side, not in the workspace `.git`; local cleanup and waiting do not clear it.
+**Why:** the stale lock was `.git/refs/remotes/origin/main.lock` (leftover from a crashed git action) — search `find .git -name "*.lock"`, not just the index lock. After removing it, `gitPush` may then fail with `BRANCH_ALREADY_EXISTS` if the local branch has no upstream tracking; it apparently tries to create the remote branch.
 
-**How to apply:** after 2–3 failed gitPush retries, stop retrying and tell the user to push from the Git pane (one-click Push works for them). Local commits are safe; only the transport is blocked.
+**How to apply:**
+1. `find .git -name "*.lock"` — if no git process is running (`ps aux | grep git`), delete the stale lock.
+2. If push then reports BRANCH_ALREADY_EXISTS, set tracking without network: `git config branch.main.remote origin && git config branch.main.merge refs/heads/main`, then `gitPush({})` succeeds.
