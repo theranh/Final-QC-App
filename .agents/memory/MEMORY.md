@@ -1,4 +1,5 @@
 - [Express 5 + TS quirks](express5-ts-quirks.md) — no "*" route strings in Express 5; passing middleware arrays breaks TS overload inference, compose into one handler instead.
 - [Deployment port pinning](deploy-port-pinning.md) — .replit [env] forces PORT=5173; prod start script must pin PORT=5000 or the published app is unreachable.
 - [Old Recon import](old-recon-import.md) — legacy Expo app data lives on-device only; export must come from the old Repl; import here auto-converts, server assigns FQ numbers.
+- [gitPush INDEX_LOCKED](git-push-index-locked.md) — agent-side push fails with a platform git lock; after a few retries, have the user push from the Git pane instead.
 - [Google Sheets export](google-sheets-export.md) — Replit Sheets connector is read-only; writes need a service-account secret, and only columns A, C, D, K–O, Q may be filled (D auto-fills QC-pass date) in the VPC tracker.
