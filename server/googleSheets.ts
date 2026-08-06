@@ -173,6 +173,26 @@ async function targetRow(
 }
 
 /**
+ * Read-only helper for the live dashboard: fetch a range from the tracker
+ * spreadsheet. Returns null when Sheets isn't configured; throws on API errors
+ * (callers decide how to degrade).
+ */
+export async function readTrackerRange(tab: string, rangeA1: string): Promise<string[][] | null> {
+  const cfg = config();
+  if (!cfg) return null;
+  const token = await accessToken(cfg.creds);
+  const range = encodeURIComponent(`'${tab}'!${rangeA1}`);
+  const res = await fetch(`${SHEETS_API}/${cfg.spreadsheetId}/values/${range}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Reading tab "${tab}" failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  return (await res.json()).values || [];
+}
+
+/** Exported for the dashboard: monthly tab name for a date, e.g. "Aug 2026". */
+export { monthTabName };
+
+/**
  * Export a passed/cleared inspection as a vehicle row on the matching monthly
  * tab, updating the next empty pre-formatted row in place (no row insertion).
  * Fire-and-forget: call without awaiting from route handlers; never throws.

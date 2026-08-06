@@ -1,5 +1,6 @@
 import express from "express";
 import http from "http";
+import path from "path";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
@@ -27,6 +28,13 @@ async function main() {
     }
     res.status(500).json({ message: "Internal server error" });
   });
+
+  // Live VPC dashboard — a single self-contained page, gated behind the same
+  // Replit Auth login so its /api/dashboard polls always carry a session.
+  const { isAuthenticated } = await import("./replit_integrations/auth");
+  app.get("/dashboard", isAuthenticated, (_req, res) =>
+    res.sendFile(path.resolve(import.meta.dirname, "..", "public", "VPC-Dashboard.html"))
+  );
 
   const server = http.createServer(app);
 

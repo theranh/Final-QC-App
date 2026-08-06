@@ -7,6 +7,7 @@ import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { exportInspectionToSheet } from "./googleSheets";
 import { registerIntakeQuoteRoute } from "./intakeQuote";
+import { registerDashboardRoute } from "./dashboard";
 
 // ---------- helpers ----------
 
@@ -111,6 +112,7 @@ const importSchema = z.object({
 
 export function registerAppRoutes(app: Express) {
   registerIntakeQuoteRoute(app);
+  registerDashboardRoute(app);
 
   app.get("/api/health", async (_req, res) => {
     try {
