@@ -104,6 +104,7 @@ function AuthedApp({ me }) {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const data = await api.bootstrap();
+        dataGenRef.current++;
         setRecs(data.inspections);
         setNextQc(data.nextQc);
         setLoadState('ready');
@@ -120,6 +121,46 @@ function AuthedApp({ me }) {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // ---------- background refresh (keeps all devices in sync) ----------
+  // Silently refetch shared data so inspections entered on other devices show
+  // up without a manual reload. Runs every 30s while the tab is visible, plus
+  // immediately when the tab regains focus/visibility. Never touches drafts
+  // (device-local) and never flips the loading/error screens.
+  const refreshInFlightRef = useRef(false);
+  const dataGenRef = useRef(0); // bumped on every local mutation so stale refreshes are discarded
+  const refreshData = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (refreshInFlightRef.current) return; // single-flight: no overlapping refreshes
+    refreshInFlightRef.current = true;
+    const gen = dataGenRef.current;
+    try {
+      const data = await api.bootstrap();
+      // If a save/re-check/import landed while this fetch was in flight, its
+      // result is newer than this snapshot — drop it; the next tick refetches.
+      if (gen !== dataGenRef.current) return;
+      setRecs(data.inspections);
+      setNextQc(data.nextQc);
+    } catch {
+      // Silent: transient network blips shouldn't disturb the UI; the next
+      // tick or focus event will retry.
+    } finally {
+      refreshInFlightRef.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    const id = setInterval(refreshData, 30000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshData();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', refreshData);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', refreshData);
+    };
+  }, [refreshData]);
 
   // ---------- draft persistence (device-local scratch space only) ----------
   useEffect(() => {
@@ -263,6 +304,7 @@ function AuthedApp({ me }) {
     api
       .createInspection(payload)
       .then(({ record, nextQc: nq }) => {
+        dataGenRef.current++;
         setRecs((prev) => [record, ...prev]);
         setNextQc(nq);
         saveLS('draft', null);
@@ -330,6 +372,7 @@ function AuthedApp({ me }) {
     api
       .commitRecheck(r.id, { sig: rcSigRef.current ? rcSigRef.current.toDataURL() : null, items: cycleItems })
       .then(({ record }) => {
+        dataGenRef.current++;
         setRecs((prev) => prev.map((x) => (x.id === record.id ? record : x)));
         const still = (record.openItems || []).length;
         const msg = still ? `${record.id} re-check committed — ${still} item${still === 1 ? '' : 's'} still open` : `${record.id} cleared — PASS on re-check ✓`;
