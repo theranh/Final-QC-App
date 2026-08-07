@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile } from '../lib/photo';
 import VinScanner from './VinScanner';
+import WalkAroundCamera from './WalkAroundCamera';
 import PinDialog, { SignatureBadge } from './PinDialog';
 import {
   PANELS, DAMAGE, SEVS, PARTS,
@@ -61,6 +62,21 @@ function scaleImage(file, max, q) {
   });
 }
 
+function thumbFromDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.min(1, 340 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * r)); c.height = Math.max(1, Math.round(img.height * r));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 export default function QuoteScreen({ prefill, onClose, showToast }) {
   const [rates, setRates] = useState(() => defaultRates());
   const corrCacheRef = useRef([]);
@@ -85,6 +101,10 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   const [lines, setLines] = useState([]);
   // photos not yet analyzed: { id, thumb, base64, dataUrl }
   const [photos, setPhotos] = useState([]);
+  const [walkOpen, setWalkOpen] = useState(false);
+  const [walkInitialMode, setWalkInitialMode] = useState('guided');
+  const [armedDelete, setArmedDelete] = useState(null);
+  useEffect(() => { if (committed) setWalkOpen(false); }, [committed]);
 
   const linesRef = useRef(lines);
   linesRef.current = lines;
@@ -203,6 +223,7 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
 
   // ---------- damage photo capture ----------
   const addDamageFiles = async (ev) => {
+    if (committed) return;
     const list = ev.target.files ? [...ev.target.files] : [];
     ev.target.value = '';
     if (!list.length) return;
@@ -223,8 +244,27 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   };
 
   const removePhoto = (id) => {
+    if (committed) return;
+    if (armedDelete !== id) {
+      setArmedDelete(id);
+      setTimeout(() => setArmedDelete((v) => (v === id ? null : v)), 3000);
+      showToast && showToast('Tap again to delete this damage photo');
+      return;
+    }
+    setArmedDelete(null);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
     api.deleteQuotePhoto({ id }).catch(() => {});
+  };
+
+  const addDamageDataUrl = async (dataUrl) => {
+    if (committed) return;
+    const qid = ensureQuoteId();
+    const id = newId('w');
+    const thumb = await thumbFromDataUrl(dataUrl);
+    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl }]);
+    api.putQuotePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl }).catch((e) => {
+      showToast && showToast(e.status === 413 ? 'Photo is too large.' : e.status === 409 ? 'This quote is committed.' : 'Photo could not be saved.');
+    });
   };
 
   // ---------- analyze pipeline ----------
@@ -471,7 +511,11 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
           <PhotosStep
             photos={photos}
             lineCount={lines.length}
+            committed={!!committed}
+            armedDelete={armedDelete}
             onAdd={() => fileRef.current && fileRef.current.click()}
+            onWalk={() => { ensureQuoteId(); setWalkInitialMode('guided'); setWalkOpen(true); }}
+            onDamage={() => { ensureQuoteId(); setWalkInitialMode('damage'); setWalkOpen(true); }}
             onRemove={removePhoto}
             onAnalyze={startAnalyze}
             onBack={() => setStep('confirm')}
@@ -522,6 +566,16 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
           subtitle={vin ? `${vin} · ${vehicleText || 'vehicle'}` : (vehicleText || '')}
           onCommit={doCommit}
           onClose={() => setPinOpen(false)}
+        />
+      )}
+      {walkOpen && (
+        <WalkAroundCamera
+          quoteId={ensureQuoteId()}
+          committed={!!committed}
+          initialMode={walkInitialMode}
+          onClose={() => setWalkOpen(false)}
+          onDamageCapture={addDamageDataUrl}
+          showToast={showToast}
         />
       )}
 
@@ -631,17 +685,23 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 }
 
 /* ---------- photos step ---------- */
-function PhotosStep({ photos, lineCount, onAdd, onRemove, onAnalyze, onBack, onSeeQuote }) {
+function PhotosStep({ photos, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
   return (
     <>
       <div className="card">
-        <div className="card-title">DAMAGE PHOTOS</div>
+        <div className="card-title">WALK-AROUND PHOTOS · {photos.length}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
-          One photo per damage area. Each photo becomes a quote line.
+          Circle the truck and shoot everything — sides, corners, interior, wheels. Photos save automatically as you go.
         </div>
-        <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onAdd}>
-          📷 Add damage photo
-        </button>
+        {!committed && <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onWalk}>📷 TAKE PHOTOS</button>}
+      </div>
+      <div className="card">
+        <div className="card-title">DAMAGE FOR THE QUOTE · {photos.length}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
+          Found damage? Take a close-up of each spot — these go to the AI for the body quote.
+        </div>
+        {!committed && <><button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onDamage}>⚠ ADD DAMAGE CLOSE-UP</button>
+          <button className="btn btn-outline-brown" style={{ marginTop: 8 }} onClick={onAdd}>Choose from device</button></>}
         {photos.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
             {photos.map((p) => (
@@ -651,7 +711,7 @@ function PhotosStep({ photos, lineCount, onAdd, onRemove, onAnalyze, onBack, onS
                   onClick={() => onRemove(p.id)}
                   style={{ position: 'absolute', top: 3, right: 3, width: 22, height: 22, borderRadius: 6, background: 'rgba(38,34,32,0.7)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, cursor: 'pointer' }}
                 >
-                  ✕
+                   {armedDelete === p.id ? 'TAP AGAIN' : '✕'}
                 </div>
               </div>
             ))}
