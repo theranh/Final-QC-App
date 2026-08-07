@@ -111,11 +111,19 @@ function selectRows(table: any) {
   return [];
 }
 
-function fakeSelect() {
+function fakeSelect(fields?: any) {
   let rows: any[] = [];
   const b: any = {
     from: (t: any) => {
       rows = selectRows(t);
+      // /api/backup-status: select({ at }) filtered to "exported", newest first.
+      if (tableName(t) === "audit_log" && fields && "at" in fields) {
+        rows = H.audits
+          .filter((a) => a.action === "exported")
+          .slice()
+          .sort((a, b2) => new Date(b2.at).getTime() - new Date(a.at).getTime())
+          .map((a) => ({ at: new Date(a.at) }));
+      }
       return b;
     },
     where: () => b,
@@ -205,7 +213,7 @@ function fakeInsert(table: any) {
 
 const fakeDb: any = {
   execute: async (q: any) => fakeExecute(q),
-  select: () => fakeSelect(),
+  select: (fields?: any) => fakeSelect(fields),
   insert: fakeInsert,
   update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
   transaction: async (fn: any) => fn(fakeDb),
@@ -406,6 +414,34 @@ describe("GET /api/export", () => {
   it("is admin-only", async () => {
     H.adminMode = false;
     const r = await realFetch(`${base}/api/export`);
+    expect(r.status).toBe(403);
+  });
+});
+
+describe("GET /api/backup-status", () => {
+  const seedAudit = (action: string, at: Date) =>
+    H.audits.push({ action, at, actorId: "u1", actorEmail: "admin@truckranch.com", actorName: "Test Admin" });
+
+  it("returns null when no export has ever happened", async () => {
+    seedAudit("created", new Date("2026-08-01T10:00:00Z")); // other actions don't count
+    const r = await realFetch(`${base}/api/backup-status`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ lastExportAt: null });
+  });
+
+  it("returns the newest 'exported' timestamp when several exist", async () => {
+    seedAudit("exported", new Date("2026-08-01T08:00:00Z"));
+    seedAudit("exported", new Date("2026-08-05T12:30:00Z")); // newest
+    seedAudit("exported", new Date("2026-08-03T09:15:00Z"));
+    seedAudit("created", new Date("2026-08-06T00:00:00Z")); // newer, but not an export
+    const r = await realFetch(`${base}/api/backup-status`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ lastExportAt: "2026-08-05T12:30:00.000Z" });
+  });
+
+  it("is admin-only", async () => {
+    H.adminMode = false;
+    const r = await realFetch(`${base}/api/backup-status`);
     expect(r.status).toBe(403);
   });
 });
