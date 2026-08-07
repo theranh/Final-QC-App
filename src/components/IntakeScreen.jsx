@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import QuoteScreen from './QuoteScreen';
 import PinDialog, { SignatureBadge } from './PinDialog';
+import VinScanner from './VinScanner';
+import WalkAroundCamera from './WalkAroundCamera';
+import { vinValid, decodeVinInfo } from '../lib/vin';
 
 // Intake tab — the TR-INTAKE-V2 checklist, in-app. Replaces the old deep link
 // into the Body Quoter. Wording below is copied verbatim from the Quoter's
@@ -123,6 +126,8 @@ function blankIntake(vin) {
     completedAt: null,
     committedBy: null,
     overriddenBy: null,
+    quoteId: null,
+    mddTags: false,
   };
 }
 
@@ -130,8 +135,35 @@ export default function IntakeScreen({ showToast }) {
   const [vin, setVin] = useState('');
   const [intake, setIntake] = useState(null);
   const [quoting, setQuoting] = useState(false); // Body Quoter sub-view
+  const [homeRows, setHomeRows] = useState([]);
+  const [homeSearch, setHomeSearch] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [vinOverride, setVinOverride] = useState(false);
+  const [vinMessage, setVinMessage] = useState('');
+  const [walkOpen, setWalkOpen] = useState(false);
+  const [photoCount, setPhotoCount] = useState(0);
+  const [decoding, setDecoding] = useState(false);
+  const [estimators, setEstimators] = useState([]);
+  const [quoteSummary, setQuoteSummary] = useState(null);
   const intakeRef = useRef(null);
   intakeRef.current = intake;
+  useEffect(() => { if (!intake) api.listIntakes().then((j) => setHomeRows(j?.intakes || [])).catch(() => {}); }, [intake]);
+  useEffect(() => {
+    api.signers().then((j) => setEstimators((j?.signers || []).filter((s) => s.active !== false).map((s) => s.name || s.displayName).filter(Boolean))).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!intake) { setQuoteSummary(null); return; }
+    let live = true;
+    api.quoterSync().then((j) => {
+      if (!live) return;
+      const qs = (j?.quotes || []).filter((q) => q && (intake.quoteId ? q.id === intake.quoteId : String(q.vin || '').toUpperCase() === intake.vin));
+      const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+      if (!q) return setQuoteSummary(null);
+      const lines = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls) : [];
+      api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: 0 }));
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [intake?.quoteId, intake?.vin]);
 
   // Adopt a server row for a VIN, honoring the old conflict rule.
   const refreshFromServer = useCallback(async (v) => {
@@ -172,6 +204,8 @@ export default function IntakeScreen({ showToast }) {
         completedAt: j.completedAt || null,
         committedBy: j.committedBy || null,
         overriddenBy: j.overriddenBy || null,
+        quoteId: j.quoteId || null,
+        mddTags: !!d.mddTags,
       };
       saveToCache(it);
       setIntake(it);
@@ -185,6 +219,7 @@ export default function IntakeScreen({ showToast }) {
     const noPush = !!(opts && opts.noPush);
     setIntake((s) => {
       if (!s) return s;
+      if (s.committedBy) return s;
       const next = { ...s, ...patch, ts: noPush ? s.ts || 0 : Date.now() };
       saveToCache(next);
       if (!noPush && String(next.vin || '').length >= 6) {
@@ -196,13 +231,14 @@ export default function IntakeScreen({ showToast }) {
             vehicle: next.vehicle,
             miles: next.miles,
             estimator: next.estimator,
-            quoteId: null,
+            quoteId: next.quoteId || null,
             ts: next.ts,
             data: {
               steps: { 1: next.steps[1], 2: next.steps[2], 3: next.steps[3], 4: next.steps[4] },
               roReady: next.roReady,
               photoCount: 0,
               notes: next.notes || '',
+              mddTags: !!next.mddTags,
             },
           })
           .catch(() => {
@@ -224,6 +260,30 @@ export default function IntakeScreen({ showToast }) {
     },
     [refreshFromServer]
   );
+  const openExisting = (row) => { setVin(row.vin); openFor(row.vin); };
+  const acceptVin = (raw, overridden = false) => {
+    const v = String(raw || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (v.length !== 17) { setVinMessage('VIN must be 17 characters to start a new intake.'); return; }
+    if (!vinValid(v) && !overridden) { setVinMessage('Invalid VIN check digit. Verify the VIN or use check digit override.'); return; }
+    setVinMessage(overridden ? 'Check digit override accepted — verify against the door label.' : 'Valid VIN');
+    setVin(v); setVinOverride(overridden); openFor(v);
+  };
+  const ensureIntakeQuote = async () => {
+    if (intake?.quoteId) return intake.quoteId;
+    const id = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
+    const r = await api.linkIntakeQuote(intake.id, id);
+    const canonical = r?.quoteId || id;
+    setIntake((s) => s ? { ...s, quoteId: canonical } : s);
+    return canonical;
+  };
+  const decodeIntake = useCallback(async (v) => {
+    if (!v || v.length !== 17 || intake?.vehicle) return;
+    setDecoding(true);
+    const desc = await decodeVinInfo(v);
+    if (desc) saveIntake({ vehicle: desc });
+    setDecoding(false);
+  }, [intake]);
+  useEffect(() => { if (intake?.vin?.length === 17) decodeIntake(intake.vin); }, [intake?.vin]); // best effort
 
   // Debounced VIN entry — open the intake once the VIN looks real.
   const vinTimer = useRef(null);
@@ -284,12 +344,30 @@ export default function IntakeScreen({ showToast }) {
   if (quoting && intake) {
     return (
       <QuoteScreen
-        prefill={{ vin: intake.vin, stock: intake.stock, vehicle: intake.vehicle, estimator: intake.estimator, miles: intake.miles }}
+        prefill={{ vin: intake.vin, stock: intake.stock, vehicle: intake.vehicle, estimator: intake.estimator, miles: intake.miles, quoteId: intake.quoteId }}
         onClose={() => setQuoting(false)}
+        onQuoteId={(id) => saveIntake({ quoteId: id })}
         showToast={showToast}
       />
     );
   }
+
+  if (!started) return (
+    <div className="screen">
+      <div className="screen-topbar"><div className="screen-title-row"><span className="screen-title">Intake</span><span className="mono" style={{fontSize:9.5,color:'var(--muted)'}}>TR-INTAKE-V2</span></div></div>
+      <div className="screen-body">
+        <div className="card" style={{background:'linear-gradient(180deg,#a8322b,#ce1b1b)',color:'#fff',padding:18}}>
+          <div className="oswald" style={{fontSize:22,letterSpacing:1}}>START INTAKE</div>
+          <div style={{fontSize:12,opacity:.85,marginTop:4}}>Scan the door-jamb barcode or enter the VIN.</div>
+          <button className="btn" style={{marginTop:14,background:'#262220',color:'#fff'}} onClick={() => setScanning(true)}>▣ SCAN VIN</button>
+        </div>
+        <div className="card"><div className="field-label">ENTER VIN MANUALLY</div><input className="input mono" value={vin} maxLength={17} onChange={e => {setVin(e.target.value.toUpperCase());setVinMessage('')}} placeholder="17-character VIN"/><div style={{fontSize:11,marginTop:7,color: vinMessage === 'Valid VIN' ? 'var(--green)' : 'var(--red)'}}>{vin.length}/17 {vinMessage}</div><button className="btn btn-dark" style={{marginTop:9}} disabled={vin.length !== 17} onClick={() => acceptVin(vin)}>Start / Resume</button><button className="btn btn-outline" style={{marginTop:7}} disabled={vin.length !== 17 || vinValid(vin)} onClick={() => acceptVin(vin,true)}>Use check digit override</button></div>
+        <input className="input" placeholder="Search VIN, stock, vehicle, estimator…" value={homeSearch} onChange={e => setHomeSearch(e.target.value)}/>
+        {['IN PROGRESS','COMPLETED'].map((label) => { const rows = homeRows.filter(r => (!!r.completedAt) === (label === 'COMPLETED')).filter(r => !homeSearch || [r.vin,r.stock,r.vehicle,r.estimator].join(' ').toLowerCase().includes(homeSearch.toLowerCase())); return <div key={label}><div className="card-title" style={{padding:'7px 2px'}}>{label} · {rows.length}</div>{rows.length ? rows.map(r => <IntakeHomeCard key={r.id} row={r} onClick={() => openExisting(r)}/>) : <div className="empty-note">No saved intakes match.</div>}</div>; })}
+      </div>
+      {scanning && <VinScanner onDetected={(v, ok) => {setScanning(false); acceptVin(v,!ok)}} onCancel={() => setScanning(false)}/>}
+    </div>
+  );
 
   return (
     <div className="screen">
@@ -361,6 +439,7 @@ export default function IntakeScreen({ showToast }) {
                   <input
                     className="input"
                     value={intake.stock}
+                    disabled={locked}
                     onChange={(e) => saveIntake({ stock: e.target.value.trim().toUpperCase() })}
                   />
                 </div>
@@ -369,6 +448,7 @@ export default function IntakeScreen({ showToast }) {
                   <input
                     className="input"
                     value={intake.miles}
+                    disabled={locked}
                     onChange={(e) => saveIntake({ miles: e.target.value.trim() })}
                   />
                 </div>
@@ -377,19 +457,35 @@ export default function IntakeScreen({ showToast }) {
                   <input
                     className="input"
                     value={intake.vehicle}
+                    disabled={locked}
                     onChange={(e) => saveIntake({ vehicle: e.target.value })}
                   />
                 </div>
                 <div style={{ gridColumn: '1 / span 2' }}>
                   <div className="field-label">ESTIMATOR</div>
-                  <input
-                    className="input"
-                    value={intake.estimator}
-                    onChange={(e) => saveIntake({ estimator: e.target.value })}
-                  />
+                   <select disabled={locked} className="input" value={estimators.includes(intake.estimator) ? intake.estimator : (intake.estimator ? '__custom' : '')} onChange={(e) => saveIntake({ estimator: e.target.value === '__custom' ? '' : e.target.value })}>
+                     <option value="">Select estimator…</option>
+                     {estimators.map((name) => <option key={name} value={name}>{name}</option>)}
+                     <option value="__custom">Other / enter manually</option>
+                   </select>
+                    {(!estimators.includes(intake.estimator) || intake.estimator === '') && <input disabled={locked} className="input" style={{marginTop:6}} value={intake.estimator} placeholder="Estimator name" onChange={(e) => saveIntake({ estimator: e.target.value })} />}
                 </div>
+                <label style={{ gridColumn: '1 / span 2', display:'flex', alignItems:'center', gap:9, padding:'10px', border:'1px solid var(--border)', borderRadius:9, fontSize:12, fontWeight:600 }}>
+                  <input type="checkbox" checked={!!intake.mddTags} disabled={locked} onChange={e => saveIntake({ mddTags: e.target.checked })} />
+                  Are both Key &amp; Vehicle MDD tags present?
+                </label>
               </div>
             </div>
+            <div className="card">
+              <div className="card-title">WALK-AROUND PHOTOS · {quoteSummary?.photoCount || 0} / 24</div>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
+              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { await ensureIntakeQuote(); setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+            </div>
+            {quoteSummary && <div className="card" style={{borderLeft:'4px solid var(--red)'}}>
+              <div className="card-title">BODY QUOTE LINKED</div>
+              <div style={{display:'flex',justifyContent:'space-between',marginTop:8,fontSize:12,fontWeight:700}}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr</span><span>${Number(quoteSummary.usd).toLocaleString()}</span><span>{quoteSummary.photoCount} photos</span></div>
+              <button className="btn btn-outline-red" style={{marginTop:9}} onClick={() => { setQuoting(true); }}>REOPEN QUOTE</button>
+            </div>}
 
             {/* step cards */}
             {INTAKE_SPEC.map((sp, si) => {
@@ -430,13 +526,16 @@ export default function IntakeScreen({ showToast }) {
                   <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.45, marginTop: 6 }}>{sp.intro}</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
                     {sp.items.map((text, i) => (
-                      <IkRow key={i} text={text} on={!!vals[i]} onToggle={() => ikToggleStep(sp.k, i)} />
+                       <IkRow key={i} text={text} on={!!vals[i]} onToggle={locked ? null : () => ikToggleStep(sp.k, i)} />
                     ))}
                   </div>
                   {sp.k === '3' && (
-                    <button className="btn btn-red" style={{ marginTop: 10 }} onClick={() => setQuoting(true)}>
-                      🛠 Open Body Quoter
-                    </button>
+                    <>
+                      <button className="btn btn-red" style={{ marginTop: 10 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={() => setQuoting(true)}>
+                        Open Body Quoter
+                      </button>
+                      {!intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags ? <div style={{fontSize:10,color:'var(--red)',marginTop:6}}>Complete stock #, miles, estimator, and confirm both MDD tags before opening the Body Quoter.</div> : null}
+                    </>
                   )}
                 </div>
               );
@@ -450,7 +549,7 @@ export default function IntakeScreen({ showToast }) {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
                 {RO_SPEC.map((text, i) => (
-                  <IkRow key={i} text={text} on={!!(intake.roReady || [])[i]} onToggle={() => ikToggleRo(i)} />
+                  <IkRow key={i} text={text} on={!!(intake.roReady || [])[i]} onToggle={locked ? null : () => ikToggleRo(i)} />
                 ))}
               </div>
               {complete && (
@@ -485,8 +584,20 @@ export default function IntakeScreen({ showToast }) {
           onClose={() => setPinOpen(false)}
         />
       )}
+      {walkOpen && (
+        <WalkAroundCamera quoteId={intake.quoteId} committed={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
+      )}
     </div>
   );
+}
+
+function IntakeHomeCard({ row, onClick }) {
+  return <button className="card" onClick={onClick} style={{textAlign:'left',width:'100%',cursor:'pointer',padding:13}}>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><span className="oswald" style={{fontSize:16}}>{row.vehicle || 'Vehicle not decoded'}</span><span style={{marginLeft:'auto',fontSize:10,color:row.completedAt?'var(--green)':'var(--amber)',fontWeight:700}}>{row.pct || 0}%</span></div>
+    <div className="mono" style={{fontSize:11,color:'var(--muted)',marginTop:5}}>{row.vin}</div>
+    <div style={{display:'flex',flexWrap:'wrap',gap:'4px 12px',fontSize:10,color:'var(--brown)',marginTop:8}}><span>STOCK {row.stock || '—'}</span><span>{row.estimator || 'No estimator'}</span><span>{row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}</span>{row.quote && <><span>{row.quote.lineCount} lines</span><span>{row.quote.hrs} hr</span><b>${Number(row.quote.usd).toLocaleString()}</b></>}</div>
+    <div style={{marginTop:8,height:5,background:'var(--panel2)',borderRadius:3}}><div style={{height:'100%',width:`${row.pct || 0}%`,background:row.completedAt?'var(--green)':'var(--red)',borderRadius:3}}/></div>
+  </button>;
 }
 
 function IkRow({ text, on, onToggle }) {

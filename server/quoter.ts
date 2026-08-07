@@ -38,6 +38,7 @@ function sanitizeIntakeData(raw: unknown) {
     roReady: Array.from({ length: 9 }, (_, i) => !!ro[i]),
     photoCount: Math.max(0, Math.min(999, Number(d.photoCount) || 0)),
     notes: String(d.notes || "").slice(0, 2000),
+    mddTags: !!d.mddTags,
   };
 }
 
@@ -153,6 +154,24 @@ export function registerQuoterRoutes(app: Express) {
           set: { value, updatedAt: new Date() },
         });
       res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/quoter/intakes/:id/link-quote",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const id = String(req.params.id || "").slice(0, 60);
+      const quoteId = String(req.body?.quoteId || "").slice(0, 60);
+      if (!id || !quoteId) return res.status(400).json({ error: "Missing intake id or quoteId" });
+      const r = await db.execute(sql`
+        UPDATE intakes SET quote_id = COALESCE(quote_id, ${quoteId}), updated_at = NOW()
+        WHERE id = ${id} AND committed_by IS NULL
+        RETURNING quote_id
+      `);
+      const row = (r.rows as any[])[0];
+      if (!row) return res.status(409).json({ error: "Intake is committed or not found" });
+      res.json({ quoteId: row.quote_id });
     }),
   );
 
@@ -391,6 +410,37 @@ export function registerQuoterRoutes(app: Express) {
     requireEmployee,
     guard(async (req, res) => {
       const vin = String(req.query.vin || "").trim().toUpperCase();
+      if (!vin && req.query.vin !== undefined) return res.status(400).json({ error: "Missing or short vin" });
+      if (!vin) {
+        const r = await db.execute(sql`
+          SELECT i.id, i.vin, i.stock, i.vehicle, i.estimator, i.quote_id,
+                 i.committed_by, i.completed_at,
+                 EXTRACT(EPOCH FROM i.updated_at) * 1000 AS updated_ms,
+                 EXTRACT(EPOCH FROM i.completed_at) * 1000 AS completed_ms,
+                 i.data,
+                 q.data AS quote_data
+          FROM intakes i LEFT JOIN quotes q ON q.id = i.quote_id
+          ORDER BY i.updated_at DESC LIMIT 200
+        `);
+        const rows = (r.rows as any[]).map((row) => {
+          const d = sanitizeIntakeData(row.data);
+          const q = row.quote_data || {};
+          const lines = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls) : [];
+          const t = q.totals || {};
+          const total = q.id || row.quote_id ? { usd: Number(t.usd) || 0, hrs: Number(t.hrs) || 0, lineCount: lines.length } : null;
+          const done = Object.values(d.steps).reduce((n: number, a: any) => n + a.filter(Boolean).length, 0);
+          return {
+            id: row.id, vin: row.vin, stock: row.stock || "", vehicle: row.vehicle || "",
+            estimator: row.estimator || "", quoteId: row.quote_id || null,
+            completedAt: row.completed_ms ? Math.round(Number(row.completed_ms)) : null,
+            updatedAt: row.updated_ms ? Math.round(Number(row.updated_ms)) : 0,
+            committedBy: row.committed_by || null,
+            pct: Math.round(done / 20 * 100), quote: total,
+          };
+        });
+        res.set("Cache-Control", "no-store");
+        return res.json({ intakes: rows });
+      }
       if (vin.length < 6) return res.status(400).json({ error: "Missing or short vin" });
       const r = await db.execute(sql`
         SELECT id, vin, stock, vehicle, miles, estimator, quote_id, data,

@@ -118,6 +118,17 @@ const H = vi.hoisted(() => {
     // ----- execute : intakes upsert + photo count -----
     execute: async (q: any) => {
       const { text, params } = sqlParts(q);
+      if (/FROM intakes i LEFT JOIN quotes/i.test(text)) {
+        return { rows: intakeRows.map((i) => ({ ...i, quote_data: quoteRows.find((q) => q.id === i.quote_id)?.data || null })) };
+      }
+      if (/UPDATE intakes SET quote_id/i.test(text)) {
+        const id = params.find((x: any) => x === "cas") || params[0];
+        const requested = params.find((x: any) => x === "q-a" || x === "q-b") || params[1];
+        const row = intakeRows.find((x) => x.id === id);
+        if (!row || row.committedBy) return { rows: [] };
+        row.quote_id = row.quote_id || requested;
+        return { rows: [{ quote_id: row.quote_id }] };
+      }
       if (/FROM photos WHERE quote_id/i.test(text)) {
         return { rows: [{ n: 0 }] };
       }
@@ -283,5 +294,28 @@ describe("intake immutability once committed", () => {
       data: { roReady: Array(9).fill(false) },
     });
     expect(r.status).toBe(200);
+  });
+
+  it("GET /api/quoter/intakes lists trimmed progress rows without photo bytes", async () => {
+    intakeRows.push({
+      id: "in1", vin: "VIN123456", stock: "T1", vehicle: "2022 Ford", estimator: "Alex",
+      quote_id: "q1", committed_by: null, completed_at: null, updated_ms: 20,
+      data: { steps: { "1": [true, true, true], "2": [true], "3": [], "4": [] } },
+    });
+    quoteRows.push({ id: "q1", data: { id: "q1", lines: [{ cls: {} }], totals: { hrs: 2, usd: 300 } } });
+    const r = await req("GET", "/api/quoter/intakes");
+    expect(r.status).toBe(200);
+    expect(r.body.intakes).toHaveLength(1);
+    expect(r.body.intakes[0]).toMatchObject({ id: "in1", pct: 20, quote: { lineCount: 1, hrs: 2, usd: 300 } });
+    expect(r.body.intakes[0].data).toBeUndefined();
+    expect(r.body.intakes[0].photoCount).toBeUndefined();
+  });
+
+  it("POST link-quote uses compare-and-set and returns the canonical quote", async () => {
+    intakeRows.push({ id: "cas", quote_id: null, committedBy: null });
+    const a = await req("POST", "/api/quoter/intakes/cas/link-quote", { quoteId: "q-a" });
+    const b = await req("POST", "/api/quoter/intakes/cas/link-quote", { quoteId: "q-b" });
+    expect(a.body.quoteId).toBe("q-a");
+    expect(b.body.quoteId).toBe("q-a");
   });
 });

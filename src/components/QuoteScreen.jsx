@@ -77,7 +77,7 @@ function thumbFromDataUrl(dataUrl) {
   });
 }
 
-export default function QuoteScreen({ prefill, onClose, showToast }) {
+export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) {
   const [rates, setRates] = useState(() => defaultRates());
   const corrCacheRef = useRef([]);
 
@@ -95,7 +95,7 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   const [estimator, setEstimator] = useState(() => prefill?.estimator || '');
   const [miles, setMiles] = useState(() => prefill?.miles || '');
 
-  const [quoteId, setQuoteId] = useState(null);
+  const [quoteId, setQuoteId] = useState(() => prefill?.quoteId || null);
   const [committed, setCommitted] = useState(null); // { committedBy, overriddenBy } once signed
   const [pinOpen, setPinOpen] = useState(false);
   const [lines, setLines] = useState([]);
@@ -104,7 +104,26 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   const [walkOpen, setWalkOpen] = useState(false);
   const [walkInitialMode, setWalkInitialMode] = useState('guided');
   const [armedDelete, setArmedDelete] = useState(null);
+  const [hydrating, setHydrating] = useState(!!prefill?.quoteId);
+  const [hydrateError, setHydrateError] = useState('');
+  const hydratedRef = useRef(!prefill?.quoteId);
   useEffect(() => { if (committed) setWalkOpen(false); }, [committed]);
+  useEffect(() => {
+    if (!prefill?.quoteId) return;
+    let live = true;
+    api.quoterSync().then((s) => {
+      const q = (s?.quotes || []).find((x) => x && x.id === prefill.quoteId);
+      if (!q) throw new Error('Quote not found');
+      if (!live) return;
+      setVin(String(q.vin || prefill.vin || '').toUpperCase());
+      setStock(q.stock || prefill.stock || ''); setMiles(q.miles || prefill.miles || '');
+      setEstimator(q.estimator || prefill.estimator || ''); setVehicleText(q.vehicle || prefill.vehicle || '');
+      setVeh(q.veh || { year: '', make: '', model: '', trim: '', body: '' });
+      const restored = Array.isArray(q.lines) ? q.lines.map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' })) : [];
+      setLines(restored); setStep(restored.length ? 'quote' : 'confirm'); hydratedRef.current = true; setHydrating(false);
+    }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
+    return () => { live = false; };
+  }, [prefill?.quoteId]);
 
   const linesRef = useRef(lines);
   linesRef.current = lines;
@@ -198,6 +217,7 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   }, [rates]);
 
   const autosave = useCallback((ls) => {
+    if (!hydratedRef.current) return;
     const s = stateRef.current;
     if (!s.quoteId) return;
     const entry = buildEntry(ls != null ? ls : linesRef.current);
@@ -212,7 +232,7 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
   // Create the quote id at confirm (like the old app did on entering walk).
   const ensureQuoteId = useCallback(() => {
     let id = stateRef.current.quoteId;
-    if (!id) { id = newId('q'); setQuoteId(id); }
+    if (!id) { id = newId('q'); setQuoteId(id); onQuoteId?.(id); }
     return id;
   }, []);
 
@@ -479,6 +499,9 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
       </div>
 
       <div className="screen-body">
+        {hydrateError && <div className="card" style={{color:'var(--red)',fontWeight:700}}>{hydrateError}<button className="btn btn-outline" style={{marginTop:9}} onClick={onClose}>Close</button></div>}
+        {hydrating && <div className="card"><div className="card-title">LOADING SAVED QUOTE</div><div style={{marginTop:8,color:'var(--muted)'}}>Restoring quote details…</div></div>}
+        {!hydrating && !hydrateError && <>
         {step === 'vin' && (
           <VinStep
             vin={vin}
@@ -558,6 +581,7 @@ export default function QuoteScreen({ prefill, onClose, showToast }) {
             onCommit={() => setPinOpen(true)}
           />
         )}
+        </>}
       </div>
 
       {pinOpen && (
