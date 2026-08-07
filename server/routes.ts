@@ -428,7 +428,7 @@ export function registerAppRoutes(app: Express) {
           const { ts, stock, vehicle, vin, result, status, ...rest } = rec as any;
           delete rest.id;
           if (!id) {
-            const key = `${(vin || "").toUpperCase()}|${ts}`;
+            const key = `${(vin || "").trim().toUpperCase()}|${ts}`;
             if (seen.has(key)) {
               skipped++;
               continue;
@@ -447,7 +447,7 @@ export function registerAppRoutes(app: Express) {
               qcNumber: id,
               stock: stock || "",
               vehicle: vehicle || "",
-              vin: (vin || "").toUpperCase(),
+              vin: (vin || "").trim().toUpperCase(),
               result,
               status,
               data: { ...rest, ts, inspector: rest.inspector || emp.name, title: rest.title || emp.title },
