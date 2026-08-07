@@ -19,8 +19,9 @@ export function useAuth() {
     // attempt fails do we surface the error screen. 401 is definitive:
     // signed out. Backoff gives an autoscale cold start (~10s) time to boot.
     setState((s) => ({ ...s, status: 'loading', waking: false }));
-    const MAX_ATTEMPTS = 3;
-    const BACKOFF_MS = [2000, 6000]; // wait after attempt 1, attempt 2
+    // Real-world cold starts can exceed 10s, so the window is ~25s total.
+    const MAX_ATTEMPTS = 5;
+    const BACKOFF_MS = [2000, 4000, 7000, 10000]; // waits between attempts
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const me = await api.me();
@@ -38,7 +39,8 @@ export function useAuth() {
           await sleep(BACKOFF_MS[attempt]);
           if (!live()) return;
         } else {
-          setState({ status: 'error', email: '', employee: null, waking: false });
+          const detail = err && err.message ? String(err.message) : 'Unknown error';
+          setState({ status: 'error', email: '', employee: null, waking: false, errorDetail: detail });
         }
       }
     }

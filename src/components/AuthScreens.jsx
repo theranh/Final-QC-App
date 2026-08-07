@@ -88,10 +88,13 @@ export function AccessScreen({ status, email }) {
   );
 }
 
-export function ErrorScreen({ onRetry }) {
+export function ErrorScreen({ onRetry, detail }) {
   return (
     <Shell>
       <div style={{ fontSize: 12, color: 'var(--red)', fontWeight: 700 }}>Could not reach the server.</div>
+      {detail ? (
+        <div style={{ fontSize: 10, color: 'var(--muted)', maxWidth: 280, lineHeight: 1.5 }}>{detail}</div>
+      ) : null}
       <div className="btn btn-outline" style={{ width: 180, height: 46, fontSize: 12 }} onClick={onRetry}>
         Try again
       </div>

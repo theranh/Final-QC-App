@@ -37,7 +37,7 @@ export default function App() {
 
   if (auth.status === 'loading') return <LoadingScreen waking={auth.waking} />;
   if (auth.status === 'signed_out') return <LoginScreen />;
-  if (auth.status === 'error') return <ErrorScreen onRetry={auth.refresh} />;
+  if (auth.status === 'error') return <ErrorScreen onRetry={auth.refresh} detail={auth.errorDetail} />;
   if (auth.status !== 'active') return <AccessScreen status={auth.status} email={auth.email} />;
 
   return <AuthedApp me={auth.employee} onAuthRefresh={auth.refresh} />;
@@ -58,6 +58,7 @@ function AuthedApp({ me, onAuthRefresh }) {
   const [nextQc, setNextQc] = useState(null);
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
   const [waking, setWaking] = useState(false); // retrying a failed startup call (cold start)
+  const [loadError, setLoadError] = useState(null); // last startup failure detail (shown on ErrorScreen)
   const [saving, setSaving] = useState(false);
 
   const [tab, setTab] = useState('dash');
@@ -129,8 +130,9 @@ function AuthedApp({ me, onAuthRefresh }) {
     // blips, brief 5xx) show "Waking up…" and retry; the error screen only
     // appears after every attempt fails. 401 means the session expired —
     // hand control back to the auth flow (sign-in screen), not an error.
-    const MAX_ATTEMPTS = 3;
-    const BACKOFF_MS = [2000, 6000];
+    // Real-world cold starts can exceed 10s, so the window is ~25s total.
+    const MAX_ATTEMPTS = 5;
+    const BACKOFF_MS = [2000, 4000, 7000, 10000];
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const data = await api.bootstrap();
@@ -149,6 +151,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         }
         if (attempt === MAX_ATTEMPTS - 1) {
           setWaking(false);
+          setLoadError(err && err.message ? String(err.message) : 'Unknown error');
           setLoadState('error');
           return;
         }
@@ -563,7 +566,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     (serverBackupAt == null || Date.now() - serverBackupAt > 7 * 86400000);
 
   if (loadState === 'loading') return <LoadingScreen waking={waking} />;
-  if (loadState === 'error') return <ErrorScreen onRetry={loadData} />;
+  if (loadState === 'error') return <ErrorScreen onRetry={loadData} detail={loadError} />;
 
   if (printing) {
     return <PrintReport recs={recs} period={period} onClose={() => setPrinting(false)} onPrint={() => window.print()} />;
