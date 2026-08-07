@@ -198,7 +198,23 @@ export function registerAppRoutes(app: Express) {
         }
       }
 
+      const vinNorm = String(body.vin).trim().toUpperCase();
+
       const created = await db.transaction(async (tx) => {
+        // Guard: one original Final QC per truck. A VIN that already has an
+        // inspection must go through the re-check flow, never a second FQ.
+        if (vinNorm.length >= 6) {
+          // Serialize concurrent commits for the same VIN: without this lock,
+          // two simultaneous POSTs could both pass the duplicate check and each
+          // insert an original inspection. Released automatically at commit.
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${vinNorm}))`);
+          const dup = await tx.execute(
+            sql`SELECT qc_number FROM inspections WHERE upper(trim(vin)) = ${vinNorm} LIMIT 1`
+          );
+          const hit = (dup.rows as any[])[0];
+          if (hit) return { error: 409 as const, qcNumber: String(hit.qc_number) };
+        }
+
         const counterRes = await tx.execute(
           sql`UPDATE qc_counter SET value = value + 1 WHERE id = 1 RETURNING value`
         );
@@ -227,7 +243,7 @@ export function registerAppRoutes(app: Express) {
             qcNumber,
             stock: body.stock,
             vehicle: body.vehicle,
-            vin: String(body.vin).trim().toUpperCase(),
+            vin: vinNorm,
             result,
             status,
             data,
@@ -245,13 +261,20 @@ export function registerAppRoutes(app: Express) {
           qcNumber,
           details: { result, status, failCount: body.failCount },
         });
-        return row;
+        return { row };
       });
 
+      if ("error" in created) {
+        return res.status(409).json({
+          message: `This VIN already has a Final QC inspection (${created.qcNumber}). Use the re-check flow instead.`,
+          qcNumber: created.qcNumber,
+        });
+      }
+
       // Fire-and-forget: sheet export never blocks or fails the inspection.
-      void exportInspectionToSheet(created);
+      void exportInspectionToSheet(created.row);
       invalidateDashboardCache(); // the new inspection leaves "awaiting Final QC" immediately
-      res.status(201).json({ record: toClientRecord(created), nextQc: await nextQcPreview() });
+      res.status(201).json({ record: toClientRecord(created.row), nextQc: await nextQcPreview() });
     } catch (err) {
       next(err);
     }
