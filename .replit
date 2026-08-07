@@ -59,6 +59,12 @@ integrations = ["javascript_log_in_with_replit:2.0.0", "github:1.0.0", "google-s
 [userenv.shared]
 GOOGLE_SHEETS_SPREADSHEET_ID = "1_rosqSejIr6vT-LaupD20X24xDa-NpfSbGdX4DwfhMM"
 
+[userenv.development]
+QUOTER_SYNC_TOKEN = "e44f7aa4f09526c1094cee062092e383e97a681fe2b057d5"
+
+[userenv.production]
+QUOTER_SYNC_TOKEN = "e44f7aa4f09526c1094cee062092e383e97a681fe2b057d5"
+
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 180000

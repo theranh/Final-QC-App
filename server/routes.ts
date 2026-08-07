@@ -9,6 +9,7 @@ import { exportInspectionToSheet } from "./googleSheets";
 import { registerIntakeQuoteRoute } from "./localQuote";
 import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 import { registerQuoterRoutes } from "./quoter";
+import { registerQuoterSyncAdminRoute } from "./quoterSyncAdmin";
 import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerTrackerRoutes } from "./tracker";
 
@@ -117,6 +118,7 @@ export function registerAppRoutes(app: Express) {
   registerIntakeQuoteRoute(app);
   registerDashboardRoute(app);
   registerQuoterRoutes(app);
+  registerQuoterSyncAdminRoute(app);
   registerPinRoutes(app);
   registerTrackerRoutes(app);
 
