@@ -3,7 +3,7 @@ import './App.css';
 import { CATS, CHECKLIST } from './lib/constants';
 import { initDraftBoot, newDraft, persistDraftBundle, saveLS, loadLS, stripRc } from './lib/storage';
 import { curPeriod } from './lib/stats';
-import { exportCsv, exportBackup } from './lib/exports';
+import { exportCsv, exportBackup, downloadServerBackup } from './lib/exports';
 import { compressImageFile } from './lib/photo';
 import { vinValid, decodeVinInfo } from './lib/vin';
 import { api } from './lib/api';
@@ -475,12 +475,42 @@ function AuthedApp({ me, onAuthRefresh }) {
   };
 
   // ---------- backup ----------
-  const onExportBackup = () => {
+  const onExportBackup = async (opts = {}) => {
+    const markDone = () => {
+      const ts = Date.now();
+      setLastBackupAt(ts);
+      saveLS('lastBackupAt', ts);
+      showToast('Backup downloaded ✓');
+    };
+    if (me?.isAdmin && opts.full) {
+      // Full export (all Quoter photos, hundreds of MB): the server streams it,
+      // so hand the URL straight to the browser's downloader instead of
+      // buffering the whole file in page memory.
+      const a = document.createElement('a');
+      a.href = '/api/export?photos=full';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      const ts = Date.now();
+      setLastBackupAt(ts);
+      saveLS('lastBackupAt', ts);
+      showToast('Full backup download started (large file — check your downloads)');
+      return;
+    }
+    if (me?.isAdmin) {
+      // Admins get the authoritative server export: full database contents
+      // (inspections + employee allowlist + QC counter), not client state.
+      try {
+        const backup = await api.exportBackup();
+        downloadServerBackup(backup);
+        markDone();
+      } catch (err) {
+        showToast('Backup failed: ' + err.message);
+      }
+      return;
+    }
     exportBackup([meUser], recs, nextQc || 1001, meUser.id);
-    const ts = Date.now();
-    setLastBackupAt(ts);
-    saveLS('lastBackupAt', ts);
-    showToast('Backup downloaded ✓');
+    markDone();
   };
 
   // ---------- nav ----------

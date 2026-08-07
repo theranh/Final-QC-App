@@ -125,20 +125,61 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
       .finally(() => setBusyId(null));
   };
 
-  const runImport = (payload, source) => {
+  // Split full-backup photos into ~25 MB requests so a 400+ MB backup never
+  // exceeds the server's request-size limit; totals are merged for the toast.
+  const PHOTO_BATCH_BYTES = 25 * 1024 * 1024;
+  const photoBatches = (photos) => {
+    const batches = [];
+    let cur = [];
+    let size = 0;
+    for (const p of photos) {
+      const n = (p.b64 || '').length;
+      if (cur.length && size + n > PHOTO_BATCH_BYTES) {
+        batches.push(cur);
+        cur = [];
+        size = 0;
+      }
+      cur.push(p);
+      size += n;
+    }
+    if (cur.length) batches.push(cur);
+    return batches;
+  };
+
+  const runImport = async (payload, source) => {
     setImporting(true);
-    api
-      .importLegacy(payload)
-      .then((r) => {
-        showToast(`Imported ${r.imported} inspection${r.imported === 1 ? '' : 's'}${r.skipped ? ` · ${r.skipped} duplicate${r.skipped === 1 ? '' : 's'} skipped` : ''} ✓`);
-        if (source === 'legacy') {
-          markLegacyImported();
-          setLegacyPresent(false);
-        }
-        onImported();
-      })
-      .catch((err) => showToast('Import failed: ' + err.message))
-      .finally(() => setImporting(false));
+    try {
+      const { quoterPhotos, ...main } = payload;
+      const total = await api.importLegacy(main);
+      for (const batch of photoBatches(quoterPhotos || [])) {
+        const r = await api.importLegacy({ quoterPhotos: batch });
+        total.quoter = total.quoter || {};
+        total.quoter.photosAdded = (total.quoter.photosAdded || 0) + (r.quoter?.photosAdded || 0);
+        total.quoter.photosSkipped = (total.quoter.photosSkipped || 0) + (r.quoter?.photosSkipped || 0);
+      }
+      const q = total.quoter || {};
+      const parts = [`${total.imported} inspection${total.imported === 1 ? '' : 's'} added`];
+      if (total.skipped) parts.push(`${total.skipped} duplicate${total.skipped === 1 ? '' : 's'} skipped`);
+      if (total.employeesAdded) parts.push(`${total.employeesAdded} employee${total.employeesAdded === 1 ? '' : 's'} added`);
+      const quoterAdds = [
+        q.quotesAdded && `${q.quotesAdded} quote${q.quotesAdded === 1 ? '' : 's'}`,
+        q.intakesAdded && `${q.intakesAdded} intake${q.intakesAdded === 1 ? '' : 's'}`,
+        q.correctionsAdded && `${q.correctionsAdded} correction${q.correctionsAdded === 1 ? '' : 's'}`,
+        q.trackerRowsAdded && `${q.trackerRowsAdded} tracker row${q.trackerRowsAdded === 1 ? '' : 's'}`,
+        q.photosAdded && `${q.photosAdded} photo${q.photosAdded === 1 ? '' : 's'}`,
+      ].filter(Boolean);
+      if (quoterAdds.length) parts.push(`Quoter: ${quoterAdds.join(', ')} added`);
+      showToast(`Import complete: ${parts.join(' · ')} ✓`);
+      if (source === 'legacy') {
+        markLegacyImported();
+        setLegacyPresent(false);
+      }
+      onImported();
+    } catch (err) {
+      showToast('Import failed: ' + err.message);
+    } finally {
+      setImporting(false);
+    }
   };
 
   const onImportLegacy = () => {
@@ -167,8 +208,19 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
           runImport({ inspections }, 'file');
           return;
         }
-        if (!window.confirm(`Import ${data.inspections.length} inspection${data.inspections.length === 1 ? '' : 's'} from this backup into the shared database?\nRecords already in the database are skipped — nothing is overwritten.`)) return;
-        runImport({ inspections: data.inspections, seq: data.seq }, 'file');
+        const empNote = isAdmin && Array.isArray(data.employees) && data.employees.length
+          ? `\nMissing employees from the backup's allowlist are added too (existing employees are never changed).`
+          : '';
+        const quoterNote = isAdmin && (data.quoter || (data.quoterPhotos || []).length)
+          ? `\nQuoter data in this backup (quotes, intakes, corrections, tracker${(data.quoterPhotos || []).length ? ', photos' : ''}) is restored additively too.`
+          : '';
+        if (!window.confirm(`Import ${data.inspections.length} inspection${data.inspections.length === 1 ? '' : 's'} from this backup into the shared database?\nRecords already in the database are skipped — nothing is overwritten.${empNote}${quoterNote}`)) return;
+        const payload = { inspections: data.inspections, seq: data.seq };
+        // Only admins may restore the employee allowlist / Quoter data; the server enforces this.
+        if (isAdmin && Array.isArray(data.employees)) payload.employees = data.employees;
+        if (isAdmin && data.quoter && typeof data.quoter === 'object') payload.quoter = data.quoter;
+        if (isAdmin && Array.isArray(data.quoterPhotos)) payload.quoterPhotos = data.quoterPhotos;
+        runImport(payload, 'file');
       })
       .catch((err) => showToast(err.message));
   };
@@ -397,8 +449,18 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
           <div style={{ fontSize: 10.5, fontWeight: 700, color: backupStale ? 'var(--amber)' : 'var(--muted)', marginTop: 5, lineHeight: 1.5 }}>
             {backupStale ? '● ' : ''}{backupStatusLabel}
           </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
-            <div className="btn btn-brown" style={{ height: 48, fontSize: 12 }} onClick={onExportBackup}>⬇ Export backup</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 9, flexWrap: 'wrap' }}>
+            <div className="btn btn-brown" style={{ height: 48, fontSize: 12 }} onClick={() => onExportBackup()}>⬇ Export backup</div>
+            {isAdmin && (
+              <div
+                className="btn btn-outline-brown"
+                style={{ height: 48, fontSize: 12 }}
+                title="Includes every Quoter photo — several hundred MB"
+                onClick={() => onExportBackup({ full: true })}
+              >
+                ⬇ Full export (photos)
+              </div>
+            )}
             <div
               className={'btn btn-outline-brown' + (importing ? ' disabled' : '')}
               style={{ height: 48, fontSize: 12 }}

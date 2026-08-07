@@ -2,7 +2,19 @@ import type { Express } from "express";
 import { z } from "zod";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
-import { auditLog, employees, inspections, qcCounter, type Employee, type Inspection } from "@shared/schema";
+import {
+  auditLog,
+  corrections,
+  employees,
+  inspections,
+  intakes,
+  photos,
+  productionTracker,
+  qcCounter,
+  quotes,
+  type Employee,
+  type Inspection,
+} from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { exportInspectionToSheet } from "./googleSheets";
@@ -91,8 +103,90 @@ const recheckSchema = z.object({
   items: z.array(recheckItem).min(1).max(200),
 });
 
+const backupEmployee = z.object({
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email()
+    .refine((e) => e.endsWith("@truckranch.com"), "Backup employees must be @truckranch.com emails."),
+  name: z.string().trim().max(120).optional().default(""),
+  title: z.string().trim().max(120).optional().default("Inspector"),
+  isAdmin: z.boolean().optional().default(false),
+  status: z.enum(["pending", "active", "inactive"]).optional().default("pending"),
+});
+
+// Accepts ISO strings or epoch millis; invalid/absent values become null.
+const backupDate = z.union([z.string().max(60), z.number()]).nullable().optional();
+function toDate(v: string | number | null | undefined): Date | null {
+  if (v == null) return null;
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+const backupQuote = z.object({
+  id: z.string().min(1).max(200),
+  data: z.unknown(),
+  updatedAt: backupDate,
+  committedBy: z.string().max(200).nullable().optional(),
+  overriddenBy: z.string().max(200).nullable().optional(),
+});
+
+const backupIntake = z.object({
+  id: z.string().min(1).max(200),
+  vin: z.string().max(40),
+  stock: z.string().max(120).optional().default(""),
+  vehicle: z.string().max(200).optional().default(""),
+  miles: z.string().max(40).optional().default(""),
+  estimator: z.string().max(200).optional().default(""),
+  quoteId: z.string().max(200).nullable().optional(),
+  data: z.unknown(),
+  completedAt: backupDate,
+  updatedAt: backupDate,
+  committedBy: z.string().max(200).nullable().optional(),
+  overriddenBy: z.string().max(200).nullable().optional(),
+});
+
+const backupCorrection = z.object({
+  id: z.number().int().positive().optional(),
+  ts: z.number().int().positive(),
+  diffs: z.unknown(),
+});
+
+const backupTrackerRow = z.object({
+  vin: z.string().min(1).max(40),
+  month: z.string().min(1).max(20),
+  retailPlanUsd: z.union([z.string().max(30), z.number()]).nullable().optional(),
+  closedRoUsd: z.union([z.string().max(30), z.number()]).nullable().optional(),
+  daysToClose: z.number().int().nullable().optional(),
+  snapshotAt: backupDate,
+});
+
+const backupQuoterSection = z.object({
+  quotes: z.array(backupQuote).max(50_000).optional(),
+  intakes: z.array(backupIntake).max(50_000).optional(),
+  corrections: z.array(backupCorrection).max(100_000).optional(),
+  productionTracker: z.array(backupTrackerRow).max(100_000).optional(),
+});
+
+// Full-export photos ride as base64; each row is one photo (bytea in the db).
+const backupPhoto = z.object({
+  id: z.string().min(1).max(200),
+  quoteId: z.string().min(1).max(200),
+  slot: z.string().max(100).nullable().optional(),
+  mime: z.string().max(100),
+  ts: z.number().int().positive(),
+  b64: z.string().max(30_000_000),
+});
+
 const importSchema = z.object({
-  seq: z.number().int().min(1001).max(1_000_000).optional(),
+  app: z.string().max(120).optional(),
+  version: z.number().int().min(1).max(10).optional(),
+  exportedAt: z.string().max(60).optional(),
+  seq: z.number().int().min(1000).max(1_000_000).optional(),
+  employees: z.array(backupEmployee).max(500).optional(),
+  quoter: backupQuoterSection.optional(),
+  quoterPhotos: z.array(backupPhoto).max(5000).optional(),
   inspections: z
     .array(
       z
@@ -109,7 +203,9 @@ const importSchema = z.object({
         })
         .passthrough()
     )
-    .max(2000),
+    .max(2000)
+    .optional()
+    .default([]),
 });
 
 // ---------- routes ----------
@@ -408,13 +504,169 @@ export function registerAppRoutes(app: Express) {
     }
   });
 
-  // One-time migration of legacy localStorage data. Duplicate FQ numbers are skipped.
+  // Authoritative server-side backup: inspections, employee allowlist, and the
+  // QC counter, straight from the database — never rebuilt from client state.
+  // ?photos=full streams every photo's binary (as base64) into the file —
+  // hundreds of MB — one row at a time, never all in memory at once. The
+  // default export carries photo metadata only.
+  app.get("/api/export", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const includePhotos = String(req.query.photos || "") === "full";
+
+      const rows = await db.select().from(inspections).orderBy(desc(inspections.createdAt));
+      const emps = await db.select().from(employees).orderBy(employees.email);
+      const [counterRow] = await db.select().from(qcCounter).where(eq(qcCounter.id, 1));
+      const seq = counterRow?.value ?? 1000;
+
+      const quoteRows = await db.select().from(quotes);
+      const intakeRows = await db.select().from(intakes);
+      const correctionRows = await db.select().from(corrections).orderBy(corrections.id);
+      const trackerRows = await db.select().from(productionTracker);
+      // Metadata only — never pull the bytea column for the whole table.
+      const photoMetaRes = await db.execute(
+        sql`SELECT id, quote_id, slot, mime, ts, length(data) AS bytes FROM photos ORDER BY ts`
+      );
+      const photosMeta = (photoMetaRes.rows as any[]).map((p) => ({
+        id: String(p.id),
+        quoteId: String(p.quote_id),
+        slot: p.slot ?? null,
+        mime: String(p.mime),
+        ts: Number(p.ts),
+        bytes: Number(p.bytes),
+      }));
+
+      const iso = (d: Date | null | undefined) => (d ? new Date(d).toISOString() : null);
+
+      const backup = {
+        app: "TruckRanch Final QC",
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        photosIncluded: includePhotos,
+        seq,
+        inspections: rows.map(toClientRecord),
+        // Never export PIN hashes or internal linkage — only allowlist facts.
+        employees: emps.map((e) => ({
+          email: e.email,
+          name: e.name,
+          title: e.title,
+          isAdmin: e.isAdmin,
+          status: e.status,
+        })),
+        quoter: {
+          quotes: quoteRows.map((q) => ({
+            id: q.id,
+            data: q.data,
+            updatedAt: iso(q.updatedAt),
+            committedBy: q.committedBy,
+            overriddenBy: q.overriddenBy,
+          })),
+          intakes: intakeRows.map((i) => ({
+            id: i.id,
+            vin: i.vin,
+            stock: i.stock,
+            vehicle: i.vehicle,
+            miles: i.miles,
+            estimator: i.estimator,
+            quoteId: i.quoteId,
+            data: i.data,
+            completedAt: iso(i.completedAt),
+            updatedAt: iso(i.updatedAt),
+            committedBy: i.committedBy,
+            overriddenBy: i.overriddenBy,
+          })),
+          corrections: correctionRows.map((c) => ({ id: c.id, ts: c.ts, diffs: c.diffs })),
+          productionTracker: trackerRows.map((t) => ({
+            vin: t.vin,
+            month: t.month,
+            retailPlanUsd: t.retailPlanUsd,
+            closedRoUsd: t.closedRoUsd,
+            daysToClose: t.daysToClose,
+            snapshotAt: iso(t.snapshotAt),
+          })),
+          photos: photosMeta,
+        },
+      };
+
+      await audit(db, emp, "exported", {
+        details: {
+          inspections: rows.length,
+          employees: emps.length,
+          quotes: quoteRows.length,
+          intakes: intakeRows.length,
+          corrections: correctionRows.length,
+          trackerRows: trackerRows.length,
+          photos: photosMeta.length,
+          photosIncluded: includePhotos,
+          seq,
+        },
+      });
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="TruckRanch_FinalQC_backup_${includePhotos ? "full_" : ""}${new Date().toISOString().slice(0, 10)}.json"`
+      );
+      if (!includePhotos) return res.json(backup);
+
+      // Stream: metadata head + one photo row at a time, so 400+ MB of photo
+      // data never sits in server memory as a single string.
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      const head = JSON.stringify(backup);
+      res.write(head.slice(0, -1) + ',"quoterPhotos":[');
+      let first = true;
+      for (const m of photosMeta) {
+        const one = await db.execute(sql`SELECT data FROM photos WHERE id = ${m.id}`);
+        const row = (one.rows as any[])[0];
+        if (!row) continue;
+        const buf = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
+        const chunk =
+          (first ? "" : ",") +
+          JSON.stringify({ id: m.id, quoteId: m.quoteId, slot: m.slot, mime: m.mime, ts: m.ts, b64: buf.toString("base64") });
+        first = false;
+        // Respect backpressure so a slow client can't balloon server memory.
+        if (!res.write(chunk)) await new Promise((r) => res.once("drain", r));
+      }
+      res.write("]}");
+      res.end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Backup restore + one-time migration of legacy localStorage data.
+  // Additive only: duplicates are skipped, existing rows are never overwritten.
   app.post("/api/import", requireEmployee, async (req: any, res, next) => {
     try {
-      const body = importSchema.parse(req.body);
+      const parsed = importSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          message: "That file doesn't look like a valid Final QC backup — nothing was imported.",
+          issues: parsed.error.issues.slice(0, 5),
+        });
+      }
+      const body = parsed.data;
       const emp: Employee = req.employee;
+      const hasQuoterData =
+        !!body.quoterPhotos?.length ||
+        !!(body.quoter && Object.values(body.quoter).some((arr) => (arr as any[])?.length));
+      if ((body.employees?.length || hasQuoterData) && !emp.isAdmin) {
+        return res.status(403).json({ message: "Only admins can restore employees or Quoter data from a backup." });
+      }
       let imported = 0;
       let skipped = 0;
+      let employeesAdded = 0;
+      let employeesSkipped = 0;
+      const qc = {
+        quotesAdded: 0,
+        quotesSkipped: 0,
+        intakesAdded: 0,
+        intakesSkipped: 0,
+        correctionsAdded: 0,
+        correctionsSkipped: 0,
+        trackerRowsAdded: 0,
+        trackerRowsSkipped: 0,
+        photosAdded: 0,
+        photosSkipped: 0,
+      };
 
       await db.transaction(async (tx) => {
         // For legacy records (no FQ number), duplicates are recognized by
@@ -473,15 +725,126 @@ export function registerAppRoutes(app: Express) {
           }
         }
 
+        // Merge missing employee allowlist rows. Existing rows are never
+        // touched — roles, status, PINs, and linkage stay exactly as they are.
+        for (const be of body.employees || []) {
+          const [row] = await tx
+            .insert(employees)
+            .values({
+              email: be.email,
+              name: be.name,
+              title: be.title,
+              isAdmin: be.isAdmin,
+              status: be.status,
+            })
+            .onConflictDoNothing({ target: employees.email })
+            .returning();
+          if (row) employeesAdded++;
+          else employeesSkipped++;
+        }
+
+        // Merge missing Quoter rows — additive only, existing rows untouched.
+        for (const q of body.quoter?.quotes || []) {
+          const [row] = await tx
+            .insert(quotes)
+            .values({
+              id: q.id,
+              data: (q.data as any) ?? {},
+              updatedAt: toDate(q.updatedAt),
+              committedBy: q.committedBy ?? null,
+              overriddenBy: q.overriddenBy ?? null,
+            })
+            .onConflictDoNothing({ target: quotes.id })
+            .returning();
+          if (row) qc.quotesAdded++;
+          else qc.quotesSkipped++;
+        }
+        for (const i of body.quoter?.intakes || []) {
+          const [row] = await tx
+            .insert(intakes)
+            .values({
+              id: i.id,
+              vin: i.vin,
+              stock: i.stock,
+              vehicle: i.vehicle,
+              miles: i.miles,
+              estimator: i.estimator,
+              quoteId: i.quoteId ?? null,
+              data: (i.data as any) ?? {},
+              completedAt: toDate(i.completedAt),
+              updatedAt: toDate(i.updatedAt),
+              committedBy: i.committedBy ?? null,
+              overriddenBy: i.overriddenBy ?? null,
+            })
+            .onConflictDoNothing({ target: intakes.id })
+            .returning();
+          if (row) qc.intakesAdded++;
+          else qc.intakesSkipped++;
+        }
+        for (const c of body.quoter?.corrections || []) {
+          // Keep original ids when present so a restore into a fresh database
+          // preserves history; a colliding id means the row already exists.
+          const [row] = await tx
+            .insert(corrections)
+            .values(c.id != null ? { id: c.id, ts: c.ts, diffs: (c.diffs as any) ?? [] } : { ts: c.ts, diffs: (c.diffs as any) ?? [] })
+            .onConflictDoNothing()
+            .returning();
+          if (row) qc.correctionsAdded++;
+          else qc.correctionsSkipped++;
+        }
+        if (body.quoter?.corrections?.some((c) => c.id != null)) {
+          // Explicit-id inserts don't advance the bigserial sequence — fix it up
+          // so future corrections never collide with restored ids.
+          await tx.execute(
+            sql`SELECT setval(pg_get_serial_sequence('corrections','id'), (SELECT COALESCE(MAX(id),1) FROM corrections))`
+          );
+        }
+        for (const t of body.quoter?.productionTracker || []) {
+          const [row] = await tx
+            .insert(productionTracker)
+            .values({
+              vin: t.vin,
+              month: t.month,
+              retailPlanUsd: t.retailPlanUsd == null ? null : String(t.retailPlanUsd),
+              closedRoUsd: t.closedRoUsd == null ? null : String(t.closedRoUsd),
+              daysToClose: t.daysToClose ?? null,
+              snapshotAt: toDate(t.snapshotAt),
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (row) qc.trackerRowsAdded++;
+          else qc.trackerRowsSkipped++;
+        }
+        for (const p of body.quoterPhotos || []) {
+          const [row] = await tx
+            .insert(photos)
+            .values({
+              id: p.id,
+              quoteId: p.quoteId,
+              slot: p.slot ?? null,
+              mime: p.mime,
+              ts: p.ts,
+              data: Buffer.from(p.b64, "base64"),
+            })
+            .onConflictDoNothing({ target: photos.id })
+            .returning();
+          if (row) qc.photosAdded++;
+          else qc.photosSkipped++;
+        }
+
         // Never hand out a number at or below anything we've seen.
         const nums = body.inspections
           .map((r) => parseInt(String(r.id).replace("FQ-", ""), 10))
           .filter((n) => Number.isFinite(n));
         const maxSeen = Math.max(0, ...(nums.length ? nums : [0]), (body.seq || 1001) - 1);
         await tx.execute(sql`UPDATE qc_counter SET value = GREATEST(value, ${maxSeen}) WHERE id = 1`);
+
+        await audit(tx as any, emp, "import_summary", {
+          details: { imported, skipped, employeesAdded, employeesSkipped, ...qc, seq: body.seq ?? null },
+        });
       });
 
-      res.json({ imported, skipped, nextQc: await nextQcPreview() });
+      res.json({ imported, skipped, employeesAdded, employeesSkipped, quoter: qc, nextQc: await nextQcPreview() });
     } catch (err) {
       next(err);
     }

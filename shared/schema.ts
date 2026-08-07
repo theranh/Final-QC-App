@@ -74,7 +74,7 @@ export const auditLog = pgTable("audit_log", {
   id: serial("id").primaryKey(),
   inspectionId: integer("inspection_id"),
   qcNumber: varchar("qc_number"),
-  action: varchar("action").notNull(), // created | recheck_committed | status_change | imported | employee_updated | delete_attempt | tracker_snapshot
+  action: varchar("action").notNull(), // created | recheck_committed | status_change | imported | import_summary | exported | employee_updated | delete_attempt | tracker_snapshot
   actorId: varchar("actor_id").notNull(),
   actorEmail: varchar("actor_email").notNull(),
   actorName: varchar("actor_name").notNull(),

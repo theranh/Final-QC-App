@@ -55,6 +55,11 @@ export function exportBackup(users, recs, seq, defaultUid) {
   );
 }
 
+// Download a server-generated backup payload (authoritative database export).
+export function downloadServerBackup(backup) {
+  download('TruckRanch_FinalQC_backup_' + fileStamp() + '.json', JSON.stringify(backup), 'application/json');
+}
+
 export function parseBackupFile(file) {
   return new Promise((resolve, reject) => {
     const rd = new FileReader();
@@ -65,7 +70,9 @@ export function parseBackupFile(file) {
           resolve({ oldRecon: true, records: Array.isArray(data) ? data : data.inspections });
           return;
         }
-        if (!data || !Array.isArray(data.inspections) || !Array.isArray(data.users)) throw new Error('bad');
+        // Accept both server backups (employees array) and older on-device
+        // backups (users array) — inspections are required either way.
+        if (!data || !Array.isArray(data.inspections) || !(Array.isArray(data.users) || Array.isArray(data.employees))) throw new Error('bad');
         resolve(data);
       } catch {
         reject(new Error('Invalid backup file'));
