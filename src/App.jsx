@@ -35,7 +35,7 @@ import UpdateBanner from './components/UpdateBanner';
 export default function App() {
   const auth = useAuth();
 
-  if (auth.status === 'loading') return <LoadingScreen />;
+  if (auth.status === 'loading') return <LoadingScreen waking={auth.waking} />;
   if (auth.status === 'signed_out') return <LoginScreen />;
   if (auth.status === 'error') return <ErrorScreen onRetry={auth.refresh} />;
   if (auth.status !== 'active') return <AccessScreen status={auth.status} email={auth.email} />;
@@ -43,7 +43,7 @@ export default function App() {
   return <AuthedApp me={auth.employee} onAuthRefresh={auth.refresh} />;
 }
 
-function AuthedApp({ me }) {
+function AuthedApp({ me, onAuthRefresh }) {
   const { updateReady, applyUpdate } = useAppUpdate();
   const [boot] = useState(() => initDraftBoot());
 
@@ -57,6 +57,7 @@ function AuthedApp({ me }) {
   const [recs, setRecs] = useState([]);
   const [nextQc, setNextQc] = useState(null);
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
+  const [waking, setWaking] = useState(false); // retrying a failed startup call (cold start)
   const [saving, setSaving] = useState(false);
 
   const [tab, setTab] = useState('dash');
@@ -106,29 +107,45 @@ function AuthedApp({ me }) {
   }, []);
 
   // ---------- initial data load (shared database) ----------
+  const loadGenRef = useRef(0); // only the latest loadData run may touch state
   const loadData = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    const live = () => gen === loadGenRef.current;
     setLoadState('loading');
-    // Retry transient failures (network blips, cold starts, brief 5xx) with
-    // backoff before surfacing the error screen.
-    // Autoscale cold starts can take ~10s, so keep trying for ~20s total.
-    const MAX_ATTEMPTS = 6;
+    setWaking(false);
+    // 3 attempts with backoff: transient failures (cold starts, network
+    // blips, brief 5xx) show "Waking up…" and retry; the error screen only
+    // appears after every attempt fails. 401 means the session expired —
+    // hand control back to the auth flow (sign-in screen), not an error.
+    const MAX_ATTEMPTS = 3;
+    const BACKOFF_MS = [2000, 6000];
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const data = await api.bootstrap();
+        if (!live()) return;
         dataGenRef.current++;
         setRecs(data.inspections);
         setNextQc(data.nextQc);
+        setWaking(false);
         setLoadState('ready');
         return;
       } catch (err) {
-        if (err.status === 401 || attempt === MAX_ATTEMPTS - 1) {
+        if (!live()) return;
+        if (err.status === 401) {
+          onAuthRefresh?.(); // session expired → back to sign-in, not "server unreachable"
+          return;
+        }
+        if (attempt === MAX_ATTEMPTS - 1) {
+          setWaking(false);
           setLoadState('error');
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.min(attempt + 1, 5)));
+        setWaking(true);
+        await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
+        if (!live()) return;
       }
     }
-  }, []);
+  }, [onAuthRefresh]);
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -494,7 +511,7 @@ function AuthedApp({ me }) {
     setTab('inspect');
   };
 
-  if (loadState === 'loading') return <LoadingScreen />;
+  if (loadState === 'loading') return <LoadingScreen waking={waking} />;
   if (loadState === 'error') return <ErrorScreen onRetry={loadData} />;
 
   if (printing) {

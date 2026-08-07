@@ -12,10 +12,12 @@ function Shell({ children }) {
   );
 }
 
-export function LoadingScreen() {
+export function LoadingScreen({ waking = false }) {
   return (
     <Shell>
-      <div style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</div>
+      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+        {waking ? 'Waking up… this can take a few seconds.' : 'Loading…'}
+      </div>
     </Shell>
   );
 }

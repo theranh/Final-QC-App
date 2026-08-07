@@ -15,12 +15,16 @@
  *  - Photos are copied in keyset-paginated batches (one short transaction per
  *    batch, cursor returned to the caller) — never one big transaction.
  *  - Order driven by the caller: settings → quotes → corrections → photos → intakes.
- *  - Never touches inspections, employees, or production_tracker.
+ *  - Never touches inspections or employees. The one exception to insert-only
+ *    is the `tracker_snapshot` phase, which overwrites production_tracker for
+ *    a single month via the canonical snapshotMonth helper (per operator
+ *    instruction: re-running a month IS the correction path).
  */
 import type { Express, Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
 import pg from "pg";
 import { pool } from "./db";
+import { snapshotMonth } from "./tracker";
 
 const { Pool } = pg;
 const PHOTO_BATCH = 25;
@@ -214,6 +218,18 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           });
         }
         return res.json({ phase, quotes: out });
+      }
+
+      if (phase === "tracker_snapshot") {
+        // Freeze one month tab from the VPC Production Tracker sheet into
+        // THIS server's production_tracker via the canonical snapshotMonth
+        // helper (delete-then-insert for that month in one transaction —
+        // re-running is the correction path). Values stored exactly as typed
+        // in the sheet; never recomputed. Touches ONLY production_tracker.
+        const month = String(req.body?.month || "").trim();
+        if (!month) return res.status(400).json({ message: "month is required (e.g. 'Jul 2026')" });
+        const result = await snapshotMonth(month);
+        return res.json({ phase, ...result });
       }
 
       return res.status(400).json({ message: `Unknown phase: ${phase}` });
