@@ -29,6 +29,12 @@ const SEGMENTS = ["mech", "cosm", "detail", "bed", "ceramic", "under"] as const;
 // ---------- caches ----------
 
 const payloadCache = new Map<string, { at: number; body: unknown }>();
+
+/** Drop composed payloads after an inspection commit, so a just-inspected
+ *  vehicle never lingers in the "awaiting Final QC" list for the cache TTL. */
+export function invalidateDashboardCache() {
+  payloadCache.clear();
+}
 const payloadInFlight = new Map<string, Promise<unknown>>();
 const quoteCache = new Map<string, { at: number; body: QuoteSummary }>();
 const statsCache = new Map<string, { at: number; body: IntakeStats | null }>();
@@ -165,6 +171,30 @@ async function fetchIntakeStats(from: string, to: string): Promise<IntakeStats |
     : null;
   statsCache.set(key, { at: Date.now(), body });
   if (statsCache.size > 20) statsCache.delete(statsCache.keys().next().value as string);
+  return body;
+}
+
+type CompletedIntake = { vin: string; stock: string; vehicle: string; completedAt: number | null };
+
+let completedCache: { at: number; body: CompletedIntake[] | null } | null = null;
+
+/** All completed intakes from the quoter, cached 60s. Null = unreachable.
+ *  Tolerant field readers — the quoter's row shape may evolve. */
+async function fetchIntakesCompleted(): Promise<CompletedIntake[] | null> {
+  if (completedCache && Date.now() - completedCache.at < REMOTE_CACHE_MS) return completedCache.body;
+  const d = await quoterGet("/api/intakes-completed");
+  const raw = Array.isArray(d?.intakes) ? d.intakes : Array.isArray(d) ? d : null;
+  const body: CompletedIntake[] | null = raw
+    ? raw
+        .map((r: any) => ({
+          vin: String(r?.vin ?? r?.VIN ?? "").trim().toUpperCase(),
+          stock: String(r?.stock ?? r?.stockNumber ?? r?.stock_no ?? "").trim(),
+          vehicle: String(r?.vehicle ?? r?.description ?? r?.truck ?? "").trim(),
+          completedAt: num(r?.completedAt ?? r?.completed_at ?? r?.ts) ?? null,
+        }))
+        .filter((r: CompletedIntake) => r.vin.length >= 6)
+    : null;
+  completedCache = { at: Date.now(), body };
   return body;
 }
 
@@ -325,7 +355,7 @@ async function fetchLiteRows(): Promise<LiteRow[]> {
     qcNumber: String(r.qc_number),
     stock: String(r.stock ?? ""),
     vehicle: String(r.vehicle ?? ""),
-    vin: String(r.vin ?? "").toUpperCase(),
+    vin: String(r.vin ?? "").trim().toUpperCase(),
     result: String(r.result),
     status: String(r.status),
     inspector: r.inspector ?? null,
@@ -340,10 +370,11 @@ async function fetchLiteRows(): Promise<LiteRow[]> {
 // ---------- payload assembly ----------
 
 export async function buildPayload(from: string, to: string): Promise<unknown> {
-  const [rows, stats, sheet] = await Promise.all([
+  const [rows, stats, sheet, completedIntakes] = await Promise.all([
     fetchLiteRows(),
     fetchIntakeStats(from, to),
     fetchSheetData(),
+    fetchIntakesCompleted(),
   ]);
 
   const trackerByVin = sheet?.byVin ?? new Map<string, TrackerRow>();
@@ -464,11 +495,19 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     weekFinalQcs: tracker7Days.reduce((a, d) => a + d.finalQcs, 0),
   };
 
+  // ----- awaiting Final QC: completed intake, no inspection yet -----
+  // Only the Body Quoter knows completed intakes; null (not empty/0) when it
+  // is unreachable, so the client can say "unavailable" instead of lying.
+  const inspectedVins = new Set(rows.map((r) => r.vin));
+  const awaiting = completedIntakes
+    ? completedIntakes
+        .filter((i) => !inspectedVins.has(i.vin))
+        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+    : null;
+
   // ----- byStatus -----
   const byStatus = {
-    // A vehicle with an intake record and no inspection — only the Body Quoter
-    // knows this; null (not 0) when it is unreachable.
-    awaitingFinalQc: stats?.openIntakes ?? null,
+    awaitingFinalQc: awaiting ? awaiting.length : stats?.openIntakes ?? null,
     openRecheck: openRechecks,
     frontlineReady: vehicles.filter((v) => v.statusKey === "frontlineReady").length,
     released: vehicles.filter((v) => v.statusKey === "released").length,
@@ -569,6 +608,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     daily,
     tracker7,
     byStatus,
+    awaiting,
     blocked,
     deptFailRate,
     topFailedItems,

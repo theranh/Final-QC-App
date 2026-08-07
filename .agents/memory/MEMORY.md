@@ -3,4 +3,4 @@
 - [Old Recon import](old-recon-import.md) — legacy Expo app data lives on-device only; export must come from the old Repl; import here auto-converts, server assigns FQ numbers.
 - [gitPush INDEX_LOCKED](git-push-index-locked.md) — check `find .git -name "*.lock"` for stale ref locks (not just index.lock); after removal, set branch upstream config if push says BRANCH_ALREADY_EXISTS.
 - [Google Sheets export](google-sheets-export.md) — Replit Sheets connector is read-only; writes need a service-account secret, and only columns A, C, D, K–O, Q may be filled (D auto-fills QC-pass date) in the VPC tracker.
-- [Body Quoter link](quoter-link.md) — Part A endpoints + limits: no VIN enumeration, awaiting-QC is a count only; never write to the Quoter.
+- [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

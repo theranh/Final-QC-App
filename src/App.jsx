@@ -479,6 +479,20 @@ function AuthedApp({ me }) {
     setTab('vehicles');
     setVehSel({ vin, qcNumber });
   };
+  // Start a Final QC prefilled from an awaiting-QC intake. Never silently
+  // discard an inspection that's already in progress.
+  const startQcFor = (v) => {
+    const hasWork = stage != null && (draft.stock || draft.vehicle || draft.vin);
+    if (hasWork && !window.confirm('An inspection is already in progress. Replace it with ' + (v.stock || v.vin) + '?')) {
+      setTab('inspect');
+      return;
+    }
+    setDraft({ ...newDraft('me'), stock: v.stock || '', vehicle: v.vehicle || '', vin: v.vin || '' });
+    setMarks({}); setNotes({}); setPhotosMap({}); setOptOut({});
+    setSigSigned(false);
+    setStage('form');
+    setTab('inspect');
+  };
 
   if (loadState === 'loading') return <LoadingScreen />;
   if (loadState === 'error') return <ErrorScreen onRetry={loadData} />;
@@ -588,7 +602,7 @@ function AuthedApp({ me }) {
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} />
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onStartQc={startQcFor} />
     );
   } else if (tab === 'intake') {
     content = <IntakeScreen />;

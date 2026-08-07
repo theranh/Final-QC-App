@@ -7,7 +7,7 @@ import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { exportInspectionToSheet } from "./googleSheets";
 import { registerIntakeQuoteRoute } from "./intakeQuote";
-import { registerDashboardRoute } from "./dashboard";
+import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 
 // ---------- helpers ----------
 
@@ -227,7 +227,7 @@ export function registerAppRoutes(app: Express) {
             qcNumber,
             stock: body.stock,
             vehicle: body.vehicle,
-            vin: body.vin.toUpperCase(),
+            vin: String(body.vin).trim().toUpperCase(),
             result,
             status,
             data,
@@ -250,6 +250,7 @@ export function registerAppRoutes(app: Express) {
 
       // Fire-and-forget: sheet export never blocks or fails the inspection.
       void exportInspectionToSheet(created);
+      invalidateDashboardCache(); // the new inspection leaves "awaiting Final QC" immediately
       res.status(201).json({ record: toClientRecord(created), nextQc: await nextQcPreview() });
     } catch (err) {
       next(err);
@@ -349,6 +350,7 @@ export function registerAppRoutes(app: Express) {
       // A clearing re-check means the unit finally passed QC — export it now.
       // Fire-and-forget: sheet export never blocks or fails the re-check.
       if (updated.row!.status === "cleared") void exportInspectionToSheet(updated.row!);
+      invalidateDashboardCache(); // re-check outcomes change dash counts right away
       res.json({ record: toClientRecord(updated.row!) });
     } catch (err) {
       next(err);

@@ -19,11 +19,17 @@ const STATUS_META = {
 const usd = (v) =>
   v == null ? null : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle }) {
+export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onStartQc }) {
   const vehicles = dash?.vehicles || [];
   const needle = q.trim().toUpperCase();
   const list = vehicles.filter((v) => {
     if (filter !== 'all' && v.statusKey !== filter) return false;
+    if (!needle) return true;
+    return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
+  });
+  // Awaiting Final QC = completed intake, no inspection yet — server-composed
+  // list from the Body Quoter; null means the quoter is unreachable.
+  const awaiting = (dash?.awaiting || []).filter((v) => {
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
   });
@@ -52,13 +58,37 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}
-        {dash && filter === 'awaitingFinalQc' && (
-          <div className="empty-note">
-            {dash.byStatus?.awaitingFinalQc == null
-              ? 'The Body Quoter is unreachable — awaiting-QC vehicles can’t be listed right now.'
-              : `${dash.byStatus.awaitingFinalQc} vehicle${dash.byStatus.awaitingFinalQc === 1 ? ' has' : 's have'} an intake and no Final QC yet. They appear here once inspected — start one from the Final QC tab.`}
-          </div>
+        {dash && filter === 'awaitingFinalQc' && dash.awaiting == null && (
+          <div className="empty-note">The Body Quoter is unreachable — awaiting-QC vehicles can’t be listed right now.</div>
         )}
+        {dash && filter === 'awaitingFinalQc' && dash.awaiting != null && awaiting.length === 0 && (
+          <div className="empty-note">No vehicles are awaiting Final QC{needle ? ' that match' : ''}.</div>
+        )}
+        {filter === 'awaitingFinalQc' &&
+          awaiting.map((v) => (
+            <div
+              key={v.vin}
+              onClick={() => onStartQc(v)}
+              style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {[v.stock, v.vehicle].filter(Boolean).join(' · ') || v.vin}
+                </span>
+                <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--gold)', padding: '2px 7px', borderRadius: 4, flex: '0 0 auto' }}>AWAITING QC</span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'baseline' }}>
+                <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>…{(v.vin || '').slice(-8)}</span>
+                <span style={{ flex: 1 }} />
+                {v.completedAt != null && (
+                  <span style={{ fontSize: 9.5, fontWeight: 600, color: 'var(--muted)' }}>
+                    intake {new Date(v.completedAt).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>Tap to start Final QC →</div>
+            </div>
+          ))}
         {dash && filter !== 'awaitingFinalQc' && list.length === 0 && (
           <div className="empty-note">No vehicles match.</div>
         )}
