@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react';
 import { CATS, chipStyle, catByKey } from '../lib/constants';
 import { api } from '../lib/api';
 
-// Vehicle card — both apps' records for one VIN on one screen: the TR-INTAKE-V2
-// intake (photos, steps, RO-Ready check, quote) from the Body Quoter, the Final
-// QC result per segment from this app, and the production tracker figures.
+// Vehicle card — every record for one VIN on one screen: the TR-INTAKE-V2
+// intake (photos, steps, RO-Ready check, quote) from this app's local intakes
+// table, the Final QC result per segment, and the production tracker figures.
 // When the intake predates the system (found:false) the QC half still shows —
 // never nine empty checkboxes that read as skipped work.
 
@@ -68,7 +68,7 @@ const roReadyItems = (it) => {
 };
 
 export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onOpenLightbox }) {
-  const [intake, setIntake] = useState(undefined); // undefined=loading, null=unreachable
+  const [intake, setIntake] = useState(undefined); // undefined=loading, null=load error
   useEffect(() => {
     let dead = false;
     setIntake(undefined);
@@ -112,7 +112,7 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
         {intake === undefined && <div className="empty-note">Loading intake record…</div>}
         {intake === null && (
           <div className="card" style={{ borderLeft: '3px solid var(--amber)' }}>
-            <div style={{ fontSize: 11.5, fontWeight: 600 }}>The Body Quoter is unreachable — intake half unavailable right now.</div>
+            <div style={{ fontSize: 11.5, fontWeight: 600 }}>Could not load the intake record right now.</div>
           </div>
         )}
         {intake && !intake.found && (

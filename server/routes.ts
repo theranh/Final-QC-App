@@ -6,7 +6,7 @@ import { auditLog, employees, inspections, qcCounter, type Employee, type Inspec
 import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { exportInspectionToSheet } from "./googleSheets";
-import { registerIntakeQuoteRoute } from "./intakeQuote";
+import { registerIntakeQuoteRoute } from "./localQuote";
 import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 import { registerQuoterRoutes } from "./quoter";
 import { registerPinRoutes, hashPin, isValidPin } from "./pin";

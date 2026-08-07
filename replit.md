@@ -11,6 +11,14 @@ See `README.md` for the full feature list and data model.
 - Admins approve/deactivate/reactivate employees from Settings. Inspector identity is always the signed-in user; records carry creator + last-modifier attribution.
 - `server/access.ts`: `resolveAccess` / `requireEmployee` / `requireAdmin` (401 signed-out, 403 blocked/pending/inactive).
 
+## Body Quoter (merged in)
+- The old standalone Body Quoter is folded into this app (parallel run — the old app stays up until the user retires it; see project task #6). Tables copied identically: `settings`, `quotes`, `corrections`, `photos` (bytea), `intakes`, plus `committed_by`/`overridden_by`.
+- API under `/api/quoter/*` (`server/quoter.ts`, session-authed). Pricing engine ported verbatim in `src/lib/quoterPricing.js` — identical totals is a hard requirement; never simplify its math. Classify prompt/sanitize in `src/lib/quoterClassify.js` (needs Anthropic AI env vars; returns 503 → manual classification otherwise).
+- Intake tab = TR-INTAKE-V2 checklist (`src/components/IntakeScreen.jsx`, wording verbatim) → Body Quoter flow (`QuoteScreen.jsx`, `VinScanner.jsx`).
+- PIN sign-off at commit (`server/pin.ts`, `PinDialog.jsx`): signer picks self + own 4-digit PIN; `committed_by` immutable server-side; supervisor override = countersign (`overridden_by`), distinct audit action. PIN admin in Settings (scrypt-hashed, reset-not-lookup).
+- Closed months frozen in `production_tracker` (`server/tracker.ts`, admin snapshot in Settings); current month live from the sheet; frozen values never recomputed.
+- Data copy script: `scripts/migrate-quoter-data.ts` (idempotent, resumable photos cursor; source = `QUOTER_DATABASE_URL` secret, read-only).
+
 ## Backend notes
 - `server/routes.ts`: `/api/health`, `/api/me`, `/api/bootstrap`, inspections (create with transactional unique FQ-#### numbers from `qc_counter` row id=1; recheck with `FOR UPDATE`, 409 if not open, and an integrity check that submitted items exactly match the record's open items; DELETE → 405 and audited), one-time legacy `localStorage` import (`/api/import`, duplicate-skip + counter bump), admin employee CRUD. All mutations write to the append-only `audit_log`.
 - Schema: `shared/schema.ts` (re-exports auth models from `shared/models/auth.ts`). Push changes with `npm run db:push`.

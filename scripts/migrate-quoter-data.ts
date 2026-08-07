@@ -111,7 +111,7 @@ async function migrateSettings() {
        VALUES ($1, $2, $3)
        ON CONFLICT (key) DO UPDATE
          SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
-      [row.key, row.value, row.updated_at],
+      [row.key, JSON.stringify(row.value), row.updated_at],
     );
     copied++;
   }
@@ -139,7 +139,7 @@ async function migrateQuotes() {
          SET data = EXCLUDED.data,
              updated_at = EXCLUDED.updated_at,
              committed_by = EXCLUDED.committed_by`,
-      [row.id, row.data, row.updated_at, committedBy],
+      [row.id, JSON.stringify(row.data), row.updated_at, committedBy],
     );
     copied++;
   }
@@ -336,7 +336,7 @@ async function migrateIntakes() {
         row.miles ?? "",
         row.estimator ?? "",
         row.quote_id,
-        row.data,
+        JSON.stringify(row.data),
         row.completed_at,
         row.updated_at,
         committedBy,

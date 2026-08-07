@@ -11,10 +11,18 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 
-const QUOTER_BASE = "http://quoter.test";
 const VIN_A = "1FTFW1E81NKD72360";
 const VIN_B = "1GCUYDED5KZ111111";
 const VIN_C = "3GTU9DED7LG222222";
+
+// ---------- in-memory "intakes" table (Body Quoter data, now local) ----------
+// Three completed intakes, mirroring the old remote /api/intakes-completed stub.
+type IntakeRow = { vin: string; stock: string; vehicle: string; completedAt: number | null };
+const intakeStore: IntakeRow[] = [
+  { vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
+  { vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
+  { vin: VIN_C, stock: "S-C", vehicle: "2022 Sierra", completedAt: 1 },
+];
 
 // ---------- in-memory "inspections" table ----------
 
@@ -92,6 +100,29 @@ function fakeExecute(q: any) {
     return { rows: hit ? [{ qc_number: hit.qcNumber }] : [] };
   }
   if (text.includes("FROM inspections")) return liteRowsResult();
+  // ----- local Body Quoter tables (server/localQuote.ts) -----
+  // Completed intakes list (awaiting-QC source), newest first.
+  if (text.includes("FROM intakes") && text.includes("completed_at IS NOT NULL") && text.includes("ORDER BY completed_at DESC")) {
+    return {
+      rows: intakeStore
+        .filter((i) => i.completedAt != null)
+        .slice()
+        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+        .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, completed_ms: i.completedAt })),
+    };
+  }
+  // Open (not-yet-completed) intake count.
+  if (text.includes("FROM intakes") && text.includes("completed_at IS NULL")) {
+    return { rows: [{ n: intakeStore.filter((i) => i.completedAt == null).length }] };
+  }
+  // Per-day completed-intake counts (generate_series LEFT JOIN intakes): the
+  // day granularity is irrelevant to these regression tests, so an empty set
+  // (0 per day) is a faithful stand-in.
+  if (text.includes("generate_series") && text.includes("LEFT JOIN intakes")) {
+    return { rows: [] };
+  }
+  // Latest quote per VIN for the vehicle cards — no quotes in these tests.
+  if (text.includes("FROM quotes")) return { rows: [] };
   return { rows: [] }; // audit_log aggregates, SELECT 1, etc.
 }
 
@@ -202,41 +233,9 @@ vi.mock("./tracker", () => ({
   registerTrackerRoutes: () => {},
 }));
 
-vi.mock("./intakeQuote", () => ({
-  registerIntakeQuoteRoute: () => {},
-  lookupQuoteByVin: async () => ({ found: false }),
-}));
-
-// Quoter HTTP stub: three completed intakes; everything else passes through.
+// The Body Quoter data is local now (intakes / quotes tables in this app's
+// Postgres), routed through the fake db above — no remote fetch, no FLEET_KEY.
 const realFetch = globalThis.fetch;
-vi.stubGlobal("fetch", (async (input: any, init?: any) => {
-  const url = String(typeof input === "string" ? input : input?.url ?? input);
-  if (url.startsWith(QUOTER_BASE)) {
-    if (url.includes("/api/intakes-completed")) {
-      return new Response(
-        JSON.stringify({
-          intakes: [
-            { vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
-            { vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
-            { vin: VIN_C, stock: "S-C", vehicle: "2022 Sierra", completedAt: 1 },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }
-    if (url.includes("/api/intake-stats")) {
-      return new Response(JSON.stringify({ days: [], total: 0, openIntakes: 3 }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-  }
-  return realFetch(input, init);
-}) as typeof fetch);
-
-process.env.QUOTER_URL = QUOTER_BASE;
-process.env.FLEET_KEY = "test-key";
 
 // ---------- boot the real routes against the fakes ----------
 

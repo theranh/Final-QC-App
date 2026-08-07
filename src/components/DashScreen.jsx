@@ -56,7 +56,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
     );
   }
 
-  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, intakeSource } = dash;
+  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate } = dash;
   const maxWeek = Math.max(1, ...(weekly || []).map((w) => w.finalQcs));
 
   return (
@@ -64,9 +64,6 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
       <div className="screen-topbar">
         <div className="screen-title-row">
           <span className="screen-title">Dashboard</span>
-          {intakeSource !== 'live' && (
-            <span style={{ fontSize: 8.5, fontWeight: 700, color: 'var(--amber)' }}>INTAKE DATA UNAVAILABLE</span>
-          )}
         </div>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>

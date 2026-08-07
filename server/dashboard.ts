@@ -4,23 +4,26 @@ import { db } from "./db";
 import { requireEmployee } from "./access";
 import { monthTabName, readTrackerRange } from "./googleSheets";
 import { frozenMonth } from "./tracker";
-import { lookupQuoteByVin } from "./intakeQuote";
+import {
+  fetchCompletedIntakes,
+  fetchIntakeStats,
+  lookupIntakeByVin,
+} from "./localQuote";
 
 // One dashboard endpoint: GET /api/dashboard?from=<ISO>&to=<ISO>.
 // Composes, server-side, in one response:
 //   - this app's Postgres (inspections + audit_log)
-//   - the Body Quoter (/api/intake-stats for the range; quote summaries per VIN)
+//   - the Body Quoter data, now local in this app's Postgres (quotes + intakes:
+//     daily counts for the range, quote summaries per VIN, completed intakes)
 //   - the VPC Production Tracker sheet (money figures, read as typed — never recomputed)
 // Every KPI is computed here and only here; the client renders, it never recomputes.
-// If the Body Quoter is unreachable the QC half still returns, flagged
-// "intakeSource": "unavailable". Same idea for the sheet: "trackerSource".
+// If the sheet is unreachable the rest still returns, flagged "trackerSource":
+// "unavailable". The Quoter data is local now, so it is always available.
 // Aggregates cover EVERY inspection: the SQL projects trimmed rows (no photo
 // blobs), so reading the whole table stays cheap.
 
 const PAYLOAD_CACHE_MS = 25_000;
-const REMOTE_CACHE_MS = 60_000; // Body Quoter + sheet reads, per the spec
-const QUOTE_CONCURRENCY = 5;
-const MAX_FRESH_QUOTES_PER_BUILD = 60;
+const REMOTE_CACHE_MS = 60_000; // sheet reads, per the spec
 const SHEETS_TIMEOUT_MS = 10_000;
 const TABLE_FIRST_DATA_ROW = 21; // row 20 is the tracker's table header
 const TZ = "America/Chicago";
@@ -37,19 +40,7 @@ export function invalidateDashboardCache() {
   payloadCache.clear();
 }
 const payloadInFlight = new Map<string, Promise<unknown>>();
-const quoteCache = new Map<string, { at: number; body: QuoteSummary }>();
-const statsCache = new Map<string, { at: number; body: IntakeStats | null }>();
 let sheetCache: { at: number; body: SheetData | null } | null = null;
-
-type QuoteSummary = {
-  found: boolean;
-  estimator?: string;
-  quotedAt?: number;
-  totals?: { hrs?: number; usd?: number };
-  lineCount?: number;
-};
-
-type IntakeStats = { days: { day: string; intakes: number }[]; total?: number; openIntakes?: number };
 
 type TrackerRow = {
   roOpen: string | null;
@@ -130,110 +121,37 @@ function eachDay(from: string, to: string): string[] {
   return out;
 }
 
-// ---------- Body Quoter ----------
+// ---------- Body Quoter (local: quotes / intakes tables) ----------
 
-function quoterConfig(): { base: string; key: string } | null {
-  const base = process.env.QUOTER_URL;
-  const key = process.env.FLEET_KEY;
-  if (!base || !key) return null;
-  return { base: base.replace(/\/+$/, ""), key };
-}
+type QuoteSummary = {
+  found: boolean;
+  totals?: { hrs?: number; usd?: number };
+  lineCount?: number;
+};
 
-async function quoterGet(path: string): Promise<any | null> {
-  const cfg = quoterConfig();
-  if (!cfg) return null;
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
-  try {
-    const r = await fetch(`${cfg.base}${path}`, { headers: { "x-fleet-key": cfg.key }, signal: ctl.signal });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** /api/intake-stats for the range, cached 60s. Null = quoter unreachable. */
-async function fetchIntakeStats(from: string, to: string): Promise<IntakeStats | null> {
-  const key = `${from}|${to}`;
-  const hit = statsCache.get(key);
-  if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return hit.body;
-  const d = await quoterGet(`/api/intake-stats?from=${from}&to=${to}`);
-  const body: IntakeStats | null = d && Array.isArray(d.days)
-    ? {
-        days: d.days
-          .map((r: any) => ({ day: parseISODay(r?.day) as string, intakes: num(r?.intakes) ?? 0 }))
-          .filter((r: any) => r.day),
-        total: num(d.total) ?? undefined,
-        openIntakes: num(d.openIntakes) ?? undefined,
-      }
-    : null;
-  statsCache.set(key, { at: Date.now(), body });
-  if (statsCache.size > 20) statsCache.delete(statsCache.keys().next().value as string);
-  return body;
-}
-
-type CompletedIntake = { vin: string; stock: string; vehicle: string; completedAt: number | null };
-
-let completedCache: { at: number; body: CompletedIntake[] | null } | null = null;
-
-/** All completed intakes from the quoter, cached 60s. Null = unreachable.
- *  Tolerant field readers — the quoter's row shape may evolve. */
-async function fetchIntakesCompleted(): Promise<CompletedIntake[] | null> {
-  if (completedCache && Date.now() - completedCache.at < REMOTE_CACHE_MS) return completedCache.body;
-  const d = await quoterGet("/api/intakes-completed");
-  const raw = Array.isArray(d?.intakes) ? d.intakes : Array.isArray(d) ? d : null;
-  const body: CompletedIntake[] | null = raw
-    ? raw
-        .map((r: any) => ({
-          vin: String(r?.vin ?? r?.VIN ?? "").trim().toUpperCase(),
-          stock: String(r?.stock ?? r?.stockNumber ?? r?.stock_no ?? "").trim(),
-          vehicle: String(r?.vehicle ?? r?.description ?? r?.truck ?? "").trim(),
-          completedAt: num(r?.completedAt ?? r?.completed_at ?? r?.ts) ?? null,
-        }))
-        .filter((r: CompletedIntake) => r.vin.length >= 6)
-    : null;
-  completedCache = { at: Date.now(), body };
-  return body;
-}
-
-/** Trimmed quote summary per VIN, via the shared quote-by-vin cache. */
-async function fetchQuote(vin: string): Promise<QuoteSummary> {
-  const hit = quoteCache.get(vin);
-  if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return hit.body;
-  const d: any = await lookupQuoteByVin(vin);
-  const body: QuoteSummary = d?.found
-    ? {
-        found: true,
-        estimator: d.estimator,
-        quotedAt: d.quotedAt,
-        totals: { hrs: d.totals?.hrs, usd: d.totals?.usd },
-        lineCount: Array.isArray(d.lines) ? d.lines.length : d.lineCount,
-      }
-    : { found: false };
-  quoteCache.set(vin, { at: Date.now(), body });
-  if (quoteCache.size > 1000) quoteCache.delete(quoteCache.keys().next().value as string);
-  return body;
-}
-
+/** Trimmed quote summaries per VIN. One query fetches the latest quote for
+ *  every requested VIN (newest by the quote's stored `ts`, VIN upper-cased) —
+ *  mirroring the old quote-by-vin matching — so the vehicle-card fields
+ *  (hrs / usd / lineCount) stay identical. */
 async function fetchQuotes(vins: string[]): Promise<Map<string, QuoteSummary>> {
   const out = new Map<string, QuoteSummary>();
   const unique = [...new Set(vins.filter((v) => v && v.length >= 6))];
-  const queue: string[] = [];
-  for (const vin of unique) {
-    const hit = quoteCache.get(vin);
-    if (hit) out.set(vin, hit.body);
-    if ((!hit || Date.now() - hit.at >= REMOTE_CACHE_MS) && queue.length < MAX_FRESH_QUOTES_PER_BUILD) queue.push(vin);
+  if (!unique.length) return out;
+  const res = await db.execute(sql`
+    SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, data
+    FROM quotes
+    WHERE UPPER(data->>'vin') = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+    ORDER BY UPPER(data->>'vin'), (data->>'ts')::bigint DESC
+  `);
+  for (const r of ((res as any).rows ?? res) as any[]) {
+    const q = (r.data as any) || {};
+    const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
+    out.set(String(r.vin), {
+      found: true,
+      totals: { hrs: q.totals?.hrs, usd: q.totals?.usd },
+      lineCount,
+    });
   }
-  const workers = Array.from({ length: Math.min(QUOTE_CONCURRENCY, queue.length) }, async () => {
-    while (queue.length) {
-      const vin = queue.shift()!;
-      out.set(vin, await fetchQuote(vin));
-    }
-  });
-  await Promise.all(workers);
   return out;
 }
 
@@ -421,7 +339,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     fetchLiteRows(),
     fetchIntakeStats(from, to),
     fetchSheetData(),
-    fetchIntakesCompleted(),
+    fetchCompletedIntakes(),
   ]);
 
   const trackerByVin = sheet?.byVin ?? new Map<string, TrackerRow>();
@@ -494,7 +412,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     avgFailToClearDays,
   };
 
-  // ----- daily: finalQcs from audit_log, intakes from the quoter -----
+  // ----- daily: finalQcs from audit_log, intakes from local intakes table -----
   const qcByDay = await db.execute(sql`
     SELECT to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
     FROM audit_log
@@ -505,7 +423,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   const qcDayMap = new Map<string, number>();
   for (const r of ((qcByDay as any).rows ?? qcByDay) as any[]) qcDayMap.set(String(r.day), Number(r.n) || 0);
   const intakeDayMap = new Map<string, number>();
-  for (const d of stats?.days ?? []) intakeDayMap.set(d.day, d.intakes);
+  for (const d of stats.days) intakeDayMap.set(d.day, d.intakes);
   const daily = eachDay(from, to).map((day) => ({
     day,
     intakes: intakeDayMap.get(day) ?? 0,
@@ -528,7 +446,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   const qc7Map = new Map<string, number>();
   for (const r of ((qc7Res as any).rows ?? qc7Res) as any[]) qc7Map.set(String(r.day), Number(r.n) || 0);
   const intake7Map = new Map<string, number>();
-  for (const d of stats7?.days ?? []) intake7Map.set(d.day, d.intakes);
+  for (const d of stats7.days) intake7Map.set(d.day, d.intakes);
   const tracker7Days = eachDay(d7from, today).map((day) => ({
     day,
     intakes: intake7Map.get(day) ?? 0,
@@ -543,18 +461,16 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   };
 
   // ----- awaiting Final QC: completed intake, no inspection yet -----
-  // Only the Body Quoter knows completed intakes; null (not empty/0) when it
-  // is unreachable, so the client can say "unavailable" instead of lying.
+  // A plain join now that intakes are local: every completed intake whose VIN
+  // has no inspection row (VINs already normalized trim/upper on both sides).
   const inspectedVins = new Set(rows.map((r) => r.vin));
   const awaiting = completedIntakes
-    ? completedIntakes
-        .filter((i) => !inspectedVins.has(i.vin))
-        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
-    : null;
+    .filter((i) => !inspectedVins.has(i.vin))
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
 
   // ----- byStatus -----
   const byStatus = {
-    awaitingFinalQc: awaiting ? awaiting.length : stats?.openIntakes ?? null,
+    awaitingFinalQc: awaiting.length,
     openRecheck: openRechecks,
     frontlineReady: vehicles.filter((v) => v.statusKey === "frontlineReady").length,
     released: vehicles.filter((v) => v.statusKey === "released").length,
@@ -649,7 +565,6 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   return {
     generatedAt: Date.now(),
     range: { from, to },
-    intakeSource: stats ? "live" : "unavailable",
     trackerSource: sheet ? "live" : "unavailable",
     kpi,
     daily,
@@ -701,19 +616,13 @@ export function registerDashboardRoute(app: Express) {
   });
 
   // Full TR-INTAKE-V2 intake record for one VIN (photos, steps, RO-Ready check),
-  // for the vehicle card. found:false = the intake predates this system.
-  const intakeCache = new Map<string, { at: number; body: unknown }>();
+  // for the vehicle card, read from this app's local intakes table.
+  // found:false = the intake predates this system.
   app.get("/api/intake/:vin", requireEmployee, async (req, res, next) => {
     try {
       const vin = String(req.params.vin || "").trim().toUpperCase();
       if (vin.length < 6) return res.status(400).json({ message: "Invalid VIN" });
-      const hit = intakeCache.get(vin);
-      if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return res.json(hit.body);
-      const body = await quoterGet(`/api/intake-by-vin?vin=${encodeURIComponent(vin)}`);
-      if (!body) return res.status(502).json({ message: "Body Quoter is unreachable" });
-      intakeCache.set(vin, { at: Date.now(), body });
-      if (intakeCache.size > 500) intakeCache.delete(intakeCache.keys().next().value as string);
-      res.json(body);
+      res.json(await lookupIntakeByVin(vin));
     } catch (err) {
       next(err);
     }

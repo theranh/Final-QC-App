@@ -28,7 +28,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
   });
   // Awaiting Final QC = completed intake, no inspection yet — server-composed
-  // list from the Body Quoter; null means the quoter is unreachable.
+  // list from this app's local intakes table.
   const awaiting = (dash?.awaiting || []).filter((v) => {
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
@@ -58,10 +58,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}
-        {dash && filter === 'awaitingFinalQc' && dash.awaiting == null && (
-          <div className="empty-note">The Body Quoter is unreachable — awaiting-QC vehicles can’t be listed right now.</div>
-        )}
-        {dash && filter === 'awaitingFinalQc' && dash.awaiting != null && awaiting.length === 0 && (
+        {dash && filter === 'awaitingFinalQc' && awaiting.length === 0 && (
           <div className="empty-note">No vehicles are awaiting Final QC{needle ? ' that match' : ''}.</div>
         )}
         {filter === 'awaitingFinalQc' &&

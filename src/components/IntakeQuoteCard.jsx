@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 
-// Read-only view of what the Intake & Body Quoter wrote up for this VIN.
-// Renders nothing until a full VIN is present and a quote is actually found.
+// Read-only view of what the Body Quoter wrote up for this VIN, read from this
+// app's local quotes table. Renders nothing until a full VIN is present and a
+// quote is actually found.
 
 const PANEL_LABELS = {
   hood: 'Hood', roof: 'Roof', tailgate: 'Tailgate',
@@ -70,7 +71,7 @@ export default function IntakeQuoteCard({ vin }) {
       <div className="card">
         <div className="card-title">INTAKE DAMAGE QUOTE</div>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 7 }}>
-          Could not reach the quoter. Inspect as normal.
+          Could not load the intake quote. Inspect as normal.
         </div>
       </div>
     );
