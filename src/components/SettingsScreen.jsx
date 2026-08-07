@@ -11,7 +11,7 @@ const STATUS_META = {
   inactive: { label: 'DEACTIVATED', bg: 'var(--muted)' },
 };
 
-export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExportBackup, onImported, showToast }) {
+export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs, nextQc, onExportBackup, onImported, showToast }) {
   const importRef = useRef(null);
   const [employees, setEmployees] = useState(null);
   const [empError, setEmpError] = useState(false);
@@ -234,14 +234,22 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
 
   const backupMeta = `${recs.length} inspection${recs.length === 1 ? '' : 's'} · ${photoCount} photo${photoCount === 1 ? '' : 's'} · next ID FQ-${nextQc}`;
 
-  const daysSinceBackup = lastBackupAt ? Math.floor((Date.now() - lastBackupAt) / 86400000) : null;
+  // Admins see the authoritative team-wide time (server audit log — exports
+  // from any device count); non-admins still see this device's local record.
+  // serverBackupAt: undefined = still loading, null = no export ever.
+  const usingServerTime = isAdmin && serverBackupAt !== undefined;
+  const effectiveBackupAt = usingServerTime ? serverBackupAt : lastBackupAt;
+  const daysSinceBackup = effectiveBackupAt ? Math.floor((Date.now() - effectiveBackupAt) / 86400000) : null;
   const backupStale = daysSinceBackup == null || daysSinceBackup >= 7;
+  const scopeSuffix = usingServerTime ? ' (whole team, any device)' : ' on this device';
   const backupStatusLabel =
     daysSinceBackup == null
-      ? 'Never backed up on this device.'
+      ? usingServerTime
+        ? 'No server backup has ever been exported.'
+        : 'Never backed up on this device.'
       : daysSinceBackup === 0
-      ? `Last backup: today (${fmtDT(lastBackupAt)}).`
-      : `Last backup: ${daysSinceBackup} day${daysSinceBackup === 1 ? '' : 's'} ago (${fmtDT(lastBackupAt)}).`;
+      ? `Last backup: today (${fmtDT(effectiveBackupAt)})${scopeSuffix}.`
+      : `Last backup: ${daysSinceBackup} day${daysSinceBackup === 1 ? '' : 's'} ago (${fmtDT(effectiveBackupAt)})${scopeSuffix}.`;
 
   const canAdd = newEmail.trim().toLowerCase().endsWith('@truckranch.com');
 

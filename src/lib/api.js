@@ -41,6 +41,7 @@ export const api = {
   commitRecheck: (qc, payload) => request('POST', `/api/inspections/${encodeURIComponent(qc)}/recheck`, payload),
   importLegacy: (payload) => request('POST', '/api/import', payload),
   exportBackup: () => request('GET', '/api/export'),
+  backupStatus: () => request('GET', '/api/backup-status'),
   employees: () => request('GET', '/api/employees'),
   addEmployee: (payload) => request('POST', '/api/employees', payload),
   updateEmployee: (id, patch) => request('PATCH', `/api/employees/${id}`, patch),

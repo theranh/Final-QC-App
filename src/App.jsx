@@ -92,6 +92,18 @@ function AuthedApp({ me, onAuthRefresh }) {
   const [toastMsg, setToastMsg] = useState(null);
   const [lightbox, setLightbox] = useState(null);
   const [lastBackupAt, setLastBackupAt] = useState(() => loadLS('lastBackupAt', null));
+  // Authoritative team-wide last-backup time (admins only): read from the
+  // server's audit log, so exports taken on ANY device/admin count.
+  // null = no export ever; undefined = not loaded yet.
+  const [serverBackupAt, setServerBackupAt] = useState(undefined);
+  const refreshBackupStatus = useCallback(() => {
+    if (!me.isAdmin) return;
+    api
+      .backupStatus()
+      .then((d) => setServerBackupAt(d.lastExportAt ? new Date(d.lastExportAt).getTime() : null))
+      .catch(() => {}); // silent — keep the last known value
+  }, [me.isAdmin]);
+  useEffect(() => { refreshBackupStatus(); }, [refreshBackupStatus]);
 
   const sigRef = useRef(null);
   const rcSigRef = useRef(null);
@@ -480,6 +492,7 @@ function AuthedApp({ me, onAuthRefresh }) {
       const ts = Date.now();
       setLastBackupAt(ts);
       saveLS('lastBackupAt', ts);
+      if (me?.isAdmin) setServerBackupAt(ts); // server audited the export just now
       showToast('Backup downloaded ✓');
     };
     if (me?.isAdmin && opts.full) {
@@ -494,6 +507,7 @@ function AuthedApp({ me, onAuthRefresh }) {
       const ts = Date.now();
       setLastBackupAt(ts);
       saveLS('lastBackupAt', ts);
+      setServerBackupAt(ts); // the server audits the export as it streams
       showToast('Full backup download started (large file — check your downloads)');
       return;
     }
@@ -540,6 +554,13 @@ function AuthedApp({ me, onAuthRefresh }) {
     setStage('form');
     setTab('inspect');
   };
+
+  // Stale-backup nudge (admins): no server export in the audit log for over a
+  // week — or ever. Hidden until the status has actually loaded.
+  const backupNudge =
+    me.isAdmin &&
+    serverBackupAt !== undefined &&
+    (serverBackupAt == null || Date.now() - serverBackupAt > 7 * 86400000);
 
   if (loadState === 'loading') return <LoadingScreen waking={waking} />;
   if (loadState === 'error') return <ErrorScreen onRetry={loadData} />;
@@ -678,6 +699,7 @@ function AuthedApp({ me, onAuthRefresh }) {
       <SettingsScreen
         me={me}
         lastBackupAt={lastBackupAt}
+        serverBackupAt={serverBackupAt}
         recs={recs}
         nextQc={nextQc || 1001}
         onExportBackup={onExportBackup}
@@ -691,6 +713,19 @@ function AuthedApp({ me, onAuthRefresh }) {
     <div className="app-shell">
       <div className="app-frame">
         {updateReady && <UpdateBanner onRefresh={applyUpdate} />}
+        {backupNudge && !inFlow && tab !== 'settings' && (
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--amber)', color: '#fff', fontSize: 10.5, fontWeight: 700, padding: '8px 14px', cursor: 'pointer' }}
+            onClick={() => { setTab('settings'); setViewRec(null); setVehSel(null); }}
+          >
+            <span style={{ flex: 1, lineHeight: 1.4 }}>
+              {serverBackupAt == null
+                ? '● The shared database has never been backed up. Export a backup from Settings.'
+                : `● Last team backup was ${Math.floor((Date.now() - serverBackupAt) / 86400000)} days ago. Export a fresh backup from Settings.`}
+            </span>
+            <span style={{ flex: '0 0 auto', textDecoration: 'underline' }}>Settings →</span>
+          </div>
+        )}
         <Header tab={tab} onSettings={inFlow ? null : () => { setTab('settings'); setViewRec(null); setVehSel(null); }} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}

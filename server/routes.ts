@@ -504,6 +504,22 @@ export function registerAppRoutes(app: Express) {
     }
   });
 
+  // When did the team last take an authoritative server backup? Read from the
+  // audit log ("exported" actions) so any admin's export counts, on any device.
+  app.get("/api/backup-status", requireAdmin, async (_req, res, next) => {
+    try {
+      const [row] = await db
+        .select({ at: auditLog.at })
+        .from(auditLog)
+        .where(eq(auditLog.action, "exported"))
+        .orderBy(desc(auditLog.at))
+        .limit(1);
+      res.json({ lastExportAt: row ? row.at.toISOString() : null });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Authoritative server-side backup: inspections, employee allowlist, and the
   // QC counter, straight from the database — never rebuilt from client state.
   // ?photos=full streams every photo's binary (as base64) into the file —
