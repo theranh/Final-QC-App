@@ -9,3 +9,6 @@ Replit's built-in Google Sheets connector grants **read-only** scopes — it can
 **Business rule (user-set, July 2026):** failed QCs are NOT exported. A unit reaches the sheet only when status is `pass` or `cleared` (re-check fixed everything); cleared units use clearedTs as the completed date and note "Passed after re-check".
 
 **Concurrency:** exports are serialized through an in-process promise queue because read-target-row-then-write is not atomic; FQ-number matching also makes re-exports idempotent.
+
+## Tracker table layout (read side, row 20 headers / data from row 21)
+A VIN · B RO Open · C Completed · D Picture Received · E Retail Plan $ · F Closed RO $ · G Days Pic-to-Close · H Days in Production · I Variance $ · J Variance % · K–O dept columns · P QC Result · Q notes. Per-row variance exists in I/J — read it as typed, never recompute money client- or server-side.

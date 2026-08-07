@@ -1,39 +1,48 @@
 import type { Express } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
-import { inspections, type Inspection } from "@shared/schema";
-import { desc } from "drizzle-orm";
 import { requireEmployee } from "./access";
 import { monthTabName, readTrackerRange } from "./googleSheets";
 import { lookupQuoteByVin } from "./intakeQuote";
 
-// Read-only aggregate feed for the VPC live dashboard. One endpoint, three
-// sources: the inspections table, the Body Quoter (per-VIN quote lookups via
-// FLEET_KEY), and the VPC Production Tracker sheet. Nothing is written
-// anywhere; the whole payload is cached briefly so a room of polling phones
-// doesn't hammer Sheets or the quoter.
+// One dashboard endpoint: GET /api/dashboard?from=<ISO>&to=<ISO>.
+// Composes, server-side, in one response:
+//   - this app's Postgres (inspections + audit_log)
+//   - the Body Quoter (/api/intake-stats for the range; quote summaries per VIN)
+//   - the VPC Production Tracker sheet (money figures, read as typed — never recomputed)
+// Every KPI is computed here and only here; the client renders, it never recomputes.
+// If the Body Quoter is unreachable the QC half still returns, flagged
+// "intakeSource": "unavailable". Same idea for the sheet: "trackerSource".
+// Aggregates cover EVERY inspection: the SQL projects trimmed rows (no photo
+// blobs), so reading the whole table stays cheap.
 
 const PAYLOAD_CACHE_MS = 25_000;
-const QUOTE_CACHE_MS = 10 * 60_000; // quotes barely change; refresh every 10 min
+const REMOTE_CACHE_MS = 60_000; // Body Quoter + sheet reads, per the spec
 const QUOTE_CONCURRENCY = 5;
-const MAX_FRESH_QUOTES_PER_BUILD = 60; // cap upstream work per refresh
-const MAX_VEHICLES = 400; // dashboard shows recent activity, not all history
+const MAX_FRESH_QUOTES_PER_BUILD = 60;
 const SHEETS_TIMEOUT_MS = 10_000;
 const TABLE_FIRST_DATA_ROW = 21; // row 20 is the tracker's table header
+const TZ = "America/Chicago";
 
-let payloadCache: { at: number; body: unknown } | null = null;
-let payloadInFlight: Promise<unknown> | null = null;
+const SEGMENTS = ["mech", "cosm", "detail", "bed", "ceramic", "under"] as const;
 
-const quoteCache = new Map<string, { at: number; body: IntakeSummary }>();
+// ---------- caches ----------
 
-type IntakeSummary = {
+const payloadCache = new Map<string, { at: number; body: unknown }>();
+const payloadInFlight = new Map<string, Promise<unknown>>();
+const quoteCache = new Map<string, { at: number; body: QuoteSummary }>();
+const statsCache = new Map<string, { at: number; body: IntakeStats | null }>();
+let sheetCache: { at: number; body: SheetData | null } | null = null;
+
+type QuoteSummary = {
   found: boolean;
   estimator?: string;
-  stock?: string;
   quotedAt?: number;
   totals?: { hrs?: number; usd?: number };
   lineCount?: number;
 };
+
+type IntakeStats = { days: { day: string; intakes: number }[]; total?: number; openIntakes?: number };
 
 type TrackerRow = {
   roOpen: string | null;
@@ -43,7 +52,30 @@ type TrackerRow = {
   closedRO: number | null;
   daysPictureToClose: number | null;
   daysInProduction: number | null;
+  variance: number | null; // column I, read as typed — never recomputed
+  variancePct: number | null; // column J, read as typed
   notes: string | null;
+};
+
+type SheetData = {
+  summary: Record<string, number | null>;
+  byVin: Map<string, TrackerRow>;
+};
+
+/** Trimmed inspection row — projected in SQL, never includes photo blobs. */
+type LiteRow = {
+  qcNumber: string;
+  stock: string;
+  vehicle: string;
+  vin: string;
+  result: string;
+  status: string;
+  inspector: string | null;
+  title: string | null;
+  ts: number;
+  clearedTs: number | null;
+  openItems: { cat: string; item: string; note: string }[];
+  failItems: { cat: string; item: string }[];
 };
 
 // ---------- helpers ----------
@@ -53,7 +85,7 @@ const money = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 const num = (v: unknown): number | null => {
-  const n = parseFloat(String(v ?? "").replace(/,/g, ""));
+  const n = parseFloat(String(v ?? "").replace(/[,%\s]/g, ""));
   return Number.isFinite(n) ? n : null;
 };
 const text = (v: unknown): string | null => {
@@ -61,26 +93,37 @@ const text = (v: unknown): string | null => {
   return s || null;
 };
 
-/** Bounded deadline so a stalled upstream can never wedge the payload build. */
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
     p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      }
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
     );
   });
 }
 
-const MMDD = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "2-digit", day: "2-digit" });
+const DAY_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" });
+const dayOf = (ts: number | Date): string => DAY_FMT.format(ts);
 
-// ---------- quoter (intake) lookups ----------
+function parseISODay(s: unknown): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s ?? "").trim());
+  return m ? m[0] : null;
+}
+
+/** Enumerate YYYY-MM-DD days from..to inclusive (bounded). */
+function eachDay(from: string, to: string): string[] {
+  const out: string[] = [];
+  let cur = new Date(`${from}T12:00:00Z`);
+  const end = new Date(`${to}T12:00:00Z`);
+  for (let i = 0; i < 400 && cur <= end; i++) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur = new Date(cur.getTime() + 86_400_000);
+  }
+  return out;
+}
+
+// ---------- Body Quoter ----------
 
 function quoterConfig(): { base: string; key: string } | null {
   const base = process.env.QUOTER_URL;
@@ -89,17 +132,51 @@ function quoterConfig(): { base: string; key: string } | null {
   return { base: base.replace(/\/+$/, ""), key };
 }
 
-async function fetchQuote(vin: string): Promise<IntakeSummary> {
+async function quoterGet(path: string): Promise<any | null> {
+  const cfg = quoterConfig();
+  if (!cfg) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(`${cfg.base}${path}`, { headers: { "x-fleet-key": cfg.key }, signal: ctl.signal });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** /api/intake-stats for the range, cached 60s. Null = quoter unreachable. */
+async function fetchIntakeStats(from: string, to: string): Promise<IntakeStats | null> {
+  const key = `${from}|${to}`;
+  const hit = statsCache.get(key);
+  if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return hit.body;
+  const d = await quoterGet(`/api/intake-stats?from=${from}&to=${to}`);
+  const body: IntakeStats | null = d && Array.isArray(d.days)
+    ? {
+        days: d.days
+          .map((r: any) => ({ day: parseISODay(r?.day) as string, intakes: num(r?.intakes) ?? 0 }))
+          .filter((r: any) => r.day),
+        total: num(d.total) ?? undefined,
+        openIntakes: num(d.openIntakes) ?? undefined,
+      }
+    : null;
+  statsCache.set(key, { at: Date.now(), body });
+  if (statsCache.size > 20) statsCache.delete(statsCache.keys().next().value as string);
+  return body;
+}
+
+/** Trimmed quote summary per VIN, via the shared quote-by-vin cache. */
+async function fetchQuote(vin: string): Promise<QuoteSummary> {
   const hit = quoteCache.get(vin);
-  if (hit && Date.now() - hit.at < QUOTE_CACHE_MS) return hit.body;
-  // Shared lookup + 60s cache in intakeQuote.ts (same FLEET_KEY code path the
-  // per-VIN card uses); this layer only trims the payload for the dashboard.
+  if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return hit.body;
   const d: any = await lookupQuoteByVin(vin);
-  const body: IntakeSummary = d?.found
+  const body: QuoteSummary = d?.found
     ? {
         found: true,
         estimator: d.estimator,
-        stock: d.stock,
         quotedAt: d.quotedAt,
         totals: { hrs: d.totals?.hrs, usd: d.totals?.usd },
         lineCount: Array.isArray(d.lines) ? d.lines.length : d.lineCount,
@@ -110,18 +187,14 @@ async function fetchQuote(vin: string): Promise<IntakeSummary> {
   return body;
 }
 
-async function fetchQuotes(vins: string[]): Promise<Map<string, IntakeSummary>> {
-  const out = new Map<string, IntakeSummary>();
+async function fetchQuotes(vins: string[]): Promise<Map<string, QuoteSummary>> {
+  const out = new Map<string, QuoteSummary>();
   const unique = [...new Set(vins.filter((v) => v && v.length >= 6))];
-  // Serve from cache first (even slightly stale beats blocking the build);
-  // only a bounded number of uncached VINs hit the quoter per refresh.
   const queue: string[] = [];
   for (const vin of unique) {
     const hit = quoteCache.get(vin);
     if (hit) out.set(vin, hit.body);
-    if ((!hit || Date.now() - hit.at >= QUOTE_CACHE_MS) && queue.length < MAX_FRESH_QUOTES_PER_BUILD) {
-      queue.push(vin);
-    }
+    if ((!hit || Date.now() - hit.at >= REMOTE_CACHE_MS) && queue.length < MAX_FRESH_QUOTES_PER_BUILD) queue.push(vin);
   }
   const workers = Array.from({ length: Math.min(QUOTE_CONCURRENCY, queue.length) }, async () => {
     while (queue.length) {
@@ -133,62 +206,30 @@ async function fetchQuotes(vins: string[]): Promise<Map<string, IntakeSummary>> 
   return out;
 }
 
-/** Daily intake counts from the quoter, if it exposes /api/intakes-by-day. */
-async function fetchIntakesByDay(days: number): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  const cfg = quoterConfig();
-  if (!cfg) return out;
-  try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 8000);
-    try {
-      const r = await fetch(`${cfg.base}/api/intakes-by-day?days=${days}`, {
-        headers: { "x-fleet-key": cfg.key },
-        signal: ctl.signal,
-      });
-      if (!r.ok) return out; // endpoint may not exist yet — degrade to zero
-      const d: any = await r.json();
-      const rows: any[] = Array.isArray(d) ? d : d?.days || d?.rows || [];
-      for (const row of rows) {
-        const day = text(row?.day ?? row?.date);
-        const count = num(row?.intakes ?? row?.count);
-        if (day && count != null) out.set(day, count);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    // quoter unreachable — intakes just read 0
-  }
-  return out;
-}
-
 // ---------- tracker sheet ----------
 
-/** Summary block (rows 1–19) parsed by label keywords, read as-is per the sheet. */
-function parseSummary(rows: string[][] | null): Record<string, number> {
-  const summary: Record<string, number> = { completed: 0, retailPlan: 0, closedRO: 0, variance: 0, claimsApproved: 0 };
+/** Summary block (rows 1–19) parsed by label keywords, read as typed. */
+function parseSummary(rows: string[][] | null): Record<string, number | null> {
+  const summary: Record<string, number | null> = {
+    completed: null, retailPlan: null, closedRO: null, variance: null, variancePct: null, claimsApproved: null,
+  };
   if (!rows) return summary;
-  // Labels as they appear on the tracker: "Vehicles Completed",
-  // "Total Retail Plan $", "Total Closed RO $", "Total Variance $" (NOT the
-  // "%" row right under it), and three "Claims Approved — <dept>" rows that
-  // sum into one number.
   const want: [string, RegExp, boolean][] = [
     ["completed", /^vehicles\s*completed/i, false],
     ["retailPlan", /retail\s*plan\s*\$/i, false],
     ["closedRO", /closed\s*ro\s*\$/i, false],
     ["variance", /variance\s*\$/i, false],
+    ["variancePct", /variance\s*%/i, false],
     ["claimsApproved", /claims?\s*approved/i, true],
   ];
   for (const row of rows) {
     const label = String(row?.[0] ?? "").trim();
     for (const [key, re, sum] of want) {
       if (!re.test(label)) continue;
-      // Month value sits in the next non-empty cell to the right (column B).
       for (let v = 1; v < row.length; v++) {
         const val = money(row[v]);
         if (val != null) {
-          summary[key] = sum ? summary[key] + val : val;
+          summary[key] = sum ? (summary[key] ?? 0) + val : val;
           break;
         }
       }
@@ -198,94 +239,45 @@ function parseSummary(rows: string[][] | null): Record<string, number> {
   return summary;
 }
 
-function parseVehicleRows(rows: string[][] | null): Map<string, TrackerRow> {
-  const out = new Map<string, TrackerRow>();
-  if (!rows) return out;
+// Tracker table columns (row 20 headers): A VIN · B RO Open Date · C Completed
+// Date · D Picture Received · E Retail Plan $ · F Closed RO $ · G Days Picture
+// to Close · H Days in Production · I Variance $ · J Variance % · K–O depts ·
+// P QC Result · Q notes.
+function parseVehicleRows(rows: string[][] | null, into: Map<string, TrackerRow>) {
+  if (!rows) return;
   for (const r of rows) {
     const vin = String(r?.[0] ?? "").trim().toUpperCase();
-    if (!vin) continue;
-    if (out.has(vin)) continue; // first occurrence wins; repeats keyed off qcNumber client-side
-    out.set(vin, {
-      roOpen: text(r[1]), // B
-      completed: text(r[2]), // C
-      pictureReceived: text(r[3]), // D
-      retailPlan: money(r[4]), // E
-      closedRO: money(r[5]), // F
-      daysPictureToClose: num(r[6]), // G
-      daysInProduction: num(r[7]), // H
-      notes: text(r[16]), // Q
+    if (!vin || into.has(vin)) continue; // first occurrence wins (current month read first)
+    into.set(vin, {
+      roOpen: text(r[1]),
+      completed: text(r[2]),
+      pictureReceived: text(r[3]),
+      retailPlan: money(r[4]),
+      closedRO: money(r[5]),
+      daysPictureToClose: num(r[6]),
+      daysInProduction: num(r[7]),
+      variance: money(r[8]),
+      variancePct: num(r[9]),
+      notes: text(r[16]),
     });
   }
-  return out;
 }
 
-// ---------- payload assembly ----------
-
-export async function buildPayload(): Promise<unknown> {
-  const rows = await db.select().from(inspections).orderBy(desc(inspections.createdAt)).limit(MAX_VEHICLES);
-
-  // Vehicles straight off the inspections table (no photo blobs).
-  const vehicles = rows.map((row: Inspection) => {
-    const data = (row.data as any) || {};
-    const finalizedTs = row.status === "cleared" && data.clearedTs ? Number(data.clearedTs) : Number(data.ts) || new Date(row.createdAt).getTime();
-    const fails = ((data.openItems as any[]) || []).map((oi) => ({
-      k: oi?.cat,
-      item: oi?.item,
-      note: oi?.note || "",
-    }));
-    return {
-      vin: row.vin,
-      stock: row.stock,
-      vehicle: row.vehicle,
-      qcNumber: row.qcNumber,
-      result: row.result,
-      status: row.status,
-      inspector: data.inspector || null,
-      qcAt: MMDD.format(new Date(finalizedTs)),
-      failKeys: [...new Set(fails.map((f) => f.k).filter(Boolean))],
-      fails,
-      intake: { found: false } as IntakeSummary,
-      tracker: null as TrackerRow | null,
-    };
-  });
-
-  // Daily QC counts (last 14 days) + intake counts from the quoter.
-  const daily: { day: string; intakes: number; qcs: number }[] = [];
-  const qcByDay = await db.execute(sql`
-    SELECT to_char(created_at AT TIME ZONE 'America/Chicago', 'YYYY-MM-DD') AS day, COUNT(*)::int AS qcs
-    FROM inspections
-    WHERE created_at > now() - interval '14 days'
-    GROUP BY 1 ORDER BY 1
-  `);
-  const intakeDays = await fetchIntakesByDay(14);
-  const qcRows: any[] = (qcByDay as any).rows ?? qcByDay;
-  const dayMap = new Map<string, { intakes: number; qcs: number }>();
-  for (const r of qcRows) dayMap.set(String(r.day), { intakes: 0, qcs: Number(r.qcs) || 0 });
-  for (const [day, intakes] of intakeDays) {
-    const cur = dayMap.get(day) || { intakes: 0, qcs: 0 };
-    cur.intakes = intakes;
-    dayMap.set(day, cur);
-  }
-  for (const [day, v] of [...dayMap.entries()].sort()) daily.push({ day, ...v });
-
-  // Tracker sheet: current month's tab — summary block + vehicle table.
-  let summary: Record<string, number> = { completed: 0, retailPlan: 0, closedRO: 0, variance: 0, claimsApproved: 0 };
-  let trackerByVin = new Map<string, TrackerRow>();
+/** Sheet figures — current + previous month tabs, cached 60s. Null = unreachable. */
+async function fetchSheetData(): Promise<SheetData | null> {
+  if (sheetCache && Date.now() - sheetCache.at < REMOTE_CACHE_MS) return sheetCache.body;
+  let body: SheetData | null = null;
   try {
-    // Current month's tab drives the summary block; vehicle rows come from the
-    // current AND previous month's tabs (today: "Aug 2026" and "Jul 2026") so
-    // trucks finished late last month still show their tracker columns.
     const now = new Date();
     const curTab = monthTabName(now);
     const prev = new Date(now);
-    prev.setDate(0); // last day of previous month
+    prev.setDate(0);
     const prevTab = monthTabName(prev);
     const [summaryRows, curRows, prevRows] = await withTimeout(
       Promise.all([
         readTrackerRange(curTab, "A1:H19"),
         readTrackerRange(curTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`),
         readTrackerRange(prevTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`).catch((err) => {
-          // A missing previous-month tab must not take down the feed.
           console.error(`Dashboard: could not read tab "${prevTab}":`, err?.message || err);
           return null;
         }),
@@ -293,45 +285,348 @@ export async function buildPayload(): Promise<unknown> {
       SHEETS_TIMEOUT_MS,
       "Tracker sheet read"
     );
-    summary = parseSummary(summaryRows);
-    // Current month's rows first: parseVehicleRows keeps the first occurrence,
-    // so a repeat VIN prefers its current-month row.
-    const combined = [...(curRows || []), ...(prevRows || [])];
-    trackerByVin = parseVehicleRows(combined.length ? combined : null);
+    const byVin = new Map<string, TrackerRow>();
+    parseVehicleRows(curRows, byVin); // current month wins on repeat VINs
+    parseVehicleRows(prevRows, byVin);
+    body = { summary: parseSummary(summaryRows), byVin };
   } catch (err: any) {
     console.error("Dashboard: tracker sheet read failed:", err?.message || err);
+    body = null;
   }
-
-  // Intake quotes, batched over the unique VIN list.
-  const quotes = await fetchQuotes(vehicles.map((v) => (v.vin || "").toUpperCase()));
-
-  for (const v of vehicles) {
-    const vin = (v.vin || "").toUpperCase();
-    v.intake = quotes.get(vin) || { found: false };
-    v.tracker = trackerByVin.get(vin) || null;
-  }
-
-  return { generatedAt: Date.now(), summary, daily, vehicles };
+  sheetCache = { at: Date.now(), body };
+  return body;
 }
 
+// ---------- inspections (trimmed, all rows, no photo blobs) ----------
+
+async function fetchLiteRows(): Promise<LiteRow[]> {
+  const res = await db.execute(sql`
+    SELECT
+      qc_number, stock, vehicle, vin, result, status,
+      data->>'inspector' AS inspector,
+      data->>'title' AS title,
+      data->>'ts' AS ts,
+      data->>'clearedTs' AS cleared_ts,
+      extract(epoch from created_at) * 1000 AS created_ms,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object('cat', oi->>'cat', 'item', oi->>'item', 'note', COALESCE(oi->>'note', '')))
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(data->'openItems') = 'array' THEN data->'openItems' ELSE '[]'::jsonb END) oi
+      ), '[]'::jsonb) AS open_items,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object('cat', kv.key, 'item', it->>'item'))
+        FROM jsonb_each(CASE WHEN jsonb_typeof(data->'items') = 'object' THEN data->'items' ELSE '{}'::jsonb END) kv,
+             jsonb_array_elements(CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END) it
+        WHERE it->>'mark' = 'f'
+      ), '[]'::jsonb) AS fail_items
+    FROM inspections
+    ORDER BY created_at DESC
+  `);
+  return (((res as any).rows ?? res) as any[]).map((r) => ({
+    qcNumber: String(r.qc_number),
+    stock: String(r.stock ?? ""),
+    vehicle: String(r.vehicle ?? ""),
+    vin: String(r.vin ?? "").toUpperCase(),
+    result: String(r.result),
+    status: String(r.status),
+    inspector: r.inspector ?? null,
+    title: r.title ?? null,
+    ts: num(r.ts) ?? Number(r.created_ms),
+    clearedTs: num(r.cleared_ts),
+    openItems: (typeof r.open_items === "string" ? JSON.parse(r.open_items) : r.open_items) || [],
+    failItems: (typeof r.fail_items === "string" ? JSON.parse(r.fail_items) : r.fail_items) || [],
+  }));
+}
+
+// ---------- payload assembly ----------
+
+export async function buildPayload(from: string, to: string): Promise<unknown> {
+  const [rows, stats, sheet] = await Promise.all([
+    fetchLiteRows(),
+    fetchIntakeStats(from, to),
+    fetchSheetData(),
+  ]);
+
+  const trackerByVin = sheet?.byVin ?? new Map<string, TrackerRow>();
+  const quotes = await fetchQuotes(rows.map((r) => r.vin));
+
+  // ----- vehicles -----
+  const vehicles = rows.map((row) => {
+    const tracker = trackerByVin.get(row.vin) || null;
+    const quote = quotes.get(row.vin) || { found: false as const };
+    const released = tracker?.closedRO != null;
+    const statusKey = row.status === "open" ? "openRecheck" : released ? "released" : "frontlineReady";
+    return {
+      vin: row.vin,
+      stock: row.stock,
+      vehicle: row.vehicle,
+      qcNumber: row.qcNumber,
+      result: row.result,
+      status: row.status,
+      statusKey,
+      inspector: row.inspector,
+      createdTs: row.ts,
+      finalizedTs: row.status === "cleared" && row.clearedTs ? row.clearedTs : row.ts,
+      day: dayOf(row.ts),
+      segments: [...new Set(row.openItems.map((oi) => oi.cat).filter(Boolean))],
+      itemCount: row.openItems.length,
+      note: row.openItems.map((oi) => String(oi.note || "").trim()).find(Boolean) || "",
+      daysInProduction: tracker?.daysInProduction ?? null, // off the sheet as typed
+      quote: quote.found
+        ? { hrs: quote.totals?.hrs ?? null, usd: quote.totals?.usd ?? null, lineCount: quote.lineCount ?? null }
+        : null,
+      tracker,
+    };
+  });
+  const byQc = new Map(vehicles.map((v) => [v.qcNumber, v]));
+
+  // ----- KPIs (this range) -----
+  const inRangeRows = rows.filter((r) => {
+    const d = dayOf(r.ts);
+    return d >= from && d <= to;
+  });
+  const inspectionsCount = inRangeRows.length;
+  const failedFirst = inRangeRows.filter((r) => r.result === "fail").length; // first result only
+  const failRate = inspectionsCount ? failedFirst / inspectionsCount : null;
+  const openRechecks = rows.filter((r) => r.status === "open").length;
+  const dips = inRangeRows
+    .map((r) => trackerByVin.get(r.vin)?.daysInProduction)
+    .filter((d): d is number => d != null);
+  const avgDaysInProduction = dips.length ? dips.reduce((a, b) => a + b, 0) / dips.length : null;
+
+  // Cleared in range + avg days from first fail to cleared (both dates required).
+  const clearedRows = rows.filter(
+    (r) => r.status === "cleared" && r.clearedTs != null && dayOf(r.clearedTs) >= from && dayOf(r.clearedTs) <= to
+  );
+  const clearDays = clearedRows
+    .filter((r) => r.ts)
+    .map((r) => (r.clearedTs! - r.ts) / 86_400_000)
+    .filter((d) => Number.isFinite(d) && d >= 0);
+  const avgFailToClearDays = clearDays.length
+    ? clearDays.reduce((a, b) => a + b, 0) / clearDays.length
+    : null;
+
+  const kpi = {
+    inspections: inspectionsCount,
+    firstPass: inspectionsCount - failedFirst,
+    failedFirst,
+    failRate,
+    avgDaysInProduction,
+    openRechecks,
+    clearedInRange: clearedRows.length,
+    avgFailToClearDays,
+  };
+
+  // ----- daily: finalQcs from audit_log, intakes from the quoter -----
+  const qcByDay = await db.execute(sql`
+    SELECT to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
+    FROM audit_log
+    WHERE action IN ('created', 'recheck_committed')
+      AND to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') BETWEEN ${from} AND ${to}
+    GROUP BY 1
+  `);
+  const qcDayMap = new Map<string, number>();
+  for (const r of ((qcByDay as any).rows ?? qcByDay) as any[]) qcDayMap.set(String(r.day), Number(r.n) || 0);
+  const intakeDayMap = new Map<string, number>();
+  for (const d of stats?.days ?? []) intakeDayMap.set(d.day, d.intakes);
+  const daily = eachDay(from, to).map((day) => ({
+    day,
+    intakes: intakeDayMap.get(day) ?? 0,
+    finalQcs: qcDayMap.get(day) ?? 0,
+  }));
+
+  // ----- Daily Tracker: fixed trailing 7 days ending today, range-independent -----
+  const today = dayOf(Date.now());
+  const d7from = dayOf(Date.now() - 6 * 86_400_000);
+  const [stats7, qc7Res] = await Promise.all([
+    fetchIntakeStats(d7from, today),
+    db.execute(sql`
+      SELECT to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
+      FROM audit_log
+      WHERE action IN ('created', 'recheck_committed')
+        AND to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') BETWEEN ${d7from} AND ${today}
+      GROUP BY 1
+    `),
+  ]);
+  const qc7Map = new Map<string, number>();
+  for (const r of ((qc7Res as any).rows ?? qc7Res) as any[]) qc7Map.set(String(r.day), Number(r.n) || 0);
+  const intake7Map = new Map<string, number>();
+  for (const d of stats7?.days ?? []) intake7Map.set(d.day, d.intakes);
+  const tracker7Days = eachDay(d7from, today).map((day) => ({
+    day,
+    intakes: intake7Map.get(day) ?? 0,
+    finalQcs: qc7Map.get(day) ?? 0,
+  }));
+  const tracker7 = {
+    days: tracker7Days,
+    todayIntakes: intake7Map.get(today) ?? 0,
+    todayFinalQcs: qc7Map.get(today) ?? 0,
+    weekIntakes: tracker7Days.reduce((a, d) => a + d.intakes, 0),
+    weekFinalQcs: tracker7Days.reduce((a, d) => a + d.finalQcs, 0),
+  };
+
+  // ----- byStatus -----
+  const byStatus = {
+    // A vehicle with an intake record and no inspection — only the Body Quoter
+    // knows this; null (not 0) when it is unreachable.
+    awaitingFinalQc: stats?.openIntakes ?? null,
+    openRecheck: openRechecks,
+    frontlineReady: vehicles.filter((v) => v.statusKey === "frontlineReady").length,
+    released: vehicles.filter((v) => v.statusKey === "released").length,
+  };
+
+  // ----- blocked (open re-checks) -----
+  const nowTs = Date.now();
+  const blocked = vehicles
+    .filter((v) => v.status === "open")
+    .map((v) => ({
+      qcNumber: v.qcNumber,
+      stock: v.stock,
+      vehicle: v.vehicle,
+      vin: v.vin,
+      failedAt: v.day,
+      daysOpen: Math.max(0, Math.floor((nowTs - v.createdTs) / 86_400_000)),
+      segments: v.segments,
+      itemCount: v.itemCount,
+      note: v.note,
+    }))
+    .sort((a, b) => b.daysOpen - a.daysOpen);
+
+  // ----- deptFailRate + topFailedItems + byInspector (first inspections in range) -----
+  const segVehicles = new Map<string, number>();
+  const segItems = new Map<string, number>();
+  const itemFails = new Map<string, { segment: string; item: string; count: number }>();
+  const inspectors = new Map<string, { name: string; title: string; total: number; fails: number }>();
+  for (const r of inRangeRows) {
+    const segsHit = new Set<string>();
+    for (const f of r.failItems) {
+      const seg = String(f.cat || "");
+      segsHit.add(seg);
+      segItems.set(seg, (segItems.get(seg) || 0) + 1);
+      const key = `${seg}|${f.item}`;
+      const cur = itemFails.get(key) || { segment: seg, item: String(f.item || ""), count: 0 };
+      cur.count++;
+      itemFails.set(key, cur);
+    }
+    for (const seg of segsHit) segVehicles.set(seg, (segVehicles.get(seg) || 0) + 1);
+    const name = r.inspector || "Unknown";
+    const insp = inspectors.get(name) || { name, title: r.title || "", total: 0, fails: 0 };
+    insp.total++;
+    if (r.result === "fail") insp.fails++;
+    inspectors.set(name, insp);
+  }
+  const deptFailRate = SEGMENTS.map((seg) => ({
+    segment: seg,
+    rate: inspectionsCount ? (segVehicles.get(seg) || 0) / inspectionsCount : null,
+    failedVehicles: segVehicles.get(seg) || 0,
+    failedItems: segItems.get(seg) || 0,
+  }));
+  const topFailedItems = [...itemFails.values()].sort((a, b) => b.count - a.count).slice(0, 10);
+  const byInspector = [...inspectors.values()]
+    .sort((a, b) => b.total - a.total)
+    .map((i) => ({
+      ...i,
+      firstPassPct: i.total ? Math.round(((i.total - i.fails) / i.total) * 100) : null,
+    }));
+
+  // ----- recent activity (QC commits; intake events live only in the quoter) -----
+  const auditRes = await db.execute(sql`
+    SELECT qc_number, action, actor_name, extract(epoch from at) * 1000 AS at_ms
+    FROM audit_log
+    WHERE action IN ('created', 'recheck_committed')
+    ORDER BY at DESC
+    LIMIT 30
+  `);
+  const activity = (((auditRes as any).rows ?? auditRes) as any[]).map((a) => {
+    const v = a.qc_number ? byQc.get(String(a.qc_number)) : null;
+    return {
+      at: Number(a.at_ms),
+      action: String(a.action),
+      qcNumber: a.qc_number ? String(a.qc_number) : null,
+      stock: v?.stock ?? null,
+      vehicle: v?.vehicle ?? null,
+      actor: String(a.actor_name ?? ""),
+    };
+  });
+
+  // ----- throughput per week (last 8 weeks, Monday start) -----
+  const weeklyRes = await db.execute(sql`
+    SELECT to_char(date_trunc('week', at AT TIME ZONE ${TZ}), 'YYYY-MM-DD') AS week, COUNT(*)::int AS n
+    FROM audit_log
+    WHERE action IN ('created', 'recheck_committed') AND at > now() - interval '8 weeks'
+    GROUP BY 1 ORDER BY 1
+  `);
+  const weekly = (((weeklyRes as any).rows ?? weeklyRes) as any[]).map((r) => ({
+    week: String(r.week),
+    finalQcs: Number(r.n) || 0,
+  }));
+
+  return {
+    generatedAt: Date.now(),
+    range: { from, to },
+    intakeSource: stats ? "live" : "unavailable",
+    trackerSource: sheet ? "live" : "unavailable",
+    kpi,
+    daily,
+    tracker7,
+    byStatus,
+    blocked,
+    deptFailRate,
+    topFailedItems,
+    byInspector,
+    activity,
+    weekly,
+    vehicles,
+    monthSummary: sheet?.summary ?? null,
+  };
+}
+
+// ---------- routes ----------
+
 export function registerDashboardRoute(app: Express) {
-  app.get("/api/dashboard", requireEmployee, async (_req, res, next) => {
+  app.get("/api/dashboard", requireEmployee, async (req, res, next) => {
     try {
-      if (payloadCache && Date.now() - payloadCache.at < PAYLOAD_CACHE_MS) {
-        return res.json(payloadCache.body);
-      }
-      // Single-flight so a burst of polls builds the payload once.
-      if (!payloadInFlight) {
-        payloadInFlight = buildPayload()
+      const today = dayOf(Date.now());
+      const to = parseISODay(req.query.to) || today;
+      const monthStart = `${today.slice(0, 8)}01`;
+      const from = parseISODay(req.query.from) || monthStart;
+      if (from > to) return res.status(400).json({ message: "from must be on or before to" });
+
+      const key = `${from}|${to}`;
+      const hit = payloadCache.get(key);
+      if (hit && Date.now() - hit.at < PAYLOAD_CACHE_MS) return res.json(hit.body);
+
+      // Single-flight per range so a burst of polls builds the payload once.
+      let inflight = payloadInFlight.get(key);
+      if (!inflight) {
+        inflight = buildPayload(from, to)
           .then((body) => {
-            payloadCache = { at: Date.now(), body };
+            payloadCache.set(key, { at: Date.now(), body });
+            if (payloadCache.size > 20) payloadCache.delete(payloadCache.keys().next().value as string);
             return body;
           })
-          .finally(() => {
-            payloadInFlight = null;
-          });
+          .finally(() => payloadInFlight.delete(key));
+        payloadInFlight.set(key, inflight);
       }
-      res.json(await payloadInFlight);
+      res.json(await inflight);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Full TR-INTAKE-V2 intake record for one VIN (photos, steps, RO-Ready check),
+  // for the vehicle card. found:false = the intake predates this system.
+  const intakeCache = new Map<string, { at: number; body: unknown }>();
+  app.get("/api/intake/:vin", requireEmployee, async (req, res, next) => {
+    try {
+      const vin = String(req.params.vin || "").trim().toUpperCase();
+      if (vin.length < 6) return res.status(400).json({ message: "Invalid VIN" });
+      const hit = intakeCache.get(vin);
+      if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return res.json(hit.body);
+      const body = await quoterGet(`/api/intake-by-vin?vin=${encodeURIComponent(vin)}`);
+      if (!body) return res.status(502).json({ message: "Body Quoter is unreachable" });
+      intakeCache.set(vin, { at: Date.now(), body });
+      if (intakeCache.size > 500) intakeCache.delete(intakeCache.keys().next().value as string);
+      res.json(body);
     } catch (err) {
       next(err);
     }

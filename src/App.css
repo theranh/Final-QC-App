@@ -141,6 +141,9 @@
 .nav-tab { flex: 1; min-height: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; position: relative; background: none; border: none; font-family: inherit; }
 .nav-tab-icon { position: relative; width: 22px; height: 22px; flex: 0 0 auto; border: 2px solid var(--muted); background: transparent; }
 .nav-tab.active .nav-tab-icon { background: var(--red); border: none; }
+.nav-tab-icon.dash { border-radius: 4px; }
+.nav-tab-icon.vehicles { border-radius: 50%; }
+.nav-tab-icon.intake { border-radius: 8px; }
 .nav-tab-icon.inspect { border-radius: 6px; }
 .nav-tab-icon.records { border-radius: 50%; }
 .nav-tab-icon.reports { border-radius: 4px; }

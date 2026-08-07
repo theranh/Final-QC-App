@@ -30,6 +30,9 @@ async function request(method, url, body) {
 export const api = {
   me: () => request('GET', '/api/me'),
   bootstrap: () => request('GET', '/api/bootstrap'),
+  dashboard: (from, to) =>
+    request('GET', '/api/dashboard' + (from && to ? `?from=${from}&to=${to}` : '')),
+  intakeByVin: (vin) => request('GET', `/api/intake/${encodeURIComponent(vin)}`),
   createInspection: (payload) => request('POST', '/api/inspections', payload),
   commitRecheck: (qc, payload) => request('POST', `/api/inspections/${encodeURIComponent(qc)}/recheck`, payload),
   importLegacy: (payload) => request('POST', '/api/import', payload),

@@ -1,8 +1,9 @@
 const TABS = [
-  ['inspect', 'Inspect'],
-  ['records', 'Records'],
+  ['dash', 'Dash'],
+  ['vehicles', 'Vehicles'],
+  ['intake', 'Intake'],
+  ['inspect', 'Final QC'],
   ['reports', 'Reports'],
-  ['settings', 'Settings'],
 ];
 
 export default function BottomNav({ tab, onChange, openRecheckCount }) {
@@ -13,7 +14,7 @@ export default function BottomNav({ tab, onChange, openRecheckCount }) {
         return (
           <button key={k} className={'nav-tab' + (active ? ' active' : '')} onClick={() => onChange(k)}>
             <span className={'nav-tab-icon ' + k}>
-              {k === 'inspect' && openRecheckCount > 0 && <span className="nav-badge">{openRecheckCount}</span>}
+              {k === 'dash' && openRecheckCount > 0 && <span className="nav-badge">{openRecheckCount}</span>}
             </span>
             <span className="nav-tab-label">{label}</span>
           </button>

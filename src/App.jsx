@@ -12,6 +12,10 @@ import useAppUpdate from './hooks/useAppUpdate';
 
 import Header from './components/Header';
 import BottomNav from './components/BottomNav';
+import DashScreen from './components/DashScreen';
+import VehiclesScreen from './components/VehiclesScreen';
+import VehicleCard from './components/VehicleCard';
+import IntakeScreen from './components/IntakeScreen';
 import Toast from './components/Toast';
 import Lightbox from './components/Lightbox';
 import VinScanner from './components/VinScanner';
@@ -55,7 +59,7 @@ function AuthedApp({ me }) {
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
   const [saving, setSaving] = useState(false);
 
-  const [tab, setTab] = useState('inspect');
+  const [tab, setTab] = useState('dash');
   const [stage, setStage] = useState(() => boot.stage);
   const [draft, setDraft] = useState(() => boot.draft);
   const [marks, setMarks] = useState(() => boot.marks);
@@ -76,6 +80,13 @@ function AuthedApp({ me }) {
 
   const [period, setPeriod] = useState('mtd');
   const [printing, setPrinting] = useState(false);
+
+  // Server-composed dashboard payload (QC + Body Quoter + tracker sheet).
+  // All KPIs are computed server-side; screens only render this.
+  const [dash, setDash] = useState(null);
+  const [vehFilter, setVehFilter] = useState('all');
+  const [vehQ, setVehQ] = useState('');
+  const [vehSel, setVehSel] = useState(null); // { vin, qcNumber }
 
   const [toastMsg, setToastMsg] = useState(null);
   const [lightbox, setLightbox] = useState(null);
@@ -161,6 +172,48 @@ function AuthedApp({ me }) {
       window.removeEventListener('focus', refreshData);
     };
   }, [refreshData]);
+
+  // ---------- dashboard payload (server-composed; never recomputed here) ----------
+  const dashInFlightRef = useRef(false);
+  const refreshDash = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (dashInFlightRef.current) return;
+    dashInFlightRef.current = true;
+    try {
+      const d = await api.dashboard();
+      setDash(d);
+    } catch {
+      // Silent — the dashboard shows the last payload until the next tick.
+    } finally {
+      dashInFlightRef.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    refreshDash();
+    const id = setInterval(refreshDash, 60000);
+    window.addEventListener('focus', refreshDash);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', refreshDash);
+    };
+  }, [refreshDash]);
+
+  // Reports uses its own range so past months stay server-computed too.
+  const [reportDash, setReportDash] = useState(null);
+  const periodObjForRange = useMemo(() => curPeriod(recs, period), [recs, period]);
+  useEffect(() => {
+    if (tab !== 'reports') return;
+    const isoDay = (ts) => {
+      const d = new Date(ts);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    };
+    const from = isoDay(periodObjForRange.start);
+    const to = isoDay(periodObjForRange.end === Infinity ? Date.now() : periodObjForRange.end - 1);
+    let dead = false;
+    setReportDash(null);
+    api.dashboard(from, to).then((d) => { if (!dead) setReportDash(d); }).catch(() => {});
+    return () => { dead = true; };
+  }, [tab, period, periodObjForRange.start, periodObjForRange.end]);
 
   // ---------- draft persistence (device-local scratch space only) ----------
   useEffect(() => {
@@ -419,6 +472,12 @@ function AuthedApp({ me }) {
   const onNavChange = (k) => {
     setTab(k);
     setViewRec((prev) => (k === 'records' ? prev : null));
+    if (k !== 'vehicles') setVehSel(null);
+    if (k === 'dash' || k === 'vehicles') refreshDash();
+  };
+  const openVehicle = (vin, qcNumber) => {
+    setTab('vehicles');
+    setVehSel({ vin, qcNumber });
   };
 
   if (loadState === 'loading') return <LoadingScreen />;
@@ -510,6 +569,29 @@ function AuthedApp({ me }) {
         onOpenLightbox={setLightbox}
       />
     ) : null;
+  } else if (tab === 'dash') {
+    content = (
+      <DashScreen
+        dash={dash}
+        onOpenStatus={(k) => { setVehFilter(k); setVehSel(null); setTab('vehicles'); }}
+        onOpenVehicle={openVehicle}
+      />
+    );
+  } else if (tab === 'vehicles') {
+    const selVehicle = vehSel && dash ? (dash.vehicles || []).find((v) => v.qcNumber === vehSel.qcNumber) : null;
+    content = selVehicle ? (
+      <VehicleCard
+        vehicle={selVehicle}
+        record={recs.find((r) => r.id === selVehicle.qcNumber) || null}
+        onBack={() => setVehSel(null)}
+        onOpenRecord={(id) => { setTab('records'); setViewRec(id); }}
+        onOpenLightbox={setLightbox}
+      />
+    ) : (
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} />
+    );
+  } else if (tab === 'intake') {
+    content = <IntakeScreen />;
   } else if (tab === 'inspect') {
     content = (
       <HomeScreen
@@ -529,7 +611,7 @@ function AuthedApp({ me }) {
       <RecordsList recs={recs} q={q} onQ={setQ} fRes={fRes} onFRes={setFRes} fFrom={fFrom} onFFrom={setFFrom} fTo={fTo} onFTo={setFTo} onOpenRecord={setViewRec} />
     );
   } else if (tab === 'reports') {
-    content = <ReportsScreen recs={recs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} />;
+    content = <ReportsScreen recs={recs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} dash={reportDash} onOpenVehicle={openVehicle} />;
   } else if (tab === 'settings') {
     content = (
       <SettingsScreen
@@ -548,7 +630,7 @@ function AuthedApp({ me }) {
     <div className="app-shell">
       <div className="app-frame">
         {updateReady && <UpdateBanner onRefresh={applyUpdate} />}
-        <Header tab={tab} />
+        <Header tab={tab} onSettings={inFlow ? null : () => { setTab('settings'); setViewRec(null); setVehSel(null); }} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />
