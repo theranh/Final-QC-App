@@ -17,3 +17,10 @@ id = "9mSNwe1aYYzEKfhjPEh7m"
 uri = "file://public/icon-512.png"
 type = "image"
 title = "Final QC icon — Truck Ranch logo font"
+
+[[outputs]]
+id = "KByw4nK5o0flxSayqkC4k"
+uri = "file://attached_assets/generated_images/final-qc-thumbnail.png"
+type = "image"
+title = "Final QC app thumbnail"
+description = "Wide app thumbnail in the app's barn-red / ranch palette with western-style FINAL QC lettering."
