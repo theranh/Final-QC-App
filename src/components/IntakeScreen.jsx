@@ -138,11 +138,10 @@ export default function IntakeScreen({ showToast }) {
   const [homeRows, setHomeRows] = useState([]);
   const [homeSearch, setHomeSearch] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [vinOverride, setVinOverride] = useState(false);
+  const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
   const [walkOpen, setWalkOpen] = useState(false);
-  const [photoCount, setPhotoCount] = useState(0);
-  const [decoding, setDecoding] = useState(false);
+  const [, setDecoding] = useState(false);
   const [estimators, setEstimators] = useState([]);
   const [quoteSummary, setQuoteSummary] = useState(null);
   const intakeRef = useRef(null);

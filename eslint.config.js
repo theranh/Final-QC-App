@@ -4,7 +4,9 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import globals from 'globals';
 
 export default [
-  { ignores: ['dist', 'dev-dist', 'node_modules'] },
+  // dist-server is build output; attached_assets contains vendored/minified
+  // third-party code (zxing, html5-qrcode, legacy quoter source) we don't own.
+  { ignores: ['dist', 'dev-dist', 'dist-server', 'node_modules', 'attached_assets'] },
   {
     files: ['**/*.{js,jsx}'],
     languageOptions: {

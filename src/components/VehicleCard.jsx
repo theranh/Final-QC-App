@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CATS, chipStyle, catByKey } from '../lib/constants';
+import { CATS, chipStyle } from '../lib/constants';
 import { api } from '../lib/api';
 
 // Vehicle card — every record for one VIN on one screen: the TR-INTAKE-V2
