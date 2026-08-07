@@ -42,6 +42,27 @@ async function main() {
     const { serveStatic } = await import("./vite");
     serveStatic(app);
   } else {
+    // Dev-only service-worker kill switch. Browsers that once loaded a built
+    // (PWA) version of this app on the dev domain still have that old service
+    // worker installed, and it keeps serving its stale cached shell instead of
+    // the live dev server. When such a browser checks /sw.js for updates, hand
+    // it a worker that wipes the old caches, unregisters itself, and reloads
+    // the open pages so they fetch the current app.
+    app.get("/sw.js", (_req, res) => {
+      res.set("Content-Type", "application/javascript");
+      res.set("Cache-Control", "no-store");
+      res.send(`self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => {
+  e.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+    await self.registration.unregister();
+    const clients = await self.clients.matchAll({ type: 'window' });
+    clients.forEach((c) => c.navigate(c.url));
+  })());
+});
+`);
+    });
     const { setupVite } = await import("./vite");
     await setupVite(app, server);
   }
