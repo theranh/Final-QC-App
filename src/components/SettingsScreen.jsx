@@ -16,14 +16,56 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
   const [employees, setEmployees] = useState(null);
   const [empError, setEmpError] = useState(false);
   const [busyId, setBusyId] = useState(null);
+  const [pinFor, setPinFor] = useState(null); // employee id whose PIN is being set
+  const [pinVal, setPinVal] = useState('');
   const [adding, setAdding] = useState(false);
   const [newEmail, setNewEmail] = useState('');
   const [newName, setNewName] = useState('');
   const [newTitle, setNewTitle] = useState('');
   const [importing, setImporting] = useState(false);
   const [legacyPresent, setLegacyPresent] = useState(() => hasLegacyData() && !legacyImportDone());
+  const [snapshots, setSnapshots] = useState(null);
+  const [snapError, setSnapError] = useState(false);
+  const [snapMonth, setSnapMonth] = useState('');
+  const [snapBusy, setSnapBusy] = useState(false);
 
   const isAdmin = !!me.isAdmin;
+
+  // Recent months as "Mon YYYY" tab names (this month + the prior 11), matching
+  // the tracker's monthly tabs. Newest first; excludes the current live month is
+  // NOT done here — the admin may snapshot a month once it has closed.
+  const recentMonths = (() => {
+    const now = new Date();
+    const out = [];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      out.push(d.toLocaleString('en-US', { month: 'short' }) + ' ' + d.getFullYear());
+    }
+    return out;
+  })();
+
+  const loadSnapshots = useCallback(() => {
+    if (!me.isAdmin) return;
+    api
+      .trackerSnapshots()
+      .then((d) => { setSnapshots(d.snapshots || []); setSnapError(false); })
+      .catch(() => setSnapError(true));
+  }, [me.isAdmin]);
+  useEffect(() => { loadSnapshots(); }, [loadSnapshots]);
+  useEffect(() => { if (isAdmin && !snapMonth) setSnapMonth(recentMonths[1] || recentMonths[0] || ''); }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const runSnapshot = () => {
+    if (!snapMonth || snapBusy) return;
+    setSnapBusy(true);
+    api
+      .snapshotTrackerMonth(snapMonth)
+      .then((r) => {
+        showToast(`Snapshotted ${r.month}: ${r.rows} row${r.rows === 1 ? '' : 's'} frozen ✓`);
+        loadSnapshots();
+      })
+      .catch((err) => showToast('Snapshot failed: ' + err.message))
+      .finally(() => setSnapBusy(false));
+  };
 
   const loadEmployees = useCallback(() => {
     if (!me.isAdmin) return;
@@ -41,6 +83,24 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
       .then((row) => {
         setEmployees((prev) => prev.map((e) => (e.id === row.id ? row : e)));
         showToast(okMsg);
+      })
+      .catch((err) => showToast(err.message))
+      .finally(() => setBusyId(null));
+  };
+
+  const savePin = (emp) => {
+    if (!/^\d{4}$/.test(pinVal)) {
+      showToast('PIN must be 4 digits');
+      return;
+    }
+    setBusyId(emp.id);
+    api
+      .setEmployeePin(emp.id, pinVal)
+      .then(() => {
+        setEmployees((prev) => prev.map((e) => (e.id === emp.id ? { ...e, hasPin: true } : e)));
+        setPinFor(null);
+        setPinVal('');
+        showToast('PIN set ✓');
       })
       .catch((err) => showToast(err.message))
       .finally(() => setBusyId(null));
@@ -179,7 +239,7 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
                 const isSelf = u.id === me.id;
                 const busy = busyId === u.id;
                 return (
-                  <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 0', borderTop: '1px solid #F5F1EC' }}>
+                  <div key={u.id} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 9, padding: '10px 0', borderTop: '1px solid #F5F1EC' }}>
                     <span style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--brown)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'Oswald, sans-serif', fontSize: 11, fontWeight: 600, flex: '0 0 auto' }}>
                       {initials(u.name || u.email)}
                     </span>
@@ -199,6 +259,48 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
                     {!isSelf && u.status === 'active' && (
                       <div style={{ fontSize: 9.5, fontWeight: 700, color: 'var(--red)', cursor: busy ? 'wait' : 'pointer', border: '1px solid var(--border)', borderRadius: 7, padding: '8px 11px', background: 'var(--panel)', opacity: busy ? 0.6 : 1 }} onClick={() => !busy && window.confirm(`Deactivate ${u.email}? They immediately lose access. Their past inspections are kept.`) && patchEmployee(u, { status: 'inactive' }, 'Deactivated')}>
                         Deactivate
+                      </div>
+                    )}
+
+                    {/* ---- sign-off controls: PIN, override, signer-list active ---- */}
+                    <div style={{ flexBasis: '100%', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 7, marginTop: 2 }}>
+                      <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.6, color: 'var(--muted)' }}>SIGN-OFF</span>
+                      <div
+                        className={'pill-btn' + (u.active !== false ? ' on green' : '')}
+                        style={{ height: 30, fontSize: 9.5, cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}
+                        onClick={() => !busy && patchEmployee(u, { active: u.active === false }, u.active === false ? 'In signer list ✓' : 'Removed from signer list')}
+                      >
+                        {u.active !== false ? '✓ In signer list' : 'Not signing'}
+                      </div>
+                      <div
+                        className={'pill-btn' + (u.canOverride ? ' on amber' : '')}
+                        style={{ height: 30, fontSize: 9.5, cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}
+                        onClick={() => !busy && patchEmployee(u, { canOverride: !u.canOverride }, u.canOverride ? 'Override off' : 'Override on ✓')}
+                      >
+                        {u.canOverride ? '★ Can override' : 'No override'}
+                      </div>
+                      <div
+                        className="pill-btn"
+                        style={{ height: 30, fontSize: 9.5 }}
+                        onClick={() => { setPinFor(pinFor === u.id ? null : u.id); setPinVal(''); }}
+                      >
+                        {u.hasPin ? '🔑 Reset PIN' : '🔑 Set PIN'}
+                      </div>
+                    </div>
+                    {pinFor === u.id && (
+                      <div style={{ flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 7, marginTop: 2 }}>
+                        <input
+                          className="input mono"
+                          style={{ height: 40, width: 110, textAlign: 'center', letterSpacing: 6 }}
+                          type="password"
+                          inputMode="numeric"
+                          maxLength={4}
+                          placeholder="••••"
+                          value={pinVal}
+                          onChange={(e) => setPinVal(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                        />
+                        <div className={'btn' + (/^\d{4}$/.test(pinVal) ? ' btn-green' : ' disabled')} style={{ flex: 1, height: 40, fontSize: 11, opacity: /^\d{4}$/.test(pinVal) ? 1 : 0.6 }} onClick={() => savePin(u)}>Save PIN</div>
+                        <div className="btn btn-outline" style={{ flex: '0 0 auto', width: 'auto', height: 40, padding: '0 12px', fontSize: 11 }} onClick={() => { setPinFor(null); setPinVal(''); }}>Cancel</div>
                       </div>
                     )}
                   </div>
@@ -221,6 +323,58 @@ export default function SettingsScreen({ me, lastBackupAt, recs, nextQc, onExpor
             )}
             <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 9, lineHeight: 1.5 }}>
               Employees sign in with their @truckranch.com account. New sign-ins appear here as PENDING until an admin approves them.
+            </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">PRODUCTION TRACKER SNAPSHOTS</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Freeze a closed month from the VPC Production Tracker sheet. Reporting reads frozen months from here; the current month stays live. Re-snapshotting a month overwrites its rows — that’s the correction path.
+            </div>
+            {snapError && (
+              <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>
+                Could not load snapshots. <span style={{ fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }} onClick={loadSnapshots}>Retry</span>
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 9, flexWrap: 'wrap' }}>
+              <select
+                className="input"
+                style={{ height: 44, width: 'auto', flex: '0 0 auto', minWidth: 120 }}
+                value={snapMonth}
+                onChange={(e) => setSnapMonth(e.target.value)}
+              >
+                {recentMonths.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <div
+                className={'btn btn-brown' + (snapBusy || !snapMonth ? ' disabled' : '')}
+                style={{ flex: 1, height: 44, fontSize: 12, opacity: snapBusy || !snapMonth ? 0.6 : 1 }}
+                onClick={runSnapshot}
+              >
+                {snapBusy ? 'Snapshotting…' : '❄ Snapshot month'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', marginTop: 4 }}>
+              {snapshots == null && !snapError && (
+                <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 8 }}>Loading…</div>
+              )}
+              {snapshots != null && snapshots.length === 0 && (
+                <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 8 }}>No months frozen yet.</div>
+              )}
+              {(snapshots || []).map((s) => (
+                <div key={s.month} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 0', borderTop: '1px solid #F5F1EC' }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, flex: '0 0 auto', minWidth: 66 }}>{s.month}</span>
+                  <span style={{ fontSize: 8, fontWeight: 700, color: '#fff', background: 'var(--brown)', padding: '2px 6px', borderRadius: 4 }}>
+                    {s.rows} ROW{s.rows === 1 ? '' : 'S'}
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0, textAlign: 'right', fontSize: 9.5, color: 'var(--muted)' }}>
+                    {s.snapshotAt ? fmtDT(new Date(s.snapshotAt).getTime()) : '—'}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         )}

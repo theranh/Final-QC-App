@@ -13,6 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@replit/connectors-sdk": "^0.4.1",
     "@types/connect-pg-simple": "^7.0.3",
     "@types/express-session": "^1.19.0",

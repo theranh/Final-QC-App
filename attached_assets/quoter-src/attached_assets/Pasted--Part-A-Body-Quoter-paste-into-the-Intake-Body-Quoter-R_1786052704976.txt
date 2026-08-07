@@ -1,0 +1,120 @@
+# Part A — Body Quoter (paste into the Intake & Body Quoter Repl)
+
+This is one part of a larger spec for a shared production dashboard. **Build only what is
+below.** The dashboard itself is a separate Repl (the Final QC app) and is not your concern
+here — this app's job is to store the intake checklist and expose two read-only endpoints.
+
+Do not change any existing behavior, UI, or pricing logic. Do not touch the `settings`,
+`quotes`, `corrections`, or `photos` tables.
+
+---
+
+## A1. New table: `intakes`
+
+`server.js` already auto-creates its schema on boot. Add one table alongside the others, in
+the same style:
+
+```sql
+CREATE TABLE IF NOT EXISTS intakes (
+  id           TEXT PRIMARY KEY,
+  vin          TEXT NOT NULL,
+  stock        TEXT NOT NULL DEFAULT '',
+  vehicle      TEXT NOT NULL DEFAULT '',
+  miles        TEXT NOT NULL DEFAULT '',
+  estimator    TEXT NOT NULL DEFAULT '',
+  quote_id     TEXT,
+  data         JSONB NOT NULL,
+  completed_at TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS intakes_vin_idx ON intakes (vin);
+```
+
+`data` holds the TR-INTAKE-V2 payload:
+
+```json
+{
+  "steps": {
+    "1": [true, true, true],
+    "2": [true, true, true, true, true, true],
+    "3": [true, true, true, true, true, true],
+    "4": [true, true, true, true, true]
+  },
+  "roReady": [true, true, true, true, true, true, true, true, true],
+  "photoCount": 22,
+  "notes": ""
+}
+```
+
+`steps` keys are the four intake steps in order, with one boolean per sub-step:
+
+1. UVEye Scan — 3 sub-steps
+2. vAuto Appraisal & Photos — 6
+3. Body Quoter App — 6
+4. Enter Everything in MDD — 5
+
+`roReady` is the 9-item RO-Ready check, in the order it appears in the checklist.
+
+An intake is complete only when all 9 RO-Ready items are true. Write `completed_at` at that
+moment and not before. If an item is later unchecked, clear `completed_at` again.
+
+## A2. Wire the existing intake checklist to the table
+
+The intake checklist already exists in this app's UI. Persist each toggle to `intakes`
+(upsert on `id`, keyed to the VIN being worked) so a phone reload mid-walk-around doesn't
+lose progress. Set `quote_id` when a Body Quoter estimate is created for that VIN.
+
+## A3. `GET /api/intake-by-vin?vin=<VIN>`
+
+Same auth and shape of contract as the existing `/api/quote-by-vin`: GET only, read-only,
+`x-fleet-key: <FLEET_KEY>` header, no photo bytes in the response. Newest intake wins if a
+VIN appears more than once.
+
+```json
+{
+  "found": true,
+  "vin": "1FT…", "stock": "12345", "vehicle": "2019 Ford F-150 XLT",
+  "miles": "84210", "estimator": "Ryan",
+  "completedAt": 1786000000000,
+  "roReadyCount": 9, "roReady": [true, true, true, true, true, true, true, true, true],
+  "steps": { "1": [true,true,true], "2": [], "3": [], "4": [] },
+  "photoCount": 22,
+  "quote": { "id": "q1784…", "hrs": 12.4, "usd": 1736, "lineCount": 3 }
+}
+```
+
+Return `{"found": false, "vin": "…"}` when that VIN has no intake. `401` on a bad key, `503`
+if `FLEET_KEY` isn't set.
+
+## A4. `GET /api/intake-stats?from=<ISO>&to=<ISO>`
+
+Same key header. This powers a daily tracker without pulling every row:
+
+```json
+{
+  "days": [ { "day": "2026-08-06", "intakes": 3 } ],
+  "total": 14,
+  "openIntakes": 2
+}
+```
+
+- `days[].intakes` — rows whose `completed_at` falls on that day. Include every day in the
+  range, zeros included.
+- `total` — sum over the range.
+- `openIntakes` — rows with `completed_at IS NULL`: started but not yet RO-ready.
+
+---
+
+## Verify before you're done
+
+`FLEET_KEY` is already a secret on this Repl. Both endpoints must answer:
+
+```bash
+curl -s -H "x-fleet-key: $FLEET_KEY" \
+  "https://photo-damage-quoter-copy.replit.app/api/intake-by-vin?vin=YOURTESTVIN"
+
+curl -s -H "x-fleet-key: $FLEET_KEY" \
+  "https://photo-damage-quoter-copy.replit.app/api/intake-stats?from=2026-08-01&to=2026-08-06"
+```
+
+A request with no key or a wrong key must return `401`. Neither endpoint writes anything.

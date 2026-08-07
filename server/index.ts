@@ -6,6 +6,11 @@ import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { registerAppRoutes } from "./routes";
 
 const app = express();
+// Replit runs behind exactly one reverse proxy, so trust a single hop. This
+// makes req.ip the real client address (from the left-most X-Forwarded-For
+// entry the proxy sets) and lets rate limiters key off it safely instead of
+// parsing the raw, client-spoofable X-Forwarded-For header themselves.
+app.set("trust proxy", 1);
 // Inspection payloads include compressed JPEG data URLs.
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "40mb" }));

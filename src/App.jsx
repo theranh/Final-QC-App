@@ -605,7 +605,7 @@ function AuthedApp({ me }) {
       <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onStartQc={startQcFor} />
     );
   } else if (tab === 'intake') {
-    content = <IntakeScreen />;
+    content = <IntakeScreen showToast={showToast} />;
   } else if (tab === 'inspect') {
     content = (
       <HomeScreen

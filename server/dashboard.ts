@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireEmployee } from "./access";
 import { monthTabName, readTrackerRange } from "./googleSheets";
+import { frozenMonth } from "./tracker";
 import { lookupQuoteByVin } from "./intakeQuote";
 
 // One dashboard endpoint: GET /api/dashboard?from=<ISO>&to=<ISO>.
@@ -293,7 +294,37 @@ function parseVehicleRows(rows: string[][] | null, into: Map<string, TrackerRow>
   }
 }
 
-/** Sheet figures — current + previous month tabs, cached 60s. Null = unreachable. */
+/**
+ * A frozen (snapshotted) closed month provides only the three stored columns
+ * (retail plan, closed RO, days-to-close), read exactly as typed. Everything
+ * else — dates, days-in-production, and BOTH variance fields — is unavailable
+ * (null), NOT $0: we never recompute figures for frozen months (a computed
+ * closed − retail variance would violate "stored exactly as typed"). The UI
+ * marks these unavailable rather than showing a derived number.
+ */
+function frozenToTrackerRow(f: {
+  retailPlanUsd: number | null;
+  closedRoUsd: number | null;
+  daysToClose: number | null;
+}): TrackerRow {
+  return {
+    roOpen: null,
+    completed: null,
+    pictureReceived: null,
+    retailPlan: f.retailPlanUsd,
+    closedRO: f.closedRoUsd,
+    daysPictureToClose: f.daysToClose,
+    daysInProduction: null,
+    variance: null, // never recomputed for frozen months
+    variancePct: null, // never recomputed for frozen months
+    notes: null,
+  };
+}
+
+/** Sheet figures — current month live + previous (closed) month, cached 60s.
+ *  The previous month prefers its frozen snapshot when one exists (closed
+ *  months are read from production_tracker); the current month stays live from
+ *  the sheet. Null = sheet unreachable. */
 async function fetchSheetData(): Promise<SheetData | null> {
   if (sheetCache && Date.now() - sheetCache.at < REMOTE_CACHE_MS) return sheetCache.body;
   let body: SheetData | null = null;
@@ -303,21 +334,37 @@ async function fetchSheetData(): Promise<SheetData | null> {
     const prev = new Date(now);
     prev.setDate(0);
     const prevTab = monthTabName(prev);
+    // Frozen snapshot for the closed (previous) month, if one exists. A read
+    // failure here must not sink the whole dashboard — degrade to the live sheet.
+    const prevFrozen = await frozenMonth(prevTab).catch((err) => {
+      console.error(`Dashboard: could not read frozen tracker for "${prevTab}":`, err?.message || err);
+      return new Map<string, { retailPlanUsd: number | null; closedRoUsd: number | null; daysToClose: number | null }>();
+    });
+    const havePrevSnapshot = prevFrozen.size > 0;
     const [summaryRows, curRows, prevRows] = await withTimeout(
       Promise.all([
         readTrackerRange(curTab, "A1:H19"),
         readTrackerRange(curTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`),
-        readTrackerRange(prevTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`).catch((err) => {
-          console.error(`Dashboard: could not read tab "${prevTab}":`, err?.message || err);
-          return null;
-        }),
+        // Skip the live read of a closed month once it's frozen — the snapshot
+        // is the source of truth for that month.
+        havePrevSnapshot
+          ? Promise.resolve(null)
+          : readTrackerRange(prevTab, `A${TABLE_FIRST_DATA_ROW}:Q${TABLE_FIRST_DATA_ROW + 2000}`).catch((err) => {
+              console.error(`Dashboard: could not read tab "${prevTab}":`, err?.message || err);
+              return null;
+            }),
       ]),
       SHEETS_TIMEOUT_MS,
       "Tracker sheet read"
     );
     const byVin = new Map<string, TrackerRow>();
     parseVehicleRows(curRows, byVin); // current month wins on repeat VINs
-    parseVehicleRows(prevRows, byVin);
+    if (havePrevSnapshot) {
+      // Closed month: use the frozen snapshot for any VIN not in the current month.
+      for (const [vin, f] of prevFrozen) if (!byVin.has(vin)) byVin.set(vin, frozenToTrackerRow(f));
+    } else {
+      parseVehicleRows(prevRows, byVin);
+    }
     body = { summary: parseSummary(summaryRows), byVin };
   } catch (err: any) {
     console.error("Dashboard: tracker sheet read failed:", err?.message || err);

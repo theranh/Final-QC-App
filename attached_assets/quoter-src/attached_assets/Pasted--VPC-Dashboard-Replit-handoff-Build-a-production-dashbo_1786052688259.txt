@@ -1,0 +1,232 @@
+# VPC Dashboard — Replit handoff
+
+Build a production dashboard that reads from both existing apps. Each app keeps its own
+database. Nothing about the two apps' current behavior changes.
+
+Two Repls, in this order:
+
+- **Part A — `paint-body-quoter`** (Intake & Body Quoter): store the intake checklist, and
+  serve two new read-only endpoints.
+- **Part B — `final-qc-app`** (Final QC): build the dashboard, reading its own Postgres plus
+  Part A's endpoints.
+
+The dashboard lives in the Final QC app because that Repl already has Replit Auth and the
+`employees` allowlist. The Body Quoter stays a data source.
+
+Reference design: the clickable prototype this spec was written from. Screens, wording,
+and every number's placement come from it.
+
+---
+
+## Part A — Body Quoter (`paint-body-quoter`)
+
+### A1. New table: `intakes`
+
+`server.js` auto-creates its schema on boot (`settings`, `quotes`, `corrections`, `photos`).
+Add one table alongside them, same style:
+
+```sql
+CREATE TABLE IF NOT EXISTS intakes (
+  id           TEXT PRIMARY KEY,
+  vin          TEXT NOT NULL,
+  stock        TEXT NOT NULL DEFAULT '',
+  vehicle      TEXT NOT NULL DEFAULT '',
+  miles        TEXT NOT NULL DEFAULT '',
+  estimator    TEXT NOT NULL DEFAULT '',
+  quote_id     TEXT,
+  data         JSONB NOT NULL,
+  completed_at TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS intakes_vin_idx ON intakes (vin);
+```
+
+`data` holds the TR-INTAKE-V2 payload:
+
+```json
+{
+  "steps": {
+    "1": [true, true, true],
+    "2": [true, true, true, true, true, true],
+    "3": [true, true, true, true, true, true],
+    "4": [true, true, true, true, true]
+  },
+  "roReady": [true, true, true, true, true, true, true, true, true],
+  "photoCount": 22,
+  "notes": ""
+}
+```
+
+`steps` keys are the four intake steps in order — UVEye Scan (3 sub-steps), vAuto Appraisal
+& Photos (6), Body Quoter App (6), Enter Everything in MDD (5). `roReady` is the 9-item
+RO-Ready check, in the order it appears in the checklist. An intake is only complete when
+all 9 are true — write `completed_at` at that moment and not before.
+
+### A2. Wire the existing intake UI to it
+
+The intake checklist already exists in the app's UI. Persist each toggle to `intakes`
+(upsert on `id`, keyed to the VIN being worked) so a phone reload doesn't lose progress, and
+set `quote_id` when the Body Quoter estimate is created for that VIN.
+
+### A3. `GET /api/intake-by-vin?vin=<VIN>`
+
+Same auth as the existing `/api/quote-by-vin`: `x-fleet-key: <FLEET_KEY>` header, GET only,
+read-only, no photo bytes. Newest intake wins if a VIN appears twice.
+
+```json
+{
+  "found": true,
+  "vin": "1FT…", "stock": "12345", "vehicle": "2019 Ford F-150 XLT",
+  "miles": "84210", "estimator": "Ryan",
+  "completedAt": 1786000000000,
+  "roReadyCount": 9, "roReady": [true, true, true, true, true, true, true, true, true],
+  "steps": { "1": [true,true,true], "2": [], "3": [], "4": [] },
+  "photoCount": 22,
+  "quote": { "id": "q1784…", "hrs": 12.4, "usd": 1736, "lineCount": 3 }
+}
+```
+
+`{"found": false, "vin": "…"}` when that VIN has no intake. `401` on a bad key, `503` if
+`FLEET_KEY` isn't set.
+
+### A4. `GET /api/intake-stats?from=<ISO>&to=<ISO>`
+
+Same key header. Powers the daily tracker without pulling every row:
+
+```json
+{
+  "days": [ { "day": "2026-08-06", "intakes": 3 } ],
+  "total": 14,
+  "openIntakes": 2
+}
+```
+
+`intakes` counts rows whose `completed_at` falls on that day. `openIntakes` counts rows with
+`completed_at IS NULL` — started but not RO-ready.
+
+---
+
+## Part B — Final QC (`final-qc-app`)
+
+Secrets on this Repl: `FLEET_KEY` (same value as Part A) and `QUOTER_URL` — both already set
+if the intake-quote link from `FINAL_QC_LINK.md` is live.
+
+### B1. Server: one dashboard endpoint
+
+Add to `registerAppRoutes`, employee-gated like the rest:
+
+```
+GET /api/dashboard?from=<ISO>&to=<ISO>
+```
+
+It composes, server-side:
+
+- **Local Postgres** (`inspections`, `audit_log`) — every QC number, result, status,
+  inspector, timestamps. `status` is already `pass | open | cleared`, which is exactly the
+  dashboard's Frontline Ready / Open Re-check / cleared distinction.
+- **Body Quoter** via `/api/intake-stats` and `/api/intake-by-vin` — intake counts and, per
+  vehicle, the intake record.
+
+Cache the remote calls 60 seconds, same as the existing `quoteCache`. If the Body Quoter is
+unreachable, return the QC half with `"intakeSource": "unavailable"` rather than failing the
+whole request — the dashboard must still render.
+
+Response shape:
+
+```json
+{
+  "range": { "from": "2026-08-01", "to": "2026-08-06" },
+  "intakeSource": "live",
+  "kpi": {
+    "inspections": 62, "failRate": 0.269, "avgDaysInProduction": 50.8, "openRechecks": 7
+  },
+  "daily": [ { "day": "2026-08-06", "intakes": 3, "finalQcs": 5 } ],
+  "byStatus": { "awaitingFinalQc": 4, "openRecheck": 7, "frontlineReady": 12, "released": 19 },
+  "blocked": [
+    { "qcNumber": "FQ-1147", "stock": "Bc22625", "vehicle": "2023 RAM 2500 Laramie",
+      "vin": "3C6…", "failedAt": "2026-08-06", "segments": ["cosm", "detail"],
+      "itemCount": 2, "note": "" }
+  ],
+  "deptFailRate": [ { "segment": "mech", "rate": 0.273 } ],
+  "topFailedItems": [ { "segment": "mech", "item": "Dash warning lights", "count": 4 } ]
+}
+```
+
+Definitions, so the numbers can't drift:
+
+- **failRate** — inspections whose first `result` is `fail`, over all inspections in range.
+  Re-checks don't add to the denominator; a truck counts once.
+- **openRechecks** — `status = 'open'`. This is the blocked list.
+- **avgDaysInProduction** — mean days from RO open to QC completion, over inspections in
+  range that have both dates.
+- **daily.finalQcs** — inspections committed that day, counted from `audit_log`
+  (`created` + `recheck_committed`), not from `inspections.updated_at`.
+- **deptFailRate** — per QC segment, share of inspected vehicles that failed at least one
+  item in that segment. Segments are the app's six: `mech`, `cosm`, `detail`, `bed`,
+  `ceramic`, `under`.
+
+### B2. Client: five tabs
+
+The Final QC app today opens on its inspection list. Put it behind a bottom tab bar and add
+the dashboard as the landing tab. Phone-first — this is used in the yard.
+
+**Dash** — KPI grid (inspections, fail rate, avg days, open re-checks); Daily Tracker
+(intakes today and Final QCs today, week totals beside each, 7-day paired bar chart, brown
+for intake and red for QC); Every Record By Status, tappable to filter Vehicles; Blocked —
+Failed Final QC, each with its segment chips, item count, and age; recent activity from
+`audit_log`; throughput per week; fail rate by department.
+
+**Vehicles** — search by stock # or VIN, filter chips matching the status rows, one card per
+vehicle with status, days, and quote or variance.
+
+**Vehicle card** — one screen holding both apps' records for a VIN: intake photo set with
+the required shot list (exterior ×10, interior ×6, all 4 wheels, tire tread ×4, each damage
+or fix); all four TR-INTAKE-V2 steps with their sub-steps; the full 9-item RO-Ready check
+with each box's state; the Body Quoter total; the Final QC result per segment with fail
+notes; production tracker figures. When `/api/intake-by-vin` returns `found: false`, show
+the QC half and say the intake predates the system — do not show empty checkboxes as
+though the work wasn't done.
+
+**Intake** — deep link to the Body Quoter app for the VIN. Don't rebuild the intake form
+here; it already works there.
+
+**Final QC** — the existing inspection flow, unchanged. Entry points: a vehicle awaiting QC,
+or manual VIN entry.
+
+**Reports** — month summary (vehicles completed, avg days, fail rate, retail plan $, closed
+RO $, variance $ and %); most-failed QC items; a row-per-vehicle table (VIN, completed,
+days, plan $, closed $, QC result), horizontally scrollable, each row opening the vehicle
+card; CSV export of the range.
+
+### B3. Spreadsheet figures
+
+Retail plan $, closed RO $, variance, and days-picture-to-close come from the VPC Production
+Tracker spreadsheet and exist in neither app's database. Two options, and the second is the
+better one:
+
+1. Import the August 2026 rows once into a `production_tracker` table in the Final QC
+   database, keyed on VIN, and keep updating it by CSV upload.
+2. Add these as nullable columns on a per-vehicle record and enter them in the app as ROs
+   close, retiring the spreadsheet.
+
+Until one is done, the dashboard's money panel and Reports' plan/closed/variance rows have
+no source — show them as unavailable rather than zero.
+
+---
+
+## Order of work
+
+1. Part A1–A2: `intakes` table, intake UI persists to it.
+2. Part A3–A4: the two read-only endpoints. Verify with `curl` and the `FLEET_KEY` header
+   before touching the QC app.
+3. Part B1: `/api/dashboard`, with the Body Quoter half degrading gracefully.
+4. Part B2: tab bar, then Dash, then Vehicle card, then Reports.
+5. Part B3: pick a home for the tracker figures.
+
+## Don't
+
+- Don't merge the two databases or have either app write to the other's.
+- Don't let a Body Quoter outage break the dashboard.
+- Don't recompute fail rate on the client — one definition, server-side, so Dash and Reports
+  can't disagree.
+- Don't edit or delete `audit_log` rows; it stays append-only.

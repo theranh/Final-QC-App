@@ -33,10 +33,32 @@ export const api = {
   dashboard: (from, to) =>
     request('GET', '/api/dashboard' + (from && to ? `?from=${from}&to=${to}` : '')),
   intakeByVin: (vin) => request('GET', `/api/intake/${encodeURIComponent(vin)}`),
+  getIntake: (vin) => request('GET', `/api/quoter/intakes?vin=${encodeURIComponent(vin)}`),
+  putIntake: (payload) => request('PUT', '/api/quoter/intakes', payload),
   createInspection: (payload) => request('POST', '/api/inspections', payload),
   commitRecheck: (qc, payload) => request('POST', `/api/inspections/${encodeURIComponent(qc)}/recheck`, payload),
   importLegacy: (payload) => request('POST', '/api/import', payload),
   employees: () => request('GET', '/api/employees'),
   addEmployee: (payload) => request('POST', '/api/employees', payload),
   updateEmployee: (id, patch) => request('PATCH', `/api/employees/${id}`, patch),
+  setEmployeePin: (id, pin) => request('POST', `/api/employees/${id}/pin`, { pin }),
+
+  // ---------- Production Tracker snapshots (admin) ----------
+  trackerSnapshots: () => request('GET', '/api/tracker/snapshots'),
+  snapshotTrackerMonth: (month) => request('POST', '/api/tracker/snapshot', { month }),
+
+  // ---------- Body Quoter ----------
+  quoterSync: () => request('GET', '/api/quoter/sync'),
+  putQuote: (payload) => request('PUT', '/api/quoter/quotes', payload),
+  deleteQuote: (id) => request('DELETE', `/api/quoter/quotes?id=${encodeURIComponent(id)}`),
+  putQuotePhoto: (payload) => request('POST', '/api/quoter/photos', payload),
+  quotePhotos: (quoteId) => request('GET', `/api/quoter/photos?quote=${encodeURIComponent(quoteId)}`),
+  deleteQuotePhoto: (payload) => request('DELETE', '/api/quoter/photos', payload),
+  postCorrection: (payload) => request('POST', '/api/quoter/corrections', payload),
+  classify: (payload) => request('POST', '/api/quoter/classify', payload),
+
+  // ---------- PIN sign-off ----------
+  signers: () => request('GET', '/api/quoter/signers'),
+  commitIntake: (payload) => request('POST', '/api/quoter/commit-intake', payload),
+  commitQuote: (payload) => request('POST', '/api/quoter/commit-quote', payload),
 };

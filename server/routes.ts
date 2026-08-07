@@ -8,6 +8,9 @@ import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { exportInspectionToSheet } from "./googleSheets";
 import { registerIntakeQuoteRoute } from "./intakeQuote";
 import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
+import { registerQuoterRoutes } from "./quoter";
+import { registerPinRoutes, hashPin, isValidPin } from "./pin";
+import { registerTrackerRoutes } from "./tracker";
 
 // ---------- helpers ----------
 
@@ -113,6 +116,9 @@ const importSchema = z.object({
 export function registerAppRoutes(app: Express) {
   registerIntakeQuoteRoute(app);
   registerDashboardRoute(app);
+  registerQuoterRoutes(app);
+  registerPinRoutes(app);
+  registerTrackerRoutes(app);
 
   app.get("/api/health", async (_req, res) => {
     try {
@@ -484,7 +490,8 @@ export function registerAppRoutes(app: Express) {
   app.get("/api/employees", requireAdmin, async (_req, res, next) => {
     try {
       const rows = await db.select().from(employees).orderBy(employees.email);
-      res.json(rows);
+      // Never send the PIN hash to the client — only whether one is set.
+      res.json(rows.map(({ pinHash, ...rest }) => ({ ...rest, hasPin: !!pinHash })));
     } catch (err) {
       next(err);
     }
@@ -495,6 +502,8 @@ export function registerAppRoutes(app: Express) {
     isAdmin: z.boolean().optional(),
     name: z.string().trim().max(120).optional(),
     title: z.string().trim().max(120).optional(),
+    canOverride: z.boolean().optional(),
+    active: z.boolean().optional(),
   });
 
   const employeeCreateSchema = z.object({
@@ -543,7 +552,32 @@ export function registerAppRoutes(app: Express) {
         .returning();
       if (!row) return res.status(404).json({ message: "Employee not found." });
       await audit(db, me, "employee_updated", { details: { email: row.email, change: body } });
-      res.json(row);
+      const { pinHash, ...safe } = row;
+      res.json({ ...safe, hasPin: !!pinHash });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Set or reset an employee's 4-digit sign-off PIN. Admin-only; the PIN is
+  // hashed before storage and is never read back — a forgotten PIN is reset.
+  const pinSetSchema = z.object({ pin: z.string().regex(/^\d{4}$/, "PIN must be 4 digits") });
+  app.post("/api/employees/:id/pin", requireAdmin, async (req: any, res, next) => {
+    try {
+      const id = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+      const { pin } = pinSetSchema.parse(req.body);
+      if (!isValidPin(pin)) return res.status(400).json({ message: "PIN must be 4 digits" });
+      const me: Employee = req.employee;
+      const pinHash = await hashPin(pin);
+      const [row] = await db
+        .update(employees)
+        .set({ pinHash, updatedAt: new Date() })
+        .where(eq(employees.id, id))
+        .returning();
+      if (!row) return res.status(404).json({ message: "Employee not found." });
+      await audit(db, me, "employee_updated", { details: { email: row.email, change: "pin_reset" } });
+      res.json({ ok: true, hasPin: true });
     } catch (err) {
       next(err);
     }

@@ -193,6 +193,15 @@ vi.mock("./googleSheets", () => ({
   exportInspectionToSheet: async () => {},
 }));
 
+// No frozen snapshots in these tests — closed months fall through to the live
+// (mocked-null) sheet read, exactly as before this feature existed.
+vi.mock("./tracker", () => ({
+  frozenMonth: async () => new Map(),
+  listSnapshots: async () => [],
+  snapshotMonth: async () => ({ month: "TestTab", rows: 0, snapshotAt: "" }),
+  registerTrackerRoutes: () => {},
+}));
+
 vi.mock("./intakeQuote", () => ({
   registerIntakeQuoteRoute: () => {},
   lookupQuoteByVin: async () => ({ found: false }),

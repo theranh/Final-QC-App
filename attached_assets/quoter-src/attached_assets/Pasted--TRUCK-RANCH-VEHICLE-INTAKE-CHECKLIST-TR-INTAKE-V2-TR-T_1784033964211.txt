@@ -1,0 +1,76 @@
+
+TRUCK RANCH · VEHICLE INTAKE CHECKLIST
+TR-INTAKE-V2
+TR
+TRUCK RANCH
+VEHICLE PRODUCTION CENTER
+INTAKE — UVEYE · VAUTO · BODY QUOTER · MDD
+INTAKE CHECKLIST
+Vehicle Intake — Step by Step
+Work top to bottom. When you finish, everything an RO needs is in MDD. If a box can't be checked, the truck isn't done.
+Verify the MDD tracking tags are present on both the key and the vehicle. Do this at any point during intake — the truck isn't done until both are confirmed.
+1
+UVEye Scan
+UVEYE
+This is the first thing that happens. It creates the condition scan the whole intake hangs on.
+
+Pull the truck through the UVEye machine — full body, undercarriage, and tire scan.
+Tie the VIN to the scan right away, before moving on — so the scan attaches to the correct truck.
+Glance at the scan for anything flagged (tires, damage, leaks) to carry into the walk-around.
+2
+vAuto Appraisal & Photos
+VAUTO
+Build the working record off the original appraisal, then document the truck as it sits.
+
+Open vAuto and find the truck's original appraisal (click Appraisals, enter the last 6 of the VIN).
+Click on the original appraisal, then click the 3 dots in the top-right corner and select “Copy as New” to create the working record.
+Update the mileage to the actual odometer reading.
+Add walk-around photos — see the shot list below.
+Mark and photograph every damage or fix on the truck. If it needs work, it gets a photo.
+Final step: click the 3 dots in the top-right corner again and click “Save”.
+PHOTO SHOT LIST
+Exterior ·10
+4 corners · front · rear · both sides · roof · bed
+Interior ·6
+driver · passenger · dash · center console · both rear seats
+Wheels
+all 4 wheels · tire tread ×4
+Plus
+each damage / fix
+3
+Body Quoter App
+BODY QUOTER
+Turn the damage into priced work the RO can quote from. In the app:
+
+Scan or manually enter the VIN to start the quote.
+Verify the truck information is correct.
+Add the stock # and the Estimator.
+Take and upload photos of the damage.
+Confirm the quote is accurate and make any necessary adjustments.
+Click the PDF button and attach the quote to the MDD card in the attachment file (Step 4).
+4
+Enter Everything in MDD
+MDD
+MDD is the finish line. This is where the RO gets written from — nothing should be missing.
+
+Add the tasks the truck needs from the catalog, comparing against your walk-around (Body Shop, Bumper, PDR, Tires, Detail, etc.).
+If emissions are not ready, add a Drive Cycle task.
+Confirm the Body Quoter estimate PDF has been added to the MDD card.
+Make sure all relevant flags are added to the vehicle card.
+In Communications, spell out the body shop work in detail — note each damage, the specific panels affected, and exactly what needs to be repaired or replaced.
+RO-Ready Check
+— all true before intake is done
+If every box is checked, an RO can be written with zero follow-up. If not, note why and flag the VPM.
+
+VIN tied to the UVEye scan
+Current mileage entered
+vAuto record copied as new
+Full walk-around photo set
+Every damage / fix marked & photo'd
+Body Quoter estimate PDF in MDD
+Recon tasks added in MDD
+MDD tracking tags on key & vehicle
+All info in MDD, RO-ready
+Intake complete → move the vehicle to the MPI Queue step in MDD.
+VEHICLE PRODUCTION CENTER
+EVERY FIELD FEEDS THE RO
