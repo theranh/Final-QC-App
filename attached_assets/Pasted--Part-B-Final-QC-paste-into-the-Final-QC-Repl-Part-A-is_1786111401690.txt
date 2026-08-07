@@ -1,0 +1,168 @@
+# Part B — Final QC (paste into the Final QC Repl)
+
+Part A is already live on the Body Quoter app: it stores the TR-INTAKE-V2 intake checklist
+and serves two read-only endpoints, `GET /api/intake-by-vin?vin=<VIN>` and
+`GET /api/intake-stats?from=<ISO>&to=<ISO>`, both authorized with the `x-fleet-key` header.
+
+Your job here is the dashboard. The existing inspection flow does not change — it becomes
+one tab of five. Do not alter the QC checklist, the FQ-#### counter, the re-check logic, or
+the sign-off. Phone-first throughout; this is used in the yard, not at a desk.
+
+Secrets `FLEET_KEY` and `QUOTER_URL` are already set on this Repl for the existing
+intake-quote link (see `FINAL_QC_LINK.md`). Reuse them.
+
+---
+
+## B1. Server: one dashboard endpoint
+
+Add to `registerAppRoutes`, employee-gated like the rest:
+
+```
+GET /api/dashboard?from=<ISO>&to=<ISO>
+```
+
+It composes server-side, in one response:
+
+- **This app's Postgres** — `inspections` and `audit_log`.
+- **The Body Quoter** — `/api/intake-stats` for the range, and `/api/intake-by-vin` per
+  vehicle where a card needs it.
+
+Cache the remote calls 60 seconds, the same way the existing `quoteCache` does. If the Body
+Quoter is unreachable, return the QC half with `"intakeSource": "unavailable"` rather than
+failing the request. The dashboard must still render with a stale or missing intake half.
+
+```json
+{
+  "range": { "from": "2026-08-01", "to": "2026-08-06" },
+  "intakeSource": "live",
+  "kpi": {
+    "inspections": 62, "failRate": 0.269, "avgDaysInProduction": 50.8, "openRechecks": 7
+  },
+  "daily": [ { "day": "2026-08-06", "intakes": 3, "finalQcs": 5 } ],
+  "byStatus": { "awaitingFinalQc": 4, "openRecheck": 7, "frontlineReady": 12, "released": 19 },
+  "blocked": [
+    { "qcNumber": "FQ-1147", "stock": "Bc22625", "vehicle": "2023 RAM 2500 Laramie",
+      "vin": "3C6…", "failedAt": "2026-08-06", "segments": ["cosm", "detail"],
+      "itemCount": 2, "note": "" }
+  ],
+  "deptFailRate": [ { "segment": "mech", "rate": 0.273 } ],
+  "topFailedItems": [ { "segment": "mech", "item": "Dash warning lights", "count": 4 } ]
+}
+```
+
+### Definitions — compute these server-side only
+
+One definition each, so Dash and Reports can never disagree. Do not recompute any of them on
+the client.
+
+- **inspections** — inspections created in range. A truck counts once no matter how many
+  re-checks it took.
+- **failRate** — inspections whose first `result` is `fail`, over `inspections`. Re-checks
+  don't enter the denominator.
+- **openRechecks** — `status = 'open'`. This is the blocked list, and the same number badges
+  the Dash tab.
+- **avgDaysInProduction** — mean days from RO open to QC completion, across inspections in
+  range that have both dates. Skip rows missing either; don't treat a missing date as zero.
+- **daily[].finalQcs** — inspections committed that day, counted from `audit_log`
+  (`created` plus `recheck_committed`), not from `inspections.updated_at`.
+- **daily[].intakes** — straight from the Body Quoter's `/api/intake-stats`.
+- **byStatus** — `awaitingFinalQc` is a vehicle with an intake record and no inspection;
+  `openRecheck` is `status = 'open'`; `frontlineReady` is `status = 'pass'` or `'cleared'`;
+  `released` is a vehicle whose RO has closed.
+- **deptFailRate** — per segment, the share of inspected vehicles that failed at least one
+  item in that segment. The six segments are `mech`, `cosm`, `detail`, `bed`, `ceramic`,
+  `under`.
+
+## B2. Client: five tabs
+
+A bottom tab bar, minimum 44px targets: **Dash · Vehicles · Intake · Final QC · Reports**.
+Dash is the landing tab. Badge Dash with `openRechecks`.
+
+### Dash
+
+In this order, top to bottom:
+
+1. **KPI grid**, 2×2 — inspections on record, QC fail rate, avg days in production, open
+   re-checks.
+2. **Daily Tracker** — intakes today and Final QCs today as the two headline numbers, each
+   with its week total beside it, then a 7-day paired bar chart, one pair per day: intake
+   and Final QC side by side, with the current day's label emphasized.
+3. **Every record by status** — the four `byStatus` counts as rows, each tappable to open
+   Vehicles filtered to that status.
+4. **Blocked — Failed Final QC** — one card per open re-check: vehicle, stock #, VIN, its
+   failed segment chips, item count, how long it has been open, and the note if there is one.
+   Tapping opens the vehicle card.
+5. **Recent activity** — from `audit_log`: intakes and QC commits interleaved, newest first,
+   each showing what happened, which truck, who, and when.
+6. **Throughput per week** and **fail rate by department**.
+
+### Vehicles
+
+Search by stock # or VIN. Filter chips mirroring the status rows. One card per vehicle:
+vehicle, stock #, VIN tail, status, days in production, and quote or variance.
+
+### Vehicle card
+
+The point of the whole project: both apps' records for one VIN on one screen.
+
+- **Intake photo set** with the required shot list — exterior ×10, interior ×6, all 4 wheels,
+  tire tread ×4, each damage or fix.
+- **All four TR-INTAKE-V2 steps** with their sub-steps and each one's state.
+- **The full 9-item RO-Ready check**, each box's state visible.
+- **Body Quoter total** — hours and dollars, with the line count.
+- **Final QC result per segment**, with every fail's note and photos.
+- **Production tracker figures** for that VIN.
+
+When `/api/intake-by-vin` returns `found: false`, show the QC half and say the intake
+predates this system. Do not render nine empty checkboxes as though the work wasn't done —
+that reads as a failure when it's just a record that was never kept.
+
+### Intake
+
+Deep link to the Body Quoter app for this VIN. Do not rebuild the intake form here; Part A
+put it where it belongs.
+
+### Final QC
+
+The existing flow, untouched. Two entry points: a vehicle awaiting QC, or manual VIN entry.
+
+### Reports
+
+- **Month summary** — vehicles completed, avg days in production, QC inspections on record,
+  fail rate, retail plan $, closed RO $, variance $ and %.
+- **Most-failed QC items** — `topFailedItems`, segment chip and count.
+- **Every vehicle** — a row per vehicle: VIN, completed date, days, plan $, closed $, QC
+  result. Horizontally scrollable on a phone. Each row opens the vehicle card.
+- **CSV export** of the selected range.
+
+## B3. The spreadsheet figures
+
+Retail plan $, closed RO $, variance, and days-picture-to-close come from the VPC Production
+Tracker spreadsheet and exist in neither app's database. Until they have a home, show them
+as unavailable — never as `$0`, which reads as a real number.
+
+Recommended: add them as nullable columns on a per-vehicle record in this app's database and
+enter them as ROs close, retiring the spreadsheet. The alternative is a
+`production_tracker` table keyed on VIN, loaded by CSV upload, which keeps the spreadsheet
+alive as the source of truth.
+
+Ask before picking one — it changes who does data entry.
+
+---
+
+## Order of work
+
+1. `/api/dashboard`, with the Body Quoter half degrading gracefully. Verify it returns real
+   numbers from your 62 existing inspections before building any UI.
+2. The tab bar, with the existing inspection flow moved under Final QC.
+3. Dash.
+4. Vehicle card.
+5. Reports.
+
+## Don't
+
+- Don't merge the two databases, and don't write to the Body Quoter's.
+- Don't let a Body Quoter outage break the dashboard.
+- Don't recompute any KPI on the client.
+- Don't edit or delete `audit_log` rows; it stays append-only.
+- Don't change the QC checklist, the FQ-#### counter, or the re-check flow.
