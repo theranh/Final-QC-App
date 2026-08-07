@@ -107,17 +107,23 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [hydrating, setHydrating] = useState(!!prefill?.quoteId);
   const [hydrateError, setHydrateError] = useState('');
   const hydratedRef = useRef(!prefill?.quoteId);
+  // Snapshot prefill in a ref: hydration must run only when the quote id
+  // changes, not every time the parent re-renders with fresh prefill fields
+  // (that would clobber in-progress edits here).
+  const prefillRef = useRef(prefill);
+  prefillRef.current = prefill;
   useEffect(() => { if (committed) setWalkOpen(false); }, [committed]);
   useEffect(() => {
     if (!prefill?.quoteId) return;
     let live = true;
     api.quoterSync().then((s) => {
-      const q = (s?.quotes || []).find((x) => x && x.id === prefill.quoteId);
+      const p = prefillRef.current || {};
+      const q = (s?.quotes || []).find((x) => x && x.id === p.quoteId);
       if (!q) throw new Error('Quote not found');
       if (!live) return;
-      setVin(String(q.vin || prefill.vin || '').toUpperCase());
-      setStock(q.stock || prefill.stock || ''); setMiles(q.miles || prefill.miles || '');
-      setEstimator(q.estimator || prefill.estimator || ''); setVehicleText(q.vehicle || prefill.vehicle || '');
+      setVin(String(q.vin || p.vin || '').toUpperCase());
+      setStock(q.stock || p.stock || ''); setMiles(q.miles || p.miles || '');
+      setEstimator(q.estimator || p.estimator || ''); setVehicleText(q.vehicle || p.vehicle || '');
       setVeh(q.veh || { year: '', make: '', model: '', trim: '', body: '' });
       const restored = Array.isArray(q.lines) ? q.lines.map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' })) : [];
       setLines(restored); setStep(restored.length ? 'quote' : 'confirm'); hydratedRef.current = true; setHydrating(false);
@@ -234,7 +240,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     let id = stateRef.current.quoteId;
     if (!id) { id = newId('q'); setQuoteId(id); onQuoteId?.(id); }
     return id;
-  }, []);
+  }, [onQuoteId]);
 
   const goToPhotos = () => {
     ensureQuoteId();

@@ -150,19 +150,21 @@ export default function IntakeScreen({ showToast }) {
   useEffect(() => {
     api.signers().then((j) => setEstimators((j?.signers || []).filter((s) => s.active !== false).map((s) => s.name || s.displayName).filter(Boolean))).catch(() => {});
   }, []);
+  const intakeQuoteId = intake?.quoteId ?? null;
+  const intakeVin = intake?.vin ?? null;
   useEffect(() => {
-    if (!intake) { setQuoteSummary(null); return; }
+    if (intakeVin == null) { setQuoteSummary(null); return; }
     let live = true;
     api.quoterSync().then((j) => {
       if (!live) return;
-      const qs = (j?.quotes || []).filter((q) => q && (intake.quoteId ? q.id === intake.quoteId : String(q.vin || '').toUpperCase() === intake.vin));
+      const qs = (j?.quotes || []).filter((q) => q && (intakeQuoteId ? q.id === intakeQuoteId : String(q.vin || '').toUpperCase() === intakeVin));
       const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
       if (!q) return setQuoteSummary(null);
       const lines = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls) : [];
       api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: 0 }));
     }).catch(() => {});
     return () => { live = false; };
-  }, [intake?.quoteId, intake?.vin]);
+  }, [intakeQuoteId, intakeVin]);
 
   // Adopt a server row for a VIN, honoring the old conflict rule.
   const refreshFromServer = useCallback(async (v) => {
@@ -276,13 +278,15 @@ export default function IntakeScreen({ showToast }) {
     return canonical;
   };
   const decodeIntake = useCallback(async (v) => {
-    if (!v || v.length !== 17 || intake?.vehicle) return;
+    // Read vehicle through the ref so this callback stays stable — otherwise
+    // every keystroke in the vehicle field would recreate it.
+    if (!v || v.length !== 17 || intakeRef.current?.vehicle) return;
     setDecoding(true);
     const desc = await decodeVinInfo(v);
     if (desc) saveIntake({ vehicle: desc });
     setDecoding(false);
-  }, [intake]);
-  useEffect(() => { if (intake?.vin?.length === 17) decodeIntake(intake.vin); }, [intake?.vin]); // best effort
+  }, [saveIntake]);
+  useEffect(() => { if (intakeVin?.length === 17) decodeIntake(intakeVin); }, [intakeVin, decodeIntake]); // best effort
 
   // Debounced VIN entry — open the intake once the VIN looks real.
   const vinTimer = useRef(null);

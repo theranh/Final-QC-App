@@ -52,7 +52,7 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
     } catch { if (!cancelled) setError('Camera unavailable. Choose a photo from your device instead.'); }
     return () => { cancelled = true; };
-  }, [stopCamera]);
+  }, []);
   useEffect(() => {
     let cancel;
     Promise.resolve(startCamera()).then((cleanup) => { cancel = cleanup; });
