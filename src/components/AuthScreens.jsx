@@ -4,7 +4,7 @@ function Shell({ children }) {
       <div className="app-frame" style={{ display: 'flex', flexDirection: 'column' }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', gap: 14 }}>
           <div style={{ fontFamily: 'Rye, serif', color: 'var(--brown)', fontSize: 26, lineHeight: 1.2 }}>TRUCK RANCH</div>
-          <div className="oswald" style={{ fontWeight: 600, fontSize: 15, letterSpacing: 2, color: 'var(--ink)' }}>FINAL QC · FRPS</div>
+          <div className="oswald" style={{ fontWeight: 600, fontSize: 15, letterSpacing: 2, color: 'var(--ink)' }}>INTAKE · QC</div>
           {children}
         </div>
       </div>
@@ -24,7 +24,7 @@ export function LoginScreen() {
   return (
     <Shell>
       <div style={{ fontSize: 12, color: 'var(--muted)', maxWidth: 280, lineHeight: 1.6 }}>
-        Sign in with your <b>@truckranch.com</b> account to record and view Final QC inspections.
+        Sign in with your <b>@truckranch.com</b> email
       </div>
       <a
         className="btn btn-red"
