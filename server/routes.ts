@@ -26,6 +26,7 @@ import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerTrackerRoutes } from "./tracker";
 
 // ---------- helpers ----------
+import { registerTrackerSyncAdminRoute } from "./trackerSyncAdmin";
 
 function toClientRecord(row: Inspection) {
   const data = (row.data as Record<string, unknown>) || {};
@@ -215,6 +216,7 @@ export function registerAppRoutes(app: Express) {
   registerDashboardRoute(app);
   registerQuoterRoutes(app);
   registerQuoterSyncAdminRoute(app);
+  registerTrackerSyncAdminRoute(app);
   registerPinRoutes(app);
   registerTrackerRoutes(app);
 

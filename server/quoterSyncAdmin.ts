@@ -15,10 +15,13 @@
  *  - Photos are copied in keyset-paginated batches (one short transaction per
  *    batch, cursor returned to the caller) — never one big transaction.
  *  - Order driven by the caller: settings → quotes → corrections → photos → intakes.
- *  - Never touches inspections or employees. The one exception to insert-only
- *    is the `tracker_snapshot` phase, which overwrites production_tracker for
- *    a single month via the canonical snapshotMonth helper (per operator
- *    instruction: re-running a month IS the correction path).
+ *  - Never touches inspections or employees.
+ *  - `tracker_snapshot` phase: re-reads one month from the VPC sheet via
+ *    snapshotMonth (delete-then-insert for that month — re-running IS the
+ *    correction path).
+ *  - `tracker` phase: insert-only push of frozen snapshot rows sent in the
+ *    request body (source is the workspace/dev DB); frozen months are copied
+ *    verbatim and never overwritten.
  */
 import type { Express, Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
@@ -230,6 +233,36 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
         if (!month) return res.status(400).json({ message: "month is required (e.g. 'Jul 2026')" });
         const result = await snapshotMonth(month);
         return res.json({ phase, ...result });
+      }
+
+      if (phase === "tracker") {
+        // Insert-only copy of frozen production_tracker snapshot rows, pushed
+        // by the caller (source of truth is the workspace/dev DB). Values are
+        // stored exactly as sent — never recomputed from the sheet.
+        const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+        if (!rows) return res.status(400).json({ message: "rows array is required" });
+        let inserted = 0, present = 0;
+        for (const r of rows) {
+          const vin = String(r?.vin ?? "").trim().toUpperCase();
+          const month = String(r?.month ?? "").trim();
+          if (!vin || !month) return res.status(400).json({ message: "each row needs vin and month" });
+          const q = await destQuery(
+            `INSERT INTO production_tracker (vin, month, retail_plan_usd, closed_ro_usd, days_to_close, snapshot_at)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (vin, month) DO NOTHING`,
+            [vin, month, r.retailPlanUsd ?? null, r.closedRoUsd ?? null, r.daysToClose ?? null, r.snapshotAt ?? null],
+          );
+          q.rowCount ? inserted++ : present++;
+        }
+        return res.json({ phase, read: rows.length, inserted, alreadyPresent: present });
+      }
+
+      if (phase === "tracker-counts") {
+        const d = await destQuery(
+          `SELECT month, COUNT(*)::int AS rows,
+                  to_char(MAX(snapshot_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS snapshot_at
+           FROM production_tracker GROUP BY month ORDER BY month`,
+        );
+        return res.json({ phase, months: d.rows });
       }
 
       return res.status(400).json({ message: `Unknown phase: ${phase}` });
