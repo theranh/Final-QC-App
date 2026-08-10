@@ -119,7 +119,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onStartQc(v)} badge="AWAITING QC" />
+            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onStartQc(v)} />
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
