@@ -82,13 +82,6 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
             {(bucket === 'awaitingFinalQc' ? awaiting.length : list.length)} shown
           </span>
         </div>
-        <input
-          className="input"
-          style={{ marginTop: 8 }}
-          placeholder="Search stock # or VIN…"
-          value={q}
-          onChange={(e) => onQ(e.target.value)}
-        />
         <div style={{ display: 'flex', gap: 6, marginTop: 8, overflowX: 'auto', paddingBottom: 4 }}>
           {FILTERS.map(([k, label]) => (
             <span key={k} className={'pill-btn' + (bucket === k ? ' on red' : '')} onClick={() => setBucket(k)} style={{ whiteSpace: 'nowrap' }}>
@@ -111,6 +104,13 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
             ))}
           </select>
         )}
+        <input
+          className="input"
+          style={{ marginTop: 8 }}
+          placeholder="Search stock # or VIN…"
+          value={q}
+          onChange={(e) => onQ(e.target.value)}
+        />
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}
