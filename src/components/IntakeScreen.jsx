@@ -330,7 +330,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   if (quoting && intake) {
     return (
       <QuoteScreen
-        prefill={{ vin: intake.vin, stock: intake.stock, vehicle: intake.vehicle, estimator: intake.estimator, miles: intake.miles, quoteId: intake.quoteId }}
+        prefill={{ vin: intake.vin, stock: intake.stock, vehicle: intake.vehicle, estimator: intake.estimator, miles: intake.miles, quoteId: intake.quoteId, startAtPhotos: quoting === 'photos' }}
         onClose={() => setQuoting(false)}
         onQuoteId={(id) => saveIntake({ quoteId: id })}
         showToast={showToast}
@@ -594,10 +594,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </>
               ) : (
                 <>
-                  <button className="btn btn-red" style={{ marginTop: 9 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={() => setQuoting(true)}>
-                    Open Body Quoter
+                  <button className="btn btn-red" style={{ marginTop: 9 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={async () => { await ensureIntakeQuote(); setQuoting('photos'); }}>
+                    Photo Damage
                   </button>
-                  {!intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags ? <div style={{ fontSize: 10, color: 'var(--red)', marginTop: 6 }}>Complete stock #, miles, estimator, and confirm both MDD tags before opening the Body Quoter.</div> : null}
+                  <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>Take close-ups of each damage spot, then run the assessment for hours &amp; price.</div>
+                  {!intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags ? <div style={{ fontSize: 10, color: 'var(--red)', marginTop: 6 }}>Complete stock #, miles, estimator, and confirm both MDD tags before photographing damage.</div> : null}
                 </>
               )}
             </div>

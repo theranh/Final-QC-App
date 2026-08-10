@@ -548,8 +548,15 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     api.quoterSync().then((s) => {
       const p = prefillRef.current || {};
       const q = (s?.quotes || []).find((x) => x && x.id === p.quoteId);
-      if (!q) throw new Error('Quote not found');
       if (!live) return;
+      if (!q) {
+        // The intake linked a quote id but no quote was ever saved under it
+        // (photos-only so far). That's a fresh quote, not an error — keep the
+        // prefill and drop the tech straight where they need to be.
+        hydratedRef.current = true; setHydrating(false);
+        setStep(p.startAtPhotos && (p.stock || '').trim() && (p.estimator || '').trim() ? 'photos' : 'confirm');
+        return;
+      }
       setVin(String(q.vin || p.vin || '').toUpperCase());
       setStock(q.stock || p.stock || ''); setMiles(q.miles || p.miles || '');
       setEstimator(q.estimator || p.estimator || ''); setVehicleText(q.vehicle || p.vehicle || '');
@@ -558,7 +565,10 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       setKeep({ tires: !!(q.keep && q.keep.tires), wheels: !!(q.keep && q.keep.wheels), set: !!(q.keep && q.keep.set) });
       setNotes(q.notes || '');
       const restored = Array.isArray(q.lines) ? q.lines.map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' })) : [];
-      setLines(restored); setStep(restored.length ? 'quote' : 'confirm'); hydratedRef.current = true; setHydrating(false);
+      if (q.committedBy) setCommitted({ committedBy: q.committedBy, overriddenBy: q.overriddenBy || null });
+      setLines(restored);
+      setStep(restored.length ? 'quote' : (!q.committedBy && p.startAtPhotos && (q.stock || p.stock || '').trim() && (q.estimator || p.estimator || '').trim() ? 'photos' : 'confirm'));
+      hydratedRef.current = true; setHydrating(false);
     }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
     return () => { live = false; };
   }, [prefill?.quoteId]);

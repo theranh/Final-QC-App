@@ -176,14 +176,16 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       {progress.captured > 0 && <span style={{ position: 'absolute', right: -6, top: -6, background: '#b0322a', color: '#fff', fontWeight: 700, fontSize: 12, minWidth: 20, height: 20, lineHeight: '20px', borderRadius: 10, padding: '0 4px' }}>{progress.captured}</span>}
     </button>
   );
-  // Zoom pills styled like the old Body Quoter camera.
+  // Zoom selector mirroring the native iPhone camera: plain white numbers
+  // floating over the image; only the selected zoom gets a dark circle with
+  // the yellow "0.5x"-style label.
   const zoomDial = (vertical) => (
-    <div style={{ display: 'flex', flexDirection: vertical ? 'column' : 'row', alignItems: 'center', gap: 10 }}>
+    <div style={{ display: 'flex', flexDirection: vertical ? 'column' : 'row', alignItems: 'center', gap: 6, background: 'rgba(20,18,15,.28)', borderRadius: 24, padding: 5 }}>
       {shownZooms.map((z) => {
         const sel = zoom === z;
         return (
-          <button key={z} onClick={() => setZoom(z)} aria-label={`${z}x zoom`} style={{ flex: 'none', minWidth: 46, height: 38, borderRadius: 19, border: '1px solid rgba(255,255,255,.45)', background: sel ? 'rgba(245,243,238,.92)' : 'rgba(35,32,26,.6)', color: sel ? '#201d19' : '#f5f3ee', fontWeight: 700, fontSize: 14, padding: '0 10px' }}>
-            {z < 1 ? String(z).replace('0.', '.') : `${z}×`}
+          <button key={z} onClick={() => setZoom(z)} aria-label={`${z}x zoom`} style={{ flex: 'none', width: 38, height: 38, borderRadius: '50%', border: 'none', background: sel ? 'rgba(35,32,26,.78)' : 'transparent', color: sel ? '#f7c948' : '#fff', fontWeight: 700, fontSize: sel ? 13 : 15, padding: 0, textShadow: sel ? 'none' : '0 1px 3px rgba(0,0,0,.6)' }}>
+            {sel ? `${z}x` : String(z)}
           </button>
         );
       })}
@@ -194,6 +196,7 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
       {mode === 'damage' && <div style={{ position: 'absolute', top: 10, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)', pointerEvents: 'none', fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}
       {error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
+      {!landscape && !error && <div style={{ position: 'absolute', bottom: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ pointerEvents: 'auto' }}>{zoomDial(false)}</div></div>}
     </div>
   );
   return (
@@ -230,7 +233,6 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
         <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: '#000' }}>
           <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
           <div style={{ flex: 'none', padding: '12px 18px calc(16px + env(safe-area-inset-bottom))', background: '#000' }}>
-            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>{zoomDial(false)}</div>
             <div style={{ display: 'flex', alignItems: 'center' }}>
               {mode === 'damage' ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>CANCEL</button> : galleryBtn}
               <span style={{ flex: 1 }} />
