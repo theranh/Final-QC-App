@@ -480,7 +480,6 @@ export function registerQuoterRoutes(app: Express) {
       const vin = String(body.vin || "").trim().toUpperCase().slice(0, 20);
       if (!id || vin.length < 6) return res.status(400).json({ error: "Missing id or vin" });
       const data = sanitizeIntakeData(body.data);
-      const complete = data.roReady.length === 9 && data.roReady.every(Boolean);
       // Client edit timestamp (ms). Stale offline-queue writes from another
       // phone must never clobber newer work already on the server.
       const ts = Math.min(Date.now() + 60000, Math.max(0, Number(body.ts) || Date.now()));
@@ -504,11 +503,13 @@ export function registerQuoterRoutes(app: Express) {
       await db.execute(sql`
         INSERT INTO intakes (id, vin, stock, vehicle, miles, estimator, quote_id, data, completed_at, updated_at)
         VALUES (${id}, ${vin}, ${stock}, ${vehicle}, ${miles}, ${estimator}, ${quoteId}, ${dataJson}::jsonb,
-                CASE WHEN ${complete} THEN NOW() ELSE NULL END, to_timestamp(${ts} / 1000.0))
+                NULL, to_timestamp(${ts} / 1000.0))
         ON CONFLICT (id) DO UPDATE SET
           vin = ${vin}, stock = ${stock}, vehicle = ${vehicle}, miles = ${miles},
           estimator = ${estimator}, quote_id = ${quoteId}, data = ${dataJson}::jsonb,
-          completed_at = CASE WHEN ${complete} THEN COALESCE(intakes.completed_at, NOW()) ELSE NULL END,
+          -- Completion is now marked at PIN commit (see pin.ts), never derived
+          -- from checklist state. Preserve whatever is already there.
+          completed_at = intakes.completed_at,
           updated_at = to_timestamp(${ts} / 1000.0)
         WHERE intakes.updated_at <= to_timestamp(${ts} / 1000.0) AND intakes.committed_by IS NULL
       `);

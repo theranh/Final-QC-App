@@ -5,4 +5,5 @@
 - [Google Sheets export](google-sheets-export.md) — Replit Sheets connector is read-only; writes need a service-account secret, and only columns A, C, D, K–O, Q may be filled (D auto-fills QC-pass date) in the VPC tracker.
 - [Quoter merge](quoter-merge.md) — merged-Quoter invariants: /api/quoter/* auth, verbatim pricing, PIN-at-commit immutability, frozen months, parallel run (never retire old app).
 - [Tracker snapshots](tracker-snapshots.md) — frozen months go to prod via the token-guarded sync endpoint's tracker_snapshot phase; re-running a month is the correction path.
+- [Intake completion](intake-completion.md) — checklists removed; PIN commit alone sets completed_at and must invalidate the dashboard cache.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

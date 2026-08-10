@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireEmployee } from "./access";
+import { invalidateDashboardCache } from "./dashboard";
 import { and } from "drizzle-orm";
 import { auditLog, employees, quotes, intakes, type Employee } from "@shared/schema";
 
@@ -217,13 +218,6 @@ export function registerPinRoutes(app: Express) {
           overriddenBy: row.overriddenBy,
         });
       }
-      const data = (row.data as any) || {};
-      const ro = Array.isArray(data.roReady) ? data.roReady : [];
-      const complete = ro.length === 9 && ro.every(Boolean);
-      if (!complete) {
-        return res.status(400).json({ error: "All 9 RO-Ready items must be checked before commit" });
-      }
-
       const sig = await resolveSignature(req.body, req);
       if (!sig.ok) return res.status(sig.status).json({ error: sig.error });
 
@@ -234,7 +228,9 @@ export function registerPinRoutes(app: Express) {
         // Immutability guard: only write when committed_by is still NULL.
         const [saved] = await tx
           .update(intakes)
-          .set({ committedBy: sig.committedBy, overriddenBy: sig.overriddenBy })
+          // Committing is what marks the intake complete (the old RO-ready
+          // checklist gate was removed); keep an earlier timestamp if present.
+          .set({ committedBy: sig.committedBy, overriddenBy: sig.overriddenBy, completedAt: sql`COALESCE(${intakes.completedAt}, NOW())` })
           .where(sql`${intakes.id} = ${id} AND ${intakes.committedBy} IS NULL`)
           .returning();
         if (!saved) return false;
@@ -250,6 +246,9 @@ export function registerPinRoutes(app: Express) {
       if (!committed) {
         return res.status(409).json({ error: "This intake was just committed by someone else." });
       }
+      // Committing marks the intake complete, which moves it into the
+      // awaiting-Final-QC list — refresh the cached dashboard right away.
+      invalidateDashboardCache();
 
       res.json({ ok: true, committedBy: sig.committedBy, overriddenBy: sig.overriddenBy });
     }),

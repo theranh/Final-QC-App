@@ -245,9 +245,10 @@ describe("commit endpoints", () => {
     expect(intakeRows.find((x) => x.id === "in1").committedBy).toBeNull();
   });
 
-  it("rejects an incomplete intake (400)", async () => {
+  it("commits an intake regardless of checklist state (RO-ready gate removed)", async () => {
     const r = await post("/api/quoter/commit-intake", { id: "in2", signerId: 1, pin: "1111" });
-    expect(r.status).toBe(400);
+    expect(r.status).toBe(200);
+    expect(intakeRows.find((x) => x.id === "in2").committedBy).toBe("Worker");
   });
 
   it("commits with the signer's own PIN and writes committed_by", async () => {

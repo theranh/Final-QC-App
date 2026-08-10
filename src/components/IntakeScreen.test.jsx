@@ -89,7 +89,7 @@ describe('IntakeScreen scan wiring', () => {
     ).toBeInTheDocument();
 
     // Still on the landing screen — no intake was seeded, nothing persisted.
-    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
     expect(putIntake).not.toHaveBeenCalled();
   });
 
@@ -98,7 +98,7 @@ describe('IntakeScreen scan wiring', () => {
     fireEvent.click(screen.getByText('emit-valid-scan'));
 
     // Landing screen is replaced by the intake checklist for this VIN.
-    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
   });
 
@@ -106,7 +106,7 @@ describe('IntakeScreen scan wiring', () => {
     await openScanner();
     fireEvent.click(screen.getByText('emit-cancel'));
     expect(screen.queryByTestId('mock-scanner')).not.toBeInTheDocument();
-    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
   });
 });
 
@@ -131,7 +131,7 @@ describe('IntakeScreen manual check-digit override', () => {
     // Plain start is rejected with the invalid-check-digit message.
     fireEvent.click(screen.getByRole('button', { name: /start \/ resume/i }));
     expect(await screen.findByText(/Invalid VIN check digit/i)).toBeInTheDocument();
-    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
     expect(putIntake).not.toHaveBeenCalled();
 
     // The override button is enabled for the invalid VIN; clicking it is the
@@ -139,7 +139,7 @@ describe('IntakeScreen manual check-digit override', () => {
     const override = screen.getByRole('button', { name: /use check digit override/i });
     expect(override).toBeEnabled();
     fireEvent.click(override);
-    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByPlaceholderText('VIN…')).toHaveValue(INVALID_VIN));
   });
 });
@@ -191,7 +191,7 @@ describe('IntakeScreen duplicate-VIN guard', () => {
     expect(screen.queryByRole('button', { name: /start intake anyway/i })).not.toBeInTheDocument();
 
     // Blocked behind the dialog: no intake was opened or persisted.
-    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
     expect(putIntake).not.toHaveBeenCalled();
   });
 
@@ -200,7 +200,7 @@ describe('IntakeScreen duplicate-VIN guard', () => {
     await submitVin();
 
     fireEvent.click(screen.getByRole('button', { name: /resume existing intake/i }));
-    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
     // Opening an existing intake only reads; nothing new is written.
     expect(putIntake).not.toHaveBeenCalled();
@@ -215,7 +215,7 @@ describe('IntakeScreen duplicate-VIN guard', () => {
     const startAnyway = screen.getByRole('button', { name: /start intake anyway/i });
 
     fireEvent.click(startAnyway);
-    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
     expect(screen.queryByText(/Record already exists/i)).not.toBeInTheDocument();
   });
@@ -229,7 +229,7 @@ describe('IntakeScreen duplicate-VIN guard', () => {
       expect(screen.queryByText(/Record already exists/i)).not.toBeInTheDocument()
     );
     // Back on the landing screen, nothing started or persisted.
-    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
     expect(putIntake).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /scan vin/i })).toBeInTheDocument();
   });

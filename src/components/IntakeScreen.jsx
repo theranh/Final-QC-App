@@ -13,19 +13,6 @@ import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 // client (a `steps` key may still exist in saved data for compat; it is no
 // longer rendered or required).
 
-// ---------- RO-ready sign-off (verbatim from the Quoter) ----------
-const RO_SPEC = [
-  'VIN tied to the UVEye scan',
-  'Current mileage entered',
-  'vAuto record copied as new',
-  'Full walk-around photo set',
-  'Every damage / fix marked & photo\u2019d',
-  'Body Quoter estimate PDF in MDD',
-  'Recon tasks added in MDD',
-  'MDD tracking tags on key & vehicle',
-  'All info in MDD, RO-ready',
-];
-
 // ---------- local cache (offline resume, per VIN, cap 40) ----------
 const LS_INTAKE = 'trqc.intake.cache.v2';
 
@@ -306,12 +293,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [pinOpen, setPinOpen] = useState(false);
   const locked = !!(intake && intake.committedBy); // committed → read-only
 
-  const ikToggleRo = (idx) => {
-    if (!intake || locked) return;
-    const roReady = (intake.roReady || []).map((val, i) => (i === idx ? !val : val));
-    saveIntake({ roReady });
-  };
-
   const doCommit = ({ signerId, pin, forEmployeeId }) =>
     api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId }).then((r) => {
       setIntake((s) => {
@@ -326,14 +307,16 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const cleanVin = vin.trim().toUpperCase();
   const started = intake && cleanVin.length >= 6;
 
-  // ---------- progress ----------
-  // Progress and completion track the 9-item RO-ready sign-off, which is what
-  // gates completed_at on the server (PUT /api/quoter/intakes: roReady 9/9).
-  const roDone = intake ? (intake.roReady || []).filter(Boolean).length : 0;
-  const overallDone = roDone;
-  const overallTotal = 9;
-  const overallPct = Math.round((roDone / 9) * 100);
-  const complete = roDone === 9 || (intake && intake.completedAt);
+  // Walk-around photos for the opened intake (thumbnails shown inline).
+  // Refreshed when the camera closes so new shots appear immediately.
+  const [intakePhotos, setIntakePhotos] = useState([]);
+  const photoQuoteId = intake?.quoteId ?? null;
+  useEffect(() => {
+    if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
+    let live = true;
+    api.quotePhotos(photoQuoteId).then((j) => { if (live) setIntakePhotos(j?.photos || []); }).catch(() => {});
+    return () => { live = false; };
+  }, [photoQuoteId, walkOpen]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -513,41 +496,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
 
         {started && (
           <>
-            {/* progress card */}
-            <div className="card">
-              <div className="card-title">INTAKE PROGRESS</div>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
-                <span className="oswald" style={{ fontWeight: 700, fontSize: 22, color: complete ? 'var(--green)' : 'var(--ink)' }}>
-                  {overallPct}%
-                </span>
-                <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>
-                  {overallDone}/{overallTotal} RO-ready
-                </span>
-                <span style={{ flex: 1 }} />
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: 0.6,
-                    color: '#fff',
-                    background: complete ? 'var(--green)' : 'var(--amber)',
-                    padding: '3px 8px',
-                    borderRadius: 5,
-                  }}
-                >
-                  {complete ? 'RO-READY ✓' : 'IN PROGRESS'}
-                </span>
-              </div>
-              <div style={{ marginTop: 8, height: 7, borderRadius: 4, background: 'var(--panel2)', overflow: 'hidden' }}>
-                <div style={{ width: overallPct + '%', height: '100%', background: complete ? 'var(--green)' : 'var(--red)', transition: 'width .2s' }} />
-              </div>
-              {intake.completedAt ? (
-                <div style={{ fontSize: 10, color: 'var(--green)', fontWeight: 600, marginTop: 6 }}>
-                  Completed {new Date(intake.completedAt).toLocaleDateString()}
-                </div>
-              ) : null}
-            </div>
-
             {/* vehicle detail fields */}
             <div className="card">
               <div className="card-title">TRUCK</div>
@@ -595,8 +543,21 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               </div>
             </div>
             <div className="card">
-              <div className="card-title">WALK-AROUND PHOTOS · {quoteSummary?.photoCount || 0} / 24</div>
+              <div className="card-title">WALK-AROUND PHOTOS · {intakePhotos.length} / 24</div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
+              {intakePhotos.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
+                  {intakePhotos.map((p) => (
+                    <img
+                      key={p.id}
+                      src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                      alt={p.slot || 'walk-around photo'}
+                      loading="lazy"
+                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)' }}
+                    />
+                  ))}
+                </div>
+              )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { await ensureIntakeQuote(); setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
             </div>
             {/* Body Quoter */}
@@ -617,36 +578,25 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               )}
             </div>
 
-            {/* RO-Ready check */}
+            {/* Commit sign-off: PIN sign-off marks the intake complete and locks it. */}
             <div className="card">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="oswald" style={{ fontWeight: 600, fontSize: 15, flex: 1 }}>RO-Ready Check</span>
-                <span style={{ fontSize: 11, fontWeight: 700, color: roDone === 9 ? 'var(--green)' : 'var(--muted)' }}>{roDone}/9</span>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-                {RO_SPEC.map((text, i) => (
-                  <IkRow key={i} text={text} on={!!(intake.roReady || [])[i]} onToggle={locked ? null : () => ikToggleRo(i)} />
-                ))}
-              </div>
-              {complete && (
-                <div style={{ marginTop: 10, textAlign: 'center', fontSize: 12, fontWeight: 700, color: 'var(--green)' }}>
-                  ✓ Intake complete — this truck is RO-ready.
-                </div>
-              )}
-
-              {/* Commit sign-off: required at commit, not at start. */}
               {locked ? (
-                <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: '#e8f3ea', border: '1px solid var(--green)' }}>
+                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#e8f3ea', border: '1px solid var(--green)' }}>
                   <SignatureBadge committedBy={intake.committedBy} overriddenBy={intake.overriddenBy} />
                   <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 4 }}>
-                    Committed and locked. A correction is a new record, not an edit.
+                    Committed and locked{intake.completedAt ? ' · ' + new Date(intake.completedAt).toLocaleDateString() : ''}. A correction is a new record, not an edit.
                   </div>
                 </div>
-              ) : roDone === 9 ? (
-                <button className="btn btn-green" style={{ marginTop: 10, height: 46 }} onClick={() => setPinOpen(true)}>
-                  ✍ Commit intake
-                </button>
-              ) : null}
+              ) : (
+                <>
+                  <button className="btn btn-green" style={{ height: 46 }} onClick={() => setPinOpen(true)}>
+                    ✍ Commit intake
+                  </button>
+                  <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6, textAlign: 'center' }}>
+                    Committing signs off the intake with your PIN and locks it.
+                  </div>
+                </>
+              )}
             </div>
           </>
         )}
@@ -731,7 +681,7 @@ function DuplicateVinDialog({ warn, onOpenIntake, onOpenQuote, onStartAnyway, on
             <button className="btn btn-dark" style={{ height: 46 }} onClick={() => onOpenIntake(intakeRow)}>
               {intakeRow.completedAt ? 'Open existing intake' : 'Resume existing intake'}
               <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.85, marginTop: 2 }}>
-                {intakeRow.vehicle || 'Vehicle not decoded'}{intakeRow.stock ? ' · STOCK ' + intakeRow.stock : ''} · {intakeRow.pct || 0}%
+                {intakeRow.vehicle || 'Vehicle not decoded'}{intakeRow.stock ? ' · STOCK ' + intakeRow.stock : ''}
               </span>
             </button>
           ) : (
@@ -759,48 +709,9 @@ function DuplicateVinDialog({ warn, onOpenIntake, onOpenQuote, onStartAnyway, on
 
 function IntakeHomeCard({ row, onClick }) {
   return <button className="card" onClick={onClick} style={{textAlign:'left',width:'100%',cursor:'pointer',padding:13}}>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><span className="oswald" style={{fontSize:16}}>{row.vehicle || 'Vehicle not decoded'}</span><span style={{marginLeft:'auto',fontSize:10,color:row.completedAt?'var(--green)':'var(--amber)',fontWeight:700}}>{row.pct || 0}%</span></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><span className="oswald" style={{fontSize:16}}>{row.vehicle || 'Vehicle not decoded'}</span><span style={{marginLeft:'auto',fontSize:10,color:row.completedAt?'var(--green)':'var(--amber)',fontWeight:700}}>{row.completedAt ? 'COMPLETE ✓' : 'IN PROGRESS'}</span></div>
     <div className="mono" style={{fontSize:11,color:'var(--muted)',marginTop:5}}>{row.vin}</div>
     <div style={{display:'flex',flexWrap:'wrap',gap:'4px 12px',fontSize:10,color:'var(--brown)',marginTop:8}}><span>STOCK {row.stock || '—'}</span><span>{row.estimator || 'No estimator'}</span><span>{row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}</span>{row.quote && <><span>{row.quote.lineCount} lines</span><span>{row.quote.hrs} hr</span><b>${Number(row.quote.usd).toLocaleString()}</b></>}</div>
-    <div style={{marginTop:8,height:5,background:'var(--panel2)',borderRadius:3}}><div style={{height:'100%',width:`${row.pct || 0}%`,background:row.completedAt?'var(--green)':'var(--red)',borderRadius:3}}/></div>
   </button>;
 }
 
-function IkRow({ text, on, onToggle }) {
-  return (
-    <div
-      onClick={onToggle}
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 9,
-        padding: '9px 10px',
-        borderRadius: 8,
-        cursor: 'pointer',
-        background: on ? '#e8f3ea' : '#fff',
-        border: '1px solid ' + (on ? 'var(--green)' : 'var(--border)'),
-      }}
-    >
-      <span
-        style={{
-          width: 20,
-          height: 20,
-          borderRadius: 5,
-          flex: '0 0 auto',
-          marginTop: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: 12,
-          fontWeight: 700,
-          color: '#fff',
-          background: on ? 'var(--green)' : 'transparent',
-          border: '1.5px solid ' + (on ? 'var(--green)' : 'var(--muted2)'),
-        }}
-      >
-        {on ? '✓' : ''}
-      </span>
-      <span style={{ fontSize: 12, lineHeight: 1.45, color: on ? 'var(--ink)' : 'var(--brown)', fontWeight: on ? 600 : 500 }}>{text}</span>
-    </div>
-  );
-}

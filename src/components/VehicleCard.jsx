@@ -49,23 +49,6 @@ const intakePhotos = (it) => {
     typeof p === 'string' ? { url: p, label: '' } : { url: p.url || p.src || p.data, label: p.label || p.slot || p.kind || '' }
   ).filter((p) => p.url);
 };
-const intakeSteps = (it) => {
-  const steps = it?.steps || it?.checklist || [];
-  return (Array.isArray(steps) ? steps : []).map((s) => ({
-    name: s.name || s.label || s.title || s.step || 'Step',
-    state: s.state ?? s.status ?? s.done,
-    subs: (s.subSteps || s.subs || s.items || []).map((x) => ({
-      name: x.name || x.label || x.item || x.title || '',
-      state: x.state ?? x.status ?? x.done ?? x.checked,
-    })),
-  }));
-};
-const roReadyItems = (it) => {
-  const ro = it?.roReady || it?.roReadyCheck || it?.ro_ready || [];
-  return (Array.isArray(ro) ? ro : []).map((x) =>
-    typeof x === 'string' ? { name: x, state: 'done' } : { name: x.name || x.label || x.item || '', state: x.state ?? x.status ?? x.done ?? x.checked }
-  );
-};
 
 export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onOpenLightbox }) {
   const [intake, setIntake] = useState(undefined); // undefined=loading, null=load error
@@ -81,8 +64,6 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
   const t = vehicle.tracker;
   const found = intake && intake.found;
   const photos = found ? intakePhotos(intake) : [];
-  const steps = found ? intakeSteps(intake) : [];
-  const roReady = found ? roReadyItems(intake) : [];
 
   // Final QC per segment, straight from the committed record.
   const segResults = record
@@ -150,31 +131,6 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
                 </div>
               ) : (
                 <div className="empty-note" style={{ padding: '8px 0 2px' }}>No photos in the intake record.</div>
-              )}
-            </div>
-            <div className="card">
-              <div className="card-title">INTAKE STEPS — TR-INTAKE-V2</div>
-              {steps.length ? (
-                steps.map((s, i) => (
-                  <div key={i} style={{ marginTop: i ? 8 : 6 }}>
-                    <CheckItem label={s.name} state={s.state} />
-                    {s.subs.filter((x) => x.name).map((x, j) => (
-                      <div key={j} style={{ paddingLeft: 16 }}>
-                        <CheckItem label={x.name} state={x.state} />
-                      </div>
-                    ))}
-                  </div>
-                ))
-              ) : (
-                <div className="empty-note" style={{ padding: '8px 0 2px' }}>No step detail in the intake record.</div>
-              )}
-            </div>
-            <div className="card">
-              <div className="card-title">RO-READY CHECK</div>
-              {roReady.length ? (
-                roReady.map((x, i) => <CheckItem key={i} label={x.name} state={x.state} />)
-              ) : (
-                <div className="empty-note" style={{ padding: '8px 0 2px' }}>No RO-Ready detail in the intake record.</div>
               )}
             </div>
           </>
