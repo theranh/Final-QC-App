@@ -20,14 +20,15 @@ const getOidcConfig = memoize(
 );
 
 export function getSession() {
-  const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
+  const sessionTtl = 30 * 24 * 60 * 60 * 1000; // 30 days
   const pgStore = connectPg(session);
   const sessionStore = new pgStore({
     // Share the app pool (which has an error handler and idle-connection
     // recycling) instead of an unmanaged private connection.
     pool,
     createTableIfMissing: false,
-    ttl: sessionTtl,
+    ttl: sessionTtl / 1000, // connect-pg-simple expects seconds
+
     tableName: "sessions",
   });
   return session({
@@ -35,6 +36,9 @@ export function getSession() {
     store: sessionStore,
     resave: false,
     saveUninitialized: false,
+    // Rolling sessions: every visit pushes the expiry out another 30 days, so
+    // anyone who uses the app at least monthly stays signed in indefinitely.
+    rolling: true,
     cookie: {
       httpOnly: true,
       secure: true,
