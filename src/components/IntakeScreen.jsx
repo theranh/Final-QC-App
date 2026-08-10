@@ -5,7 +5,7 @@ import PinDialog, { SignatureBadge } from './PinDialog';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
-import { vinValid, decodeVinInfo } from '../lib/vin';
+import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -453,7 +453,19 @@ export default function IntakeScreen({ showToast }) {
             );
           })()}
         </div>
-        {scanning && <VinScanner onDetected={(v, ok) => { setScanning(false); acceptVin(v, !ok); }} onCancel={() => setScanning(false)} />}
+        {scanning && <VinScanner onDetected={(v, ok) => {
+          setScanning(false);
+          // Never silently seed from a bad scan: block invalid check digits and
+          // route to manual entry so the override is an explicit user choice.
+          const d = scannedVinDecision(v, ok);
+          if (d.seed) {
+            acceptVin(d.vin);
+          } else {
+            setVin(d.vin);
+            setManualOpen(true);
+            setVinMessage(d.message);
+          }
+        }} onCancel={() => setScanning(false)} />}
         {dupWarn && (
           <DuplicateVinDialog
             warn={dupWarn}

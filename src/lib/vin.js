@@ -146,6 +146,27 @@ export async function decodeVinInfo(vin) {
   }
 }
 
+// Decide what the intake screen does with a VIN coming off the scanner.
+// A scan must NEVER silently seed an intake with a bad VIN: only a clean
+// 17-character VIN with a passing check digit seeds; anything else is blocked
+// with an explicit message so the user verifies (and, if truly correct,
+// consciously uses the manual check-digit override).
+export function scannedVinDecision(raw, valid) {
+  const vin = String(raw || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (vin.length !== 17) {
+    return { seed: false, vin, message: 'Scanned code is not a 17-character VIN — verify and type it manually.' };
+  }
+  const ok = typeof valid === 'boolean' ? valid : vinValid(vin);
+  if (!ok) {
+    return {
+      seed: false,
+      vin,
+      message: 'Scanned VIN failed its check digit. Verify against the door label, then use check digit override only if it truly matches.',
+    };
+  }
+  return { seed: true, vin, message: '' };
+}
+
 export function extractVin17(text) {
   const cleaned = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const m = cleaned.match(/[A-HJ-NPR-Z0-9]{17}/);

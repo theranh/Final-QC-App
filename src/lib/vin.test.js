@@ -1,5 +1,40 @@
 import { describe, it, expect } from 'vitest';
-import { vinValid, extractVin17, vehicleDescFromDecode } from './vin';
+import { vinValid, extractVin17, vehicleDescFromDecode, scannedVinDecision } from './vin';
+
+// Scan → intake seed gate: VinScanner calls onDetected(vin, vinValid(vin)) and
+// IntakeScreen feeds that through scannedVinDecision before seeding an intake.
+describe('scannedVinDecision (scan → intake seed path)', () => {
+  const GOOD = '1HGCM82633A004352';
+  const BAD_CHECK = '1HGCM82683A004352'; // check-digit position corrupted
+
+  it('seeds when the scanned VIN passes the check digit', () => {
+    expect(scannedVinDecision(GOOD, true)).toEqual({ seed: true, vin: GOOD, message: '' });
+  });
+
+  it('blocks a scanned VIN with a failing check digit — never silently seeds', () => {
+    const d = scannedVinDecision(BAD_CHECK, false);
+    expect(d.seed).toBe(false);
+    expect(d.vin).toBe(BAD_CHECK);
+    expect(d.message).toMatch(/check digit/i);
+    expect(d.message).toMatch(/override/i);
+  });
+
+  it('recomputes validity itself when the scanner flag is missing', () => {
+    expect(scannedVinDecision(GOOD).seed).toBe(true);
+    expect(scannedVinDecision(BAD_CHECK).seed).toBe(false);
+  });
+
+  it('never trusts a stale "valid" flag over the actual VIN length', () => {
+    const d = scannedVinDecision('1HGCM82633A00435', true); // 16 chars
+    expect(d.seed).toBe(false);
+    expect(d.message).toMatch(/17/);
+  });
+
+  it('normalizes casing and strips separators before deciding', () => {
+    const d = scannedVinDecision(' 1hgcm82633a004352 ', undefined);
+    expect(d).toEqual({ seed: true, vin: GOOD, message: '' });
+  });
+});
 
 describe('vinValid', () => {
   it('accepts a real, correctly-checksummed 17-character VIN', () => {
