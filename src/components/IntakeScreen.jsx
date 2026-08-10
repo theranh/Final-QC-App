@@ -353,6 +353,13 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     const recentSearch = homeSearch.trim().toUpperCase();
     const recentFiltered = recentQuotes.filter((q) => !recentSearch || [q.vin, q.stock, q.vehicle, q.estimator].join(' ').toUpperCase().includes(recentSearch));
     const knownEst = homeEstimator && estimators.includes(homeEstimator);
+    const missing = [
+      !homeStock.trim() && 'Stock #',
+      !homeMiles.trim() && 'Miles',
+      !homeEstimator.trim() && 'Estimator',
+      !homeMddTags && 'MDD tags checkbox',
+    ].filter(Boolean);
+    const homeReady = missing.length === 0;
     return (
       <div className="screen">
         <div className="screen-topbar"><div className="screen-title-row"><span className="screen-title">Intake</span><span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>TR-INTAKE-V2</span></div></div>
@@ -387,10 +394,19 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Are both Key &amp; Vehicle MDD tags present?</span>
           </label>
 
-          {/* SCAN VIN */}
-          <button className="btn btn-red" style={{ height: 60, fontSize: 20, letterSpacing: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }} onClick={() => setScanning(true)}>
+          {/* SCAN VIN — only once the quote details above are filled in */}
+          <button
+            className="btn btn-red"
+            style={{ height: 60, fontSize: 20, letterSpacing: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, opacity: homeReady ? 1 : 0.45 }}
+            aria-disabled={!homeReady}
+            onClick={() => {
+              if (!homeReady) { showToast?.(`Fill in first: ${missing.join(', ')}`); return; }
+              setScanning(true);
+            }}
+          >
             <span aria-hidden="true">📷</span> SCAN VIN
           </button>
+          {!homeReady && <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center', marginTop: -6 }}>Needed before scanning: {missing.join(' · ')}</div>}
 
           {/* OR divider */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

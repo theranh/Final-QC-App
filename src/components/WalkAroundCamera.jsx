@@ -137,8 +137,14 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
           <button className="btn btn-outline" style={{ marginTop: 8, color: '#f5f3ee', borderColor: '#5c554b' }} onClick={damage}>+ ADD DAMAGE CLOSE-UP</button>
         </div>
       ) : (
-        <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', justifyContent: 'center', background: '#080807' }}>
-          {mode !== 'review' && <><video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} /><div style={{ position: 'absolute', top: 16, left: 16, right: 16, textAlign: 'center' }}>{mode === 'guided' ? <><div style={{ fontFamily: 'var(--font-display, sans-serif)', fontSize: 27, fontWeight: 700 }}>{slot.label}</div><div style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 4, color: '#d9d2c4' }}>{current + 1} / 24</div></> : <div style={{ fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}</div></>}
+        <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
+          {/* iPhone-style 4:3 photo frame — landscape 4:3, portrait 3:4 — letterboxed on black */}
+          {mode !== 'review' && (
+            <div style={{ position: 'relative', width: '100%', maxWidth: '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807' }}>
+              <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
+              <div style={{ position: 'absolute', top: 12, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)' }}>{mode === 'guided' ? <><div style={{ fontFamily: 'var(--font-display, sans-serif)', fontSize: 24, fontWeight: 700 }}>{slot.label}</div><div style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 2, color: '#d9d2c4' }}>{current + 1} / 24</div></> : <div style={{ fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}</div>
+            </div>
+          )}
           {landscape && (
             <>
               <button aria-label="Close camera" onClick={onClose} style={{ position: 'absolute', top: 'calc(10px + env(safe-area-inset-top))', left: 'calc(12px + env(safe-area-inset-left))', width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,255,255,.35)', background: 'rgba(0,0,0,.45)', color: '#f5f3ee', fontSize: 18 }}>×</button>
@@ -147,7 +153,19 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
           )}
           {error && <div style={{ position: 'absolute', bottom: 120, left: 20, right: 20, padding: 12, borderRadius: 8, background: '#3a362f', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '16px 18px calc(18px + env(safe-area-inset-bottom))', background: 'linear-gradient(transparent, rgba(0,0,0,.85))' }}>
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginBottom: 14 }}>{shownZooms.map((z) => <button key={z} onClick={() => setZoom(z)} style={{ border: 0, borderRadius: 20, padding: '6px 9px', background: zoom === z ? '#b0322a' : '#332f2a', color: '#fff', fontSize: 11 }}>{z}×</button>)}</div>
+            {/* iPhone-style zoom dial: round pills, selected one grows and shows the × */}
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: 4, borderRadius: 24, background: 'rgba(20,18,16,.6)' }}>
+                {shownZooms.map((z) => {
+                  const sel = zoom === z;
+                  return (
+                    <button key={z} onClick={() => setZoom(z)} aria-label={`${z}x zoom`} style={{ border: 0, borderRadius: '50%', width: sel ? 40 : 30, height: sel ? 40 : 30, background: sel ? 'rgba(58,54,47,.95)' : 'transparent', color: sel ? '#f7c948' : '#e8e2d6', fontSize: sel ? 13 : 11, fontWeight: sel ? 700 : 500, transition: 'all .15s' }}>
+                      {sel ? `${z}×` : (z < 1 ? String(z).replace('0.', '.') : z)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><button className="btn btn-outline" style={{ color: '#fff', borderColor: '#776e62' }} onClick={() => mode === 'damage' ? setMode('guided') : (setSkipped((p) => ({ ...p, [slot.key]: true })), setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current))}>{mode === 'damage' ? 'CANCEL' : 'SKIP'}</button><button onClick={capture} aria-label="Take photo" style={{ width: 72, height: 72, borderRadius: '50%', background: '#f5f3ee', border: '7px solid rgba(255,255,255,.3)', boxShadow: '0 0 0 2px #f5f3ee' }} /><button className="btn btn-outline" style={{ color: '#fff', borderColor: '#776e62' }} onClick={() => setMode('review')}>DONE</button></div>
           </div>
           {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}

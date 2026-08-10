@@ -72,11 +72,27 @@ afterEach(cleanup);
 
 const openScanner = async () => {
   render(<IntakeScreen showToast={() => {}} />);
+  // The SCAN VIN button is gated: stock, miles, estimator, and the MDD tags
+  // checkbox must all be filled in before scanning is allowed.
+  fireEvent.change(screen.getByPlaceholderText('T-0000'), { target: { value: 'T-1234' } });
+  fireEvent.change(screen.getByPlaceholderText('e.g. 45000'), { target: { value: '45000' } });
+  const estSelect = screen.getByDisplayValue('Select name…');
+  fireEvent.change(estSelect, { target: { value: '__custom' } });
+  fireEvent.change(screen.getByPlaceholderText('Estimator name'), { target: { value: 'Test Estimator' } });
+  fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(screen.getByRole('button', { name: /scan vin/i }));
   return screen.findByTestId('mock-scanner');
 };
 
 describe('IntakeScreen scan wiring', () => {
+  it('blocks scanning until stock, miles, estimator, and MDD checkbox are filled', () => {
+    render(<IntakeScreen showToast={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /scan vin/i }));
+    expect(screen.queryByTestId('mock-scanner')).not.toBeInTheDocument();
+    expect(screen.getByText(/Needed before scanning/i)).toBeInTheDocument();
+  });
+
+
   it('blocks an invalid scanned VIN: opens manual entry with the warning, no intake seeded', async () => {
     await openScanner();
     fireEvent.click(screen.getByText('emit-invalid-scan'));
