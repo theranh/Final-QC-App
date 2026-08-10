@@ -33,6 +33,8 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
   const [zoomCaps, setZoomCaps] = useState(null);
   const videoRef = useRef(null); const streamRef = useRef(null); const trackRef = useRef(null);
   const fileRef = useRef(null); const canvasRef = useRef(null);
+  const gravRef = useRef(null); // last gravity reading {x,y,t} for the rotation-lock fix
+  const motionOnRef = useRef(false);
   const progress = walkProgress(WALK_SLOTS, taken, skipped);
   const slot = WALK_SLOTS[current];
   const zooms = useMemo(() => [0.5, 1, 2, 3, 5], []);
@@ -61,6 +63,24 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     return () => { if (cancel) cancel(); stopCamera(); };
   }, [startCamera, stopCamera]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  // Gravity readings power the old Body Quoter's rotation-lock fix: if the
+  // phone is held sideways but the feed is still portrait, the shot gets
+  // rotated upright at capture time.
+  const onMotion = useCallback((e) => {
+    const g = e.accelerationIncludingGravity;
+    if (g && (g.x != null)) gravRef.current = { x: g.x, y: g.y, t: Date.now() };
+  }, []);
+  const enableMotion = useCallback(() => {
+    if (motionOnRef.current) return;
+    const attach = () => { motionOnRef.current = true; window.addEventListener('devicemotion', onMotion); };
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      DeviceMotionEvent.requestPermission().then((r) => { if (r === 'granted') attach(); }).catch(() => {});
+    } else if (typeof DeviceMotionEvent !== 'undefined') attach();
+  }, [onMotion]);
+  useEffect(() => {
+    enableMotion();
+    return () => { if (motionOnRef.current) window.removeEventListener('devicemotion', onMotion); };
+  }, [enableMotion, onMotion]);
   useEffect(() => {
     const mq = window.matchMedia?.('(orientation: landscape)');
     if (!mq) return;
@@ -91,21 +111,43 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       showToast?.(e.status === 413 ? 'Photo is too large — try again closer or with less zoom.' : e.status === 409 ? 'This quote is committed and cannot accept photos.' : 'Photo could not be saved.');
     }
   };
+  // Capture logic ported verbatim from the old Body Quoter app: crop to the
+  // visible (object-fit: cover) region, apply digital-zoom crop, and rotate
+  // upright only in the rotation-lock case (portrait feed, phone sideways).
   const capture = async () => {
+    enableMotion(); // iOS needs a user gesture to grant motion access
     setFlash(true); setTimeout(() => setFlash(false), 160);
-    if (!videoRef.current?.videoWidth) { fileRef.current?.click(); return; }
-    const video = videoRef.current; const canvas = canvasRef.current || document.createElement('canvas');
-    const aspect = video.clientWidth / video.clientHeight; let w = video.videoWidth; let h = Math.round(w / aspect);
-    if (h > video.videoHeight) { h = video.videoHeight; w = Math.round(h * aspect); }
-    // Only digital zoom (crop) applies when the camera lacks native zoom;
-    // the video feed itself is already orientation-correct, so no rotation
-    // compensation is needed — rotating here corrupts captures.
-    const z = nativeZooms.length ? 1 : Math.max(1, zoomRef.current);
-    w /= z; h /= z;
-    const scale = Math.min(1, MAX / Math.max(w, h));
-    canvas.width = Math.max(1, Math.round(w * scale)); canvas.height = Math.max(1, Math.round(h * scale));
+    const v = videoRef.current;
+    if (!v?.videoWidth) { fileRef.current?.click(); return; }
+    let rot = 0;
+    const gv = gravRef.current;
+    const fresh = gv && (Date.now() - gv.t) < 1500;
+    if (fresh && v.videoHeight > v.videoWidth) {
+      if (Math.abs(gv.x) > Math.abs(gv.y) && Math.abs(gv.x) > 4) rot = gv.x > 0 ? -90 : 90;
+      else if (Math.abs(gv.y) > Math.abs(gv.x) && gv.y < -4) rot = 180;
+    }
+    let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
+    const ew = v.clientWidth, eh = v.clientHeight;
+    if (ew > 0 && eh > 0) {
+      const va = v.videoWidth / v.videoHeight, ea = ew / eh;
+      if (va > ea) { sw = Math.round(v.videoHeight * ea); sx = Math.round((v.videoWidth - sw) / 2); }
+      else if (va < ea) { sh = Math.round(v.videoWidth / ea); sy = Math.round((v.videoHeight - sh) / 2); }
+    }
+    const dz = nativeZooms.length ? 1 : Math.max(1, zoomRef.current);
+    if (dz > 1) {
+      const nw = sw / dz, nh = sh / dz;
+      sx += (sw - nw) / 2; sy += (sh - nh) / 2; sw = nw; sh = nh;
+    }
+    const canvas = canvasRef.current || document.createElement('canvas');
+    const r = Math.min(1, MAX / Math.max(sw, sh));
+    const w = Math.max(1, Math.round(sw * r)); const h = Math.max(1, Math.round(sh * r));
+    const swap = Math.abs(rot) === 90;
+    canvas.width = swap ? h : w; canvas.height = swap ? w : h;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, (video.videoWidth - w) / 2, (video.videoHeight - h) / 2, w, h, 0, 0, canvas.width, canvas.height);
+    ctx.save();
+    if (rot) { ctx.translate(canvas.width / 2, canvas.height / 2); ctx.rotate(rot * Math.PI / 180); ctx.drawImage(v, sx, sy, sw, sh, -w / 2, -h / 2, w, h); }
+    else ctx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
+    ctx.restore();
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     if (mode === 'damage') { if (!committed) onDamageCapture?.(dataUrl); }
     else await saveGuided(dataUrl);
@@ -120,14 +162,48 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
   };
   const damage = () => { if (!committed) setMode('damage'); };
   const selectSlot = (i) => { setMode('guided'); setCurrent(i); };
+  const skipOrCancel = () => (mode === 'damage' ? setMode('guided') : (setSkipped((p) => ({ ...p, [slot.key]: true })), setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current)));
+  // Translucent dark camera-chrome buttons (never the app's white .btn styles)
+  const chromeBtn = { border: '1px solid rgba(255,255,255,.28)', borderRadius: 20, background: 'rgba(28,26,23,.65)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: 1, padding: '10px 14px' };
+  const roundBtn = { ...chromeBtn, borderRadius: '50%', width: 42, height: 42, padding: 0, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(35,32,26,.72)', border: '2px solid rgba(255,255,255,.5)' };
+  // Shutter styled like the old Body Quoter: solid white with a translucent ring.
+  const shutterBtn = <button onClick={capture} aria-label="Take photo" style={{ width: 78, height: 78, borderRadius: '50%', background: '#fff', backgroundClip: 'padding-box', border: '5px solid rgba(255,255,255,.4)', flex: 'none', padding: 0 }} />;
+  // Latest shot thumbnail + count badge (old Body Quoter's gallery button) — opens the shot list.
+  const lastShot = [...WALK_SLOTS].reverse().map((s) => photos[s.key]?.thumb).find(Boolean);
+  const galleryBtn = (
+    <button onClick={() => setMode('review')} aria-label="Open photo gallery" style={{ position: 'relative', flex: 'none', width: 64, height: 64, padding: 0, border: '2px solid #fff', borderRadius: 12, background: '#000', overflow: 'visible' }}>
+      {lastShot ? <img src={lastShot} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 9 }} /> : <span style={{ color: '#aaa092', fontSize: 10 }}>SHOTS</span>}
+      {progress.captured > 0 && <span style={{ position: 'absolute', right: -6, top: -6, background: '#b0322a', color: '#fff', fontWeight: 700, fontSize: 12, minWidth: 20, height: 20, lineHeight: '20px', borderRadius: 10, padding: '0 4px' }}>{progress.captured}</span>}
+    </button>
+  );
+  // Zoom pills styled like the old Body Quoter camera.
+  const zoomDial = (vertical) => (
+    <div style={{ display: 'flex', flexDirection: vertical ? 'column' : 'row', alignItems: 'center', gap: 10 }}>
+      {shownZooms.map((z) => {
+        const sel = zoom === z;
+        return (
+          <button key={z} onClick={() => setZoom(z)} aria-label={`${z}x zoom`} style={{ flex: 'none', minWidth: 46, height: 38, borderRadius: 19, border: '1px solid rgba(255,255,255,.45)', background: sel ? 'rgba(245,243,238,.92)' : 'rgba(35,32,26,.6)', color: sel ? '#201d19' : '#f5f3ee', fontWeight: 700, fontSize: 14, padding: '0 10px' }}>
+            {z < 1 ? String(z).replace('0.', '.') : `${z}×`}
+          </button>
+        );
+      })}
+    </div>
+  );
+  const frame = (
+    <div style={{ position: 'relative', flex: 'none', width: '100%', maxWidth: landscape ? 'calc((100dvh) * 4 / 3)' : '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807', alignSelf: 'center' }}>
+      <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
+      {mode === 'damage' && <div style={{ position: 'absolute', top: 10, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)', pointerEvents: 'none', fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}
+      {error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
+    </div>
+  );
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
-      {(!landscape || mode === 'review') && <div style={{ padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #3a362f' }}>
-        <button className="btn btn-outline" style={{ color: '#f5f3ee', borderColor: '#5c554b', width: 42, padding: 8 }} onClick={onClose}>×</button>
-        <div style={{ flex: 1 }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : 'WALK-AROUND'}</div><div style={{ fontSize: 12, color: '#aaa092' }}>{mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured` : 'Found damage? Take a close-up of each spot — these go to the AI for the body quote.'}</div></div>
-        {mode === 'guided' && <button className="btn btn-outline" style={{ color: '#f5f3ee', borderColor: '#5c554b', padding: '8px 10px' }} onClick={() => setMode('review')}>Review</button>}
+      {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
+        <button aria-label="Close camera" onClick={onClose} style={roundBtn}>×</button>
+        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured` : 'Close-ups go to the AI for the body quote.'}</div></div>
+        {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
       {mode === 'review' ? (
         <div style={{ padding: 16, overflow: 'auto' }}>
@@ -136,37 +212,32 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
           <button className="btn btn-red" onClick={() => setMode('guided')}>BACK TO CAMERA</button>
           <button className="btn btn-outline" style={{ marginTop: 8, color: '#f5f3ee', borderColor: '#5c554b' }} onClick={damage}>+ ADD DAMAGE CLOSE-UP</button>
         </div>
+      ) : landscape ? (
+        /* Landscape — like the iPhone camera turned sideways: full-height 4:3
+           frame on the left, controls in a rail on the right. */
+        <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'row', background: '#000', paddingLeft: 'env(safe-area-inset-left)' }}>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
+          <div style={{ flex: 'none', width: 118, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: 'calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) 8px 4px' }}>
+            <button aria-label="Close camera" onClick={onClose} style={roundBtn}>✕</button>
+            {zoomDial(true)}
+            {shutterBtn}
+            {mode === 'damage' ? <button style={chromeBtn} onClick={skipOrCancel}>CANCEL</button> : galleryBtn}
+          </div>
+          {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}
+        </div>
       ) : (
-        <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
-          {/* iPhone-style 4:3 photo frame — landscape 4:3, portrait 3:4 — letterboxed on black */}
-          {mode !== 'review' && (
-            <div style={{ position: 'relative', width: '100%', maxWidth: '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807' }}>
-              <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
-              <div style={{ position: 'absolute', top: 12, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)' }}>{mode === 'guided' ? <><div style={{ fontFamily: 'var(--font-display, sans-serif)', fontSize: 24, fontWeight: 700 }}>{slot.label}</div><div style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 2, color: '#d9d2c4' }}>{current + 1} / 24</div></> : <div style={{ fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}</div>
+        /* Portrait — header on top, 3:4 frame, controls below on solid black. */
+        <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: '#000' }}>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
+          <div style={{ flex: 'none', padding: '12px 18px calc(16px + env(safe-area-inset-bottom))', background: '#000' }}>
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>{zoomDial(false)}</div>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              {mode === 'damage' ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>CANCEL</button> : galleryBtn}
+              <span style={{ flex: 1 }} />
+              {shutterBtn}
+              <span style={{ flex: 1 }} />
+              <span style={{ flex: 'none', width: mode === 'damage' ? 84 : 64 }} />
             </div>
-          )}
-          {landscape && (
-            <>
-              <button aria-label="Close camera" onClick={onClose} style={{ position: 'absolute', top: 'calc(10px + env(safe-area-inset-top))', left: 'calc(12px + env(safe-area-inset-left))', width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,255,255,.35)', background: 'rgba(0,0,0,.45)', color: '#f5f3ee', fontSize: 18 }}>×</button>
-              {mode === 'guided' && <button onClick={() => setMode('review')} style={{ position: 'absolute', top: 'calc(10px + env(safe-area-inset-top))', right: 'calc(12px + env(safe-area-inset-right))', borderRadius: 20, border: '1px solid rgba(255,255,255,.35)', background: 'rgba(0,0,0,.45)', color: '#f5f3ee', fontSize: 12, padding: '9px 14px' }}>Review</button>}
-            </>
-          )}
-          {error && <div style={{ position: 'absolute', bottom: 120, left: 20, right: 20, padding: 12, borderRadius: 8, background: '#3a362f', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
-          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '16px 18px calc(18px + env(safe-area-inset-bottom))', background: 'linear-gradient(transparent, rgba(0,0,0,.85))' }}>
-            {/* iPhone-style zoom dial: round pills, selected one grows and shows the × */}
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, marginBottom: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: 4, borderRadius: 24, background: 'rgba(20,18,16,.6)' }}>
-                {shownZooms.map((z) => {
-                  const sel = zoom === z;
-                  return (
-                    <button key={z} onClick={() => setZoom(z)} aria-label={`${z}x zoom`} style={{ border: 0, borderRadius: '50%', width: sel ? 40 : 30, height: sel ? 40 : 30, background: sel ? 'rgba(58,54,47,.95)' : 'transparent', color: sel ? '#f7c948' : '#e8e2d6', fontSize: sel ? 13 : 11, fontWeight: sel ? 700 : 500, transition: 'all .15s' }}>
-                      {sel ? `${z}×` : (z < 1 ? String(z).replace('0.', '.') : z)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><button className="btn btn-outline" style={{ color: '#fff', borderColor: '#776e62' }} onClick={() => mode === 'damage' ? setMode('guided') : (setSkipped((p) => ({ ...p, [slot.key]: true })), setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current))}>{mode === 'damage' ? 'CANCEL' : 'SKIP'}</button><button onClick={capture} aria-label="Take photo" style={{ width: 72, height: 72, borderRadius: '50%', background: '#f5f3ee', border: '7px solid rgba(255,255,255,.3)', boxShadow: '0 0 0 2px #f5f3ee' }} /><button className="btn btn-outline" style={{ color: '#fff', borderColor: '#776e62' }} onClick={() => setMode('review')}>DONE</button></div>
           </div>
           {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}
         </div>
