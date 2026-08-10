@@ -35,7 +35,7 @@ import UpdateBanner from './components/UpdateBanner';
 export default function App() {
   const auth = useAuth();
 
-  if (auth.status === 'loading') return <LoadingScreen waking={auth.waking} />;
+  if (auth.status === 'loading') return <LoadingScreen />;
   if (auth.status === 'signed_out') return <LoginScreen />;
   if (auth.status === 'error') return <ErrorScreen onRetry={auth.refresh} detail={auth.errorDetail} />;
   if (auth.status !== 'active') return <AccessScreen status={auth.status} email={auth.email} />;
@@ -57,7 +57,6 @@ function AuthedApp({ me, onAuthRefresh }) {
   const [recs, setRecs] = useState([]);
   const [nextQc, setNextQc] = useState(null);
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
-  const [waking, setWaking] = useState(false); // retrying a failed startup call (cold start)
   const [loadError, setLoadError] = useState(null); // last startup failure detail (shown on ErrorScreen)
   const [saving, setSaving] = useState(false);
 
@@ -125,14 +124,12 @@ function AuthedApp({ me, onAuthRefresh }) {
     const gen = ++loadGenRef.current;
     const live = () => gen === loadGenRef.current;
     setLoadState('loading');
-    setWaking(false);
-    // 3 attempts with backoff: transient failures (cold starts, network
-    // blips, brief 5xx) show "Waking up…" and retry; the error screen only
-    // appears after every attempt fails. 401 means the session expired —
-    // hand control back to the auth flow (sign-in screen), not an error.
-    // Real-world cold starts can exceed 10s, so the window is ~25s total.
-    const MAX_ATTEMPTS = 5;
-    const BACKOFF_MS = [2000, 4000, 7000, 10000];
+    // Server runs on an always-on Reserved VM — no cold start to wait out.
+    // One quick retry absorbs a momentary network blip; a second failure is
+    // a real outage and surfaces the error screen right away. 401 means the
+    // session expired — hand control back to the auth flow (sign-in screen).
+    const MAX_ATTEMPTS = 2;
+    const RETRY_DELAY_MS = 1000;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const data = await api.bootstrap();
@@ -140,7 +137,6 @@ function AuthedApp({ me, onAuthRefresh }) {
         dataGenRef.current++;
         setRecs(data.inspections);
         setNextQc(data.nextQc);
-        setWaking(false);
         setLoadState('ready');
         return;
       } catch (err) {
@@ -150,13 +146,11 @@ function AuthedApp({ me, onAuthRefresh }) {
           return;
         }
         if (attempt === MAX_ATTEMPTS - 1) {
-          setWaking(false);
           setLoadError(err && err.message ? String(err.message) : 'Unknown error');
           setLoadState('error');
           return;
         }
-        setWaking(true);
-        await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
         if (!live()) return;
       }
     }
@@ -565,7 +559,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     serverBackupAt !== undefined &&
     (serverBackupAt == null || Date.now() - serverBackupAt > 7 * 86400000);
 
-  if (loadState === 'loading') return <LoadingScreen waking={waking} />;
+  if (loadState === 'loading') return <LoadingScreen />;
   if (loadState === 'error') return <ErrorScreen onRetry={loadData} detail={loadError} />;
 
   if (printing) {
