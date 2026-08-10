@@ -85,7 +85,7 @@ function AuthedApp({ me, onAuthRefresh }) {
   // Server-composed dashboard payload (QC + Body Quoter + tracker sheet).
   // All KPIs are computed server-side; screens only render this.
   const [dash, setDash] = useState(null);
-  const [vehFilter, setVehFilter] = useState('all');
+  const [vehFilter, setVehFilter] = useState('awaitingFinalQc');
   const [vehQ, setVehQ] = useState('');
   const [vehSel, setVehSel] = useState(null); // { vin, qcNumber }
 

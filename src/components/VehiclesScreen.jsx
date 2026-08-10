@@ -1,13 +1,10 @@
-// Vehicles tab — every vehicle with an inspection, searchable by stock # or VIN,
-// filterable by the same four statuses as the Dash status rows. All figures come
-// from /api/dashboard (server-computed); this screen only renders.
+// Vehicles tab — two buckets: In-Take Quotes (completed intake, no inspection yet)
+// and Completed QC's (every vehicle with an inspection). Searchable by stock # or
+// VIN. All figures come from /api/dashboard (server-computed); this screen only renders.
 
 const FILTERS = [
-  ['all', 'All'],
-  ['awaitingFinalQc', 'Awaiting QC'],
-  ['openRecheck', 'Open re-check'],
-  ['frontlineReady', 'Frontline ready'],
-  ['released', 'Released'],
+  ['awaitingFinalQc', 'In-Take Quotes'],
+  ['completed', "Completed QC's"],
 ];
 
 const STATUS_META = {
@@ -20,10 +17,12 @@ const usd = (v) =>
   v == null ? null : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
 export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onStartQc }) {
+  // Any non-intake filter value (old saved states like 'all', 'released', …)
+  // falls into the Completed QC's bucket.
+  const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
   const vehicles = dash?.vehicles || [];
   const needle = q.trim().toUpperCase();
   const list = vehicles.filter((v) => {
-    if (filter !== 'all' && v.statusKey !== filter) return false;
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
   });
@@ -39,7 +38,9 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
       <div className="screen-topbar" style={{ padding: '8px 14px 10px' }}>
         <div className="screen-title-row">
           <span className="screen-title">Vehicles</span>
-          <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>{list.length} shown</span>
+          <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>
+            {(bucket === 'awaitingFinalQc' ? awaiting.length : list.length)} shown
+          </span>
         </div>
         <input
           className="input"
@@ -50,7 +51,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         />
         <div style={{ display: 'flex', gap: 6, marginTop: 8, overflowX: 'auto', paddingBottom: 4 }}>
           {FILTERS.map(([k, label]) => (
-            <span key={k} className={'pill-btn' + (filter === k ? ' on red' : '')} onClick={() => onFilter(k)} style={{ whiteSpace: 'nowrap' }}>
+            <span key={k} className={'pill-btn' + (bucket === k ? ' on red' : '')} onClick={() => onFilter(k)} style={{ whiteSpace: 'nowrap' }}>
               {label}
             </span>
           ))}
@@ -58,10 +59,10 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}
-        {dash && filter === 'awaitingFinalQc' && awaiting.length === 0 && (
-          <div className="empty-note">No vehicles are awaiting Final QC{needle ? ' that match' : ''}.</div>
+        {dash && bucket === 'awaitingFinalQc' && awaiting.length === 0 && (
+          <div className="empty-note">No in-take quotes are waiting for QC{needle ? ' that match' : ''}.</div>
         )}
-        {filter === 'awaitingFinalQc' &&
+        {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
             <div
               key={v.vin}
@@ -86,10 +87,10 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
               <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>Tap to start Final QC →</div>
             </div>
           ))}
-        {dash && filter !== 'awaitingFinalQc' && list.length === 0 && (
-          <div className="empty-note">No vehicles match.</div>
+        {dash && bucket === 'completed' && list.length === 0 && (
+          <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
         )}
-        {filter !== 'awaitingFinalQc' &&
+        {bucket === 'completed' &&
           list.map((v) => {
             const sm = STATUS_META[v.statusKey] || STATUS_META.frontlineReady;
             const money =
