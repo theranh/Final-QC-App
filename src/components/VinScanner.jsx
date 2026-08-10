@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { extractVin17, fallbackDecodeFrame, vinValid } from '../lib/vin';
-import { zxingDecodeImageData } from '../lib/zxingDecode';
+import { prefetchZxing, zxingDecodeImageData } from '../lib/zxingDecode';
 
 const NATIVE_FORMATS = ['code_39', 'code_128', 'qr_code', 'data_matrix', 'pdf417'];
 
@@ -29,6 +29,7 @@ export default function VinScanner({ onDetected, onCancel }) {
 
   useEffect(() => {
     scratchRef.current = document.createElement('canvas');
+    prefetchZxing(); // safety net — screens prefetch earlier, this covers direct mounts
     let cancelled = false;
 
     async function begin() {

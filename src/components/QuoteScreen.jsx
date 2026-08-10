@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile } from '../lib/photo';
 import VinScanner from './VinScanner';
+import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import PinDialog, { SignatureBadge } from './PinDialog';
 import {
@@ -529,6 +530,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   // (that would clobber in-progress edits here).
   const prefillRef = useRef(prefill);
   prefillRef.current = prefill;
+  useEffect(() => { prefetchZxing(); }, []); // warm the barcode decoder before the scanner opens
   useEffect(() => { if (committed) setWalkOpen(false); }, [committed]);
   useEffect(() => {
     if (!prefill?.quoteId) return;

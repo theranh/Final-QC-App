@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import QuoteScreen from './QuoteScreen';
 import PinDialog, { SignatureBadge } from './PinDialog';
 import VinScanner from './VinScanner';
+import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 
@@ -104,6 +105,7 @@ export default function IntakeScreen({ showToast }) {
   const [dupWarn, setDupWarn] = useState(null); // { vin, intakeRow, quoteRow, proceed }
   const intakeRef = useRef(null);
   intakeRef.current = intake;
+  useEffect(() => { prefetchZxing(); }, []); // warm the barcode decoder before the scanner opens
   useEffect(() => { if (!intake) api.listIntakes().then((j) => setHomeRows(j?.intakes || [])).catch(() => {}); }, [intake]);
   useEffect(() => {
     if (intake) return;

@@ -18,6 +18,7 @@ import VehicleCard from './components/VehicleCard';
 import IntakeScreen from './components/IntakeScreen';
 import Toast from './components/Toast';
 import Lightbox from './components/Lightbox';
+import { prefetchZxing } from './lib/zxingDecode';
 import VinScanner from './components/VinScanner';
 import HomeScreen from './components/HomeScreen';
 import NewInspectionForm from './components/NewInspectionForm';
@@ -104,6 +105,7 @@ function AuthedApp({ me, onAuthRefresh }) {
       .catch(() => {}); // silent — keep the last known value
   }, [me.isAdmin]);
   useEffect(() => { refreshBackupStatus(); }, [refreshBackupStatus]);
+  useEffect(() => { prefetchZxing(); }, []); // warm the barcode decoder before the scanner opens
 
   const sigRef = useRef(null);
   const rcSigRef = useRef(null);
