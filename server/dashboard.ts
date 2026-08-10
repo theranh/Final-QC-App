@@ -576,6 +576,48 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     finalQcs: Number(r.n) || 0,
   }));
 
+  // ----- THIS WEEK strip (Monday-start week in TZ, additive/read-only) -----
+  // intakes completed, QCs passed/failed (first inspection result this week),
+  // and average quoted hours across quotes created this week.
+  const [weekIntakesRes, weekQcRes, weekQuoteRes] = await Promise.all([
+    db.execute(sql`
+      SELECT COUNT(*)::int AS n
+      FROM intakes
+      WHERE completed_at IS NOT NULL
+        AND completed_at AT TIME ZONE ${TZ} >= date_trunc('week', now() AT TIME ZONE ${TZ})
+    `),
+    db.execute(sql`
+      SELECT result, COUNT(*)::int AS n
+      FROM inspections
+      WHERE created_at AT TIME ZONE ${TZ} >= date_trunc('week', now() AT TIME ZONE ${TZ})
+      GROUP BY result
+    `),
+    db.execute(sql`
+      SELECT (data->'totals'->>'hrs')::numeric AS hrs
+      FROM quotes
+      WHERE to_timestamp((data->>'ts')::bigint / 1000.0) AT TIME ZONE ${TZ}
+            >= date_trunc('week', now() AT TIME ZONE ${TZ})
+        AND (data->'totals'->>'hrs') IS NOT NULL
+    `),
+  ]);
+  const weekIntakesCompleted = Number(((weekIntakesRes as any).rows ?? weekIntakesRes)[0]?.n) || 0;
+  let weekQcsPassed = 0;
+  let weekQcsFailed = 0;
+  for (const r of ((weekQcRes as any).rows ?? weekQcRes) as any[]) {
+    const n = Number(r.n) || 0;
+    if (String(r.result) === "fail") weekQcsFailed += n;
+    else weekQcsPassed += n;
+  }
+  const weekHrs = (((weekQuoteRes as any).rows ?? weekQuoteRes) as any[])
+    .map((r) => Number(r.hrs))
+    .filter((h) => Number.isFinite(h));
+  const thisWeek = {
+    intakesCompleted: weekIntakesCompleted,
+    qcsPassed: weekQcsPassed,
+    qcsFailed: weekQcsFailed,
+    avgQuotedHours: weekHrs.length ? weekHrs.reduce((a, b) => a + b, 0) / weekHrs.length : null,
+  };
+
   return {
     generatedAt: Date.now(),
     range: { from, to },
@@ -591,6 +633,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     byInspector,
     activity,
     weekly,
+    thisWeek,
     vehicles,
     monthSummary: sheet?.summary ?? null,
   };

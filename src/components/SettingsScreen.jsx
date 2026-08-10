@@ -499,7 +499,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         </div>
 
         <div style={{ textAlign: 'center', fontSize: 9, color: 'var(--muted)', padding: '4px 0 8px' }}>
-          <span style={{ fontFamily: 'Rye, serif', color: 'var(--brown)', fontSize: 10 }}>TRUCK RANCH</span> &nbsp;·&nbsp; Final QC · FRPS · shared team database
+          <span style={{ fontFamily: 'Rye, serif', color: 'var(--brown)', fontSize: 10 }}>TRUCK RANCH</span> &nbsp;·&nbsp; Intake &amp; QC · shared team database
         </div>
       </div>
     </div>

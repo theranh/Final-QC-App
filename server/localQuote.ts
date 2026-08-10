@@ -167,12 +167,18 @@ export async function fetchIntakeStats(from: string, to: string): Promise<Intake
 
 // ---------- completed intakes list (was /api/intakes-completed) ----------
 
-export type CompletedIntake = { vin: string; stock: string; vehicle: string; completedAt: number | null };
+export type CompletedIntake = {
+  vin: string;
+  stock: string;
+  vehicle: string;
+  estimator: string | null;
+  completedAt: number | null;
+};
 
 /** All completed intakes, newest first, VIN normalized (trim/upper). */
 export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
   const r = await db.execute(sql`
-    SELECT vin, stock, vehicle, EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms
+    SELECT vin, stock, vehicle, estimator, EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms
     FROM intakes
     WHERE completed_at IS NOT NULL
     ORDER BY completed_at DESC
@@ -182,6 +188,7 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
       vin: String(row.vin ?? "").trim().toUpperCase(),
       stock: String(row.stock ?? "").trim(),
       vehicle: String(row.vehicle ?? "").trim(),
+      estimator: row.estimator != null ? String(row.estimator).trim() || null : null,
       completedAt: row.completed_ms != null ? Math.round(Number(row.completed_ms)) : null,
     }))
     .filter((row) => row.vin.length >= 6);

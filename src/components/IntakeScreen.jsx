@@ -101,6 +101,7 @@ export default function IntakeScreen({ showToast }) {
   const [homeMddTags, setHomeMddTags] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [recentQuotes, setRecentQuotes] = useState([]);
+  const [dupWarn, setDupWarn] = useState(null); // { vin, intakeRow, quoteRow, proceed }
   const intakeRef = useRef(null);
   intakeRef.current = intake;
   useEffect(() => { if (!intake) api.listIntakes().then((j) => setHomeRows(j?.intakes || [])).catch(() => {}); }, [intake]);
@@ -236,13 +237,30 @@ export default function IntakeScreen({ showToast }) {
     [refreshFromServer]
   );
   const openExisting = (row) => { setVin(row.vin); openFor(row.vin); };
+  // Commit to opening an intake for an already-validated VIN, seeding the
+  // landing QUOTE DETAILS. Used by the plain (no-duplicate) path and by the
+  // quote-only "Start intake anyway" path (both create a fresh intake, so the
+  // seeds apply). A VIN with an existing intake never reaches here — that
+  // dialog only offers Resume.
+  const beginIntake = (v, overridden) => {
+    setVinMessage(overridden ? 'Check digit override accepted — verify against the door label.' : 'Valid VIN');
+    setVin(v); setVinOverride(overridden);
+    openFor(v, { stock: homeStock, miles: homeMiles, estimator: homeEstimator, mddTags: homeMddTags });
+  };
   const acceptVin = (raw, overridden = false) => {
     const v = String(raw || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
     if (v.length !== 17) { setVinMessage('VIN must be 17 characters to start a new intake.'); return; }
     if (!vinValid(v) && !overridden) { setVinMessage('Invalid VIN check digit. Verify the VIN or use check digit override.'); return; }
-    setVinMessage(overridden ? 'Check digit override accepted — verify against the door label.' : 'Valid VIN');
-    setVin(v); setVinOverride(overridden);
-    openFor(v, { stock: homeStock, miles: homeMiles, estimator: homeEstimator, mddTags: homeMddTags });
+    // Duplicate-VIN guard: an intake or a quote for this VIN already exists in
+    // the data already fetched for the landing lists. Warn before starting so
+    // the tech can resume/open the existing record instead of duplicating it.
+    const intakeRow = homeRows.find((r) => String(r.vin || '').toUpperCase() === v) || null;
+    const quoteRow = recentQuotes.find((q) => String(q.vin || '').toUpperCase() === v) || null;
+    if (intakeRow || quoteRow) {
+      setDupWarn({ vin: v, intakeRow, quoteRow, overridden });
+      return;
+    }
+    beginIntake(v, overridden);
   };
   const ensureIntakeQuote = async () => {
     if (intake?.quoteId) return intake.quoteId;
@@ -434,6 +452,15 @@ export default function IntakeScreen({ showToast }) {
           })()}
         </div>
         {scanning && <VinScanner onDetected={(v, ok) => { setScanning(false); acceptVin(v, !ok); }} onCancel={() => setScanning(false)} />}
+        {dupWarn && (
+          <DuplicateVinDialog
+            warn={dupWarn}
+            onOpenIntake={(row) => { setDupWarn(null); openExisting(row); }}
+            onOpenQuote={(q) => { setDupWarn(null); setStandaloneQuote({ vin: q.vin, stock: q.stock, vehicle: q.vehicle, estimator: q.estimator, miles: q.miles, quoteId: q.id }); }}
+            onStartAnyway={() => { const { vin: v, overridden } = dupWarn; setDupWarn(null); beginIntake(v, overridden); }}
+            onCancel={() => setDupWarn(null)}
+          />
+        )}
       </div>
     );
   }
@@ -650,6 +677,61 @@ export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
         {footer && <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>{footer}</div>}
       </div>
     </button>
+  );
+}
+
+// Duplicate-VIN guard. Shown at intake when a scanned/entered VIN already has
+// an in-progress intake and/or a saved quote. Lets the tech OPEN the existing
+// record (resume intake / open quote, matching the landing cards) or START
+// ANYWAY. Styled to match PinDialog (lightbox overlay + card).
+function DuplicateVinDialog({ warn, onOpenIntake, onOpenQuote, onStartAnyway, onCancel }) {
+  const { vin, intakeRow, quoteRow } = warn;
+  // The data model is one intake per VIN, so once an intake exists there is no
+  // "new intake" — the only sane action is to resume it. "Start anyway" only
+  // makes sense when just a QUOTE exists (a quoted truck now being intaken):
+  // that path creates a fresh intake, so the landing seeds apply as usual.
+  return (
+    <div className="lightbox-overlay" onClick={onCancel} style={{ cursor: 'default', padding: 18 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 380, maxHeight: '90%', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span className="oswald" style={{ fontWeight: 700, fontSize: 18, flex: 1, color: 'var(--amber)' }}>Record already exists</span>
+          <span onClick={onCancel} style={{ fontSize: 20, color: 'var(--muted)', cursor: 'pointer', lineHeight: 1 }}>✕</span>
+        </div>
+        <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{vin}</div>
+        <div style={{ fontSize: 12, color: 'var(--brown)', marginTop: 10, lineHeight: 1.5 }}>
+          {intakeRow
+            ? 'This VIN already has an intake on file. Resuming continues right where it left off — there is only one intake per truck.'
+            : 'This VIN already has a body quote on file. You can open that quote, or start the intake for this quoted truck.'}
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+          {intakeRow ? (
+            <button className="btn btn-dark" style={{ height: 46 }} onClick={() => onOpenIntake(intakeRow)}>
+              {intakeRow.completedAt ? 'Open existing intake' : 'Resume existing intake'}
+              <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.85, marginTop: 2 }}>
+                {intakeRow.vehicle || 'Vehicle not decoded'}{intakeRow.stock ? ' · STOCK ' + intakeRow.stock : ''} · {intakeRow.pct || 0}%
+              </span>
+            </button>
+          ) : (
+            quoteRow && (
+              <button className="btn btn-outline-red" style={{ height: 46 }} onClick={() => onOpenQuote(quoteRow)}>
+                Open existing quote
+                <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.85, marginTop: 2 }}>
+                  {quoteRow.vehicle || 'Vehicle not decoded'}{quoteRow.stock ? ' · STOCK ' + quoteRow.stock : ''}
+                </span>
+              </button>
+            )
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="btn btn-outline" style={{ flex: 1, height: 44 }} onClick={onCancel}>Cancel</button>
+          {!intakeRow && quoteRow && (
+            <button className="btn btn-outline-brown" style={{ flex: 1, height: 44 }} onClick={onStartAnyway}>Start intake anyway</button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

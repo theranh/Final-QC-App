@@ -2,6 +2,7 @@
 // and Completed QC's (every vehicle with an inspection). Searchable by stock # or
 // VIN. All figures come from /api/dashboard (server-computed); this screen only renders.
 
+import { useEffect, useMemo, useState } from 'react';
 import { RecentQuoteCard } from './IntakeScreen';
 
 const FILTERS = [
@@ -18,22 +19,90 @@ const STATUS_META = {
 const usd = (v) =>
   v == null ? null : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
+// Whole-day age from a completion timestamp (ms) to now.
+function ageDays(completedAt) {
+  if (completedAt == null) return null;
+  const d = Math.floor((Date.now() - Number(completedAt)) / 86400000);
+  return d < 0 ? 0 : d;
+}
+
+// Green <3 days, yellow 3–6, red 7+.
+function ageColor(days) {
+  if (days == null) return 'var(--muted)';
+  if (days >= 7) return 'var(--red)';
+  if (days >= 3) return 'var(--amber)';
+  return 'var(--green)';
+}
+
+function AgeBadge({ completedAt }) {
+  const days = ageDays(completedAt);
+  if (days == null) return null;
+  return (
+    <span
+      style={{
+        fontSize: 8.5,
+        fontWeight: 700,
+        color: '#fff',
+        background: ageColor(days),
+        padding: '2px 7px',
+        borderRadius: 4,
+        flex: '0 0 auto',
+      }}
+    >
+      {days}d waiting
+    </span>
+  );
+}
+
 export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onStartQc }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
+  // Filter-by-person selection, cleared whenever the bucket changes so a name
+  // from one bucket never leaks into the other (In-Take → estimator, Completed
+  // QC's → inspector).
+  const [person, setPerson] = useState('');
   const vehicles = dash?.vehicles || [];
   const needle = q.trim().toUpperCase();
+
+  // Names present in the current bucket (estimators for In-Take, inspectors for
+  // Completed QC's), for the dropdown. Sorted, de-duped, non-empty.
+  const people = useMemo(() => {
+    const src = bucket === 'awaitingFinalQc' ? dash?.awaiting || [] : dash?.vehicles || [];
+    const key = bucket === 'awaitingFinalQc' ? 'estimator' : 'inspector';
+    const names = new Set();
+    for (const r of src) {
+      const name = (r[key] || '').trim();
+      if (name) names.add(name);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [dash, bucket]);
+
+  // If a data refresh drops the selected name from the current bucket, clear the
+  // selection so the list isn't silently filtered down to nothing.
+  useEffect(() => {
+    if (person && !people.includes(person)) setPerson('');
+  }, [person, people]);
+
+  const matchPerson = (r, key) => !person || (r[key] || '').trim() === person;
+
   const list = vehicles.filter((v) => {
+    if (!matchPerson(v, 'inspector')) return false;
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
   });
   // Awaiting Final QC = completed intake, no inspection yet — server-composed
   // list from this app's local intakes table.
   const awaiting = (dash?.awaiting || []).filter((v) => {
+    if (!matchPerson(v, 'estimator')) return false;
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
   });
+
+  const setBucket = (k) => {
+    setPerson('');
+    onFilter(k);
+  };
 
   return (
     <div className="screen">
@@ -53,11 +122,26 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         />
         <div style={{ display: 'flex', gap: 6, marginTop: 8, overflowX: 'auto', paddingBottom: 4 }}>
           {FILTERS.map(([k, label]) => (
-            <span key={k} className={'pill-btn' + (bucket === k ? ' on red' : '')} onClick={() => onFilter(k)} style={{ whiteSpace: 'nowrap' }}>
+            <span key={k} className={'pill-btn' + (bucket === k ? ' on red' : '')} onClick={() => setBucket(k)} style={{ whiteSpace: 'nowrap' }}>
               {label}
             </span>
           ))}
         </div>
+        {people.length > 0 && (
+          <select
+            className="input"
+            style={{ marginTop: 8 }}
+            value={person}
+            onChange={(e) => setPerson(e.target.value)}
+          >
+            <option value="">
+              {bucket === 'awaitingFinalQc' ? 'All estimators' : 'All inspectors'}
+            </option>
+            {people.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        )}
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}
@@ -66,13 +150,17 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <RecentQuoteCard
-              key={v.vin}
-              quote={v}
-              onClick={() => onStartQc(v)}
-              badge="AWAITING QC"
-              footer="Tap to start Final QC →"
-            />
+            <div key={v.vin} style={{ position: 'relative' }}>
+              <RecentQuoteCard
+                quote={v}
+                onClick={() => onStartQc(v)}
+                badge="AWAITING QC"
+                footer="Tap to start Final QC →"
+              />
+              <div style={{ position: 'absolute', top: 8, right: 8, pointerEvents: 'none' }}>
+                <AgeBadge completedAt={v.completedAt} />
+              </div>
+            </div>
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>

@@ -13,8 +13,8 @@ export default function Header({ tab, onSettings }) {
     <div className="app-header noprint">
       <span className="logo-sq">TR</span>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="head-title">{TITLES[tab] || 'FINAL QC'}</div>
-        <div className="head-sub">FRPS</div>
+        <div className="head-title">{TITLES[tab] || 'INTAKE & QC'}</div>
+        <div className="head-sub">Truck Ranch — Intake &amp; QC</div>
       </div>
       <span className="wordmark">TRUCK RANCH</span>
       {onSettings && (

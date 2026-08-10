@@ -56,7 +56,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
     );
   }
 
-  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate } = dash;
+  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, thisWeek } = dash;
   const maxWeek = Math.max(1, ...(weekly || []).map((w) => w.finalQcs));
 
   return (
@@ -74,6 +74,26 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
           <Tile label="AVG DAYS IN PRODUCTION" value={n1(kpi.avgDaysInProduction)} accent="var(--gold)" />
           <Tile label="OPEN RE-CHECKS" value={kpi.openRechecks} accent={kpi.openRechecks ? 'var(--amber)' : 'var(--muted)'} />
         </div>
+
+        {/* 1b — This week strip */}
+        {thisWeek && (
+          <div className="card">
+            <div className="card-title">THIS WEEK</div>
+            <div style={{ display: 'flex', gap: 14, marginTop: 8 }}>
+              {[
+                ['Intakes', thisWeek.intakesCompleted, 'var(--brown)'],
+                ['QCs passed', thisWeek.qcsPassed, 'var(--green)'],
+                ['QCs failed', thisWeek.qcsFailed, thisWeek.qcsFailed ? 'var(--red)' : 'var(--muted)'],
+                ['Avg quoted hrs', n1(thisWeek.avgQuotedHours), 'var(--gold)'],
+              ].map(([label, value, color]) => (
+                <div key={label} style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, color: 'var(--muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+                  <div className="oswald" style={{ fontWeight: 600, fontSize: 22, marginTop: 2, color }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* 2 — Daily Tracker */}
         <div className="card">

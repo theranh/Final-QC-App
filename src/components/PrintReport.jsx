@@ -141,7 +141,7 @@ export default function PrintReport({ recs, period, onClose, onPrint }) {
         </div>
         <div style={{ marginTop: 14 }} className="mono">
           <span style={{ fontSize: 9, color: 'var(--muted)' }}>
-            Truck Ranch · FRPS Final QC · Final QC Rate is first-pass: passed on first inspection ÷ total first inspections. Committed inspections and re-checks are signature-locked.
+            Truck Ranch — Intake &amp; QC · Final QC Rate is first-pass: passed on first inspection ÷ total first inspections. Committed inspections and re-checks are signature-locked.
           </span>
         </div>
       </div>
