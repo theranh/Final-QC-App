@@ -17,7 +17,7 @@ const VIN_C = "3GTU9DED7LG222222";
 
 // ---------- in-memory "intakes" table (Body Quoter data, now local) ----------
 // Three completed intakes, mirroring the old remote /api/intakes-completed stub.
-type IntakeRow = { vin: string; stock: string; vehicle: string; completedAt: number | null };
+type IntakeRow = { vin: string; stock: string; vehicle: string; completedAt: number | null; updatedAt?: number | null };
 const intakeStore: IntakeRow[] = [
   { vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
   { vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
@@ -102,13 +102,12 @@ function fakeExecute(q: any) {
   if (text.includes("FROM inspections")) return liteRowsResult();
   // ----- local Body Quoter tables (server/localQuote.ts) -----
   // Completed intakes list (awaiting-QC source), newest first.
-  if (text.includes("FROM intakes") && text.includes("completed_at IS NOT NULL") && text.includes("ORDER BY completed_at DESC")) {
+  if (text.includes("FROM intakes") && text.includes("ORDER BY COALESCE(completed_at, updated_at) DESC")) {
     return {
       rows: intakeStore
-        .filter((i) => i.completedAt != null)
         .slice()
-        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
-        .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, completed_ms: i.completedAt })),
+        .sort((a, b) => (b.completedAt ?? b.updatedAt ?? 0) - (a.completedAt ?? a.updatedAt ?? 0))
+        .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, completed_ms: i.completedAt, updated_ms: i.updatedAt ?? null })),
     };
   }
   // Open (not-yet-completed) intake count.

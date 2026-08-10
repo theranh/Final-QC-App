@@ -115,7 +115,7 @@ function buildSummary({ lines, rates, veh, vehicleText, stock, miles, vin, estim
         const sevW = sevWord(bm.sev);
         if (h.pdr) {
           L.push(i + '. ' + name + ' — ' + l.cls.damage_type.replace(/_/g, ' ') + ', ' + sevW + ' — PDR');
-          L.push('   Paintless dent repair, flat $' + Math.round(h.pdrUsd || 0) + (h.ri > 0 ? ' · R&I ' + fmt1(h.ri) : ''));
+          L.push('   Paintless dent repair, flat rate' + (h.ri > 0 ? ' · R&I ' + fmt1(h.ri) : ''));
         } else {
           const wb = bodyAlloc(l.cls.panel, bm, rates).byId[l.id];
           L.push(i + '. ' + name + ' — ' + l.cls.damage_type.replace(/_/g, ' ') + ', ' + sevW + (bm.paint ? ', paint' : ''));
@@ -489,7 +489,9 @@ function thumbFromDataUrl(dataUrl) {
 }
 
 export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) {
-  const [rates, setRates] = useState(() => defaultRates());
+  // Hours-only display: dollar amounts are computed internally (tracker sync
+  // needs them) but never shown — the quote total is the total hours of work.
+  const [rates, setRates] = useState(() => ({ ...defaultRates(), showPricing: false }));
   const corrCacheRef = useRef([]);
 
   const [step, setStep] = useState('vin'); // vin | confirm | photos | analyze | quote
@@ -582,7 +584,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     let live = true;
     api.quoterSync().then((s) => {
       if (!live || !s) return;
-      if (s.rates) setRates((r) => ({ ...r, ...s.rates }));
+      if (s.rates) setRates((r) => ({ ...r, ...s.rates, showPricing: false }));
       if (Array.isArray(s.corrections)) corrCacheRef.current = s.corrections;
     }).catch(() => { /* offline — defaults stand */ });
     return () => { live = false; };
@@ -679,25 +681,31 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     };
   }, [rates]);
 
-  const autosave = useCallback((ls, overrides) => {
-    if (!hydratedRef.current) return;
-    const s = { ...stateRef.current, ...(overrides || {}) };
-    if (!s.quoteId) return;
-    const entry = buildEntry(ls != null ? ls : linesRef.current, overrides);
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      api.putQuote({ id: entry.id, data: entry }).catch(() => { /* offline — retries on next save */ });
-    }, 600);
-  }, [buildEntry]);
-
-  useEffect(() => () => clearTimeout(saveTimer.current), []);
-
   // Create the quote id at confirm (like the old app did on entering walk).
   const ensureQuoteId = useCallback(() => {
     let id = stateRef.current.quoteId;
     if (!id) { id = newId('q'); setQuoteId(id); onQuoteId?.(id); }
     return id;
   }, [onQuoteId]);
+
+  const autosave = useCallback((ls, overrides) => {
+    if (!hydratedRef.current) return;
+    const s = { ...stateRef.current, ...(overrides || {}) };
+    if (!s.quoteId) {
+      // Flags/keep/notes can now be edited on the confirm & photos pages
+      // before any photo exists — create the quote id so the edit persists.
+      const id = ensureQuoteId();
+      overrides = { ...(overrides || {}), quoteId: id };
+    }
+    const entry = buildEntry(ls != null ? ls : linesRef.current, overrides);
+    if (!entry.id) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      api.putQuote({ id: entry.id, data: entry }).catch(() => { /* offline — retries on next save */ });
+    }, 600);
+  }, [buildEntry, ensureQuoteId]);
+
+  useEffect(() => () => clearTimeout(saveTimer.current), []);
 
   const goToPhotos = () => {
     ensureQuoteId();
@@ -1071,6 +1079,31 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
           />
         )}
 
+        {/* Flags / Keep / Notes ride along on the vehicle-confirm and photos
+            pages too, so they're always in reach — not only on the quote. */}
+        {(step === 'confirm' || step === 'photos') && (
+          <QuoteExtras
+            rates={rates}
+            locked={!!committed}
+            flags={flags}
+            keep={keep}
+            notes={notes}
+            notesOpen={notesOpen}
+            flagPick={flagPick}
+            flagSearch={flagSearch}
+            onOpenNotes={() => setNotesOpen(true)}
+            onCloseNotes={closeNotes}
+            onNotesChange={onNotesChange}
+            onFlagPickOpen={() => { setFlagPick(true); setFlagSearch(''); }}
+            onFlagPickClose={() => setFlagPick(false)}
+            onFlagSearch={setFlagSearch}
+            onAddFlag={addFlag}
+            onFlagDone={setFlagDone}
+            onRemoveFlag={removeFlag}
+            onToggleKeep={toggleKeep}
+          />
+        )}
+
         {step === 'analyze' && (
           <div className="card">
             <div className="card-title">ANALYZING DAMAGE</div>
@@ -1438,16 +1471,14 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
         <div className="card-title">QUOTE TOTAL</div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
           <span className="oswald" style={{ fontWeight: 700, fontSize: 26 }}>{fmt1(totals.hrs)}</span>
-          <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>total hours</span>
-          <span style={{ flex: 1 }} />
-          <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>${totals.usd.toLocaleString()}</span>
+          <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>total hours of work</span>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginTop: 10 }}>
-          <Bucket label="BODY" hrs={totals.B} usd={totals.usdB} />
-          <Bucket label="PAINT" hrs={totals.P} usd={totals.usdP} />
-          <Bucket label="R&I" hrs={totals.RI} usd={totals.usdRI} />
-          <Bucket label="PDR" hrs={null} usd={totals.usdPDR} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+          <Bucket label="BODY" hrs={totals.B} />
+          <Bucket label="PAINT" hrs={totals.P} />
+          <Bucket label="R&I" hrs={totals.RI} />
         </div>
+        {totals.usdPDR > 0 && <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 7 }}>Includes paintless dent repair (flat rate, no hours).</div>}
         {(totals.flagged > 0 || totals.errors > 0) && (
           <div style={{ fontSize: 10.5, color: 'var(--amber)', fontWeight: 700, marginTop: 8 }}>
             {totals.flagged > 0 && `${totals.flagged} flagged for review`}
@@ -1476,6 +1507,68 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
 
       {!lines.length && <div className="empty-note">No damage lines yet.</div>}
 
+      <QuoteExtras
+        rates={rates}
+        locked={locked}
+        flags={flags}
+        keep={keep}
+        notes={notes}
+        notesOpen={notesOpen}
+        flagPick={flagPick}
+        flagSearch={flagSearch}
+        onOpenNotes={onOpenNotes}
+        onCloseNotes={onCloseNotes}
+        onNotesChange={onNotesChange}
+        onFlagPickOpen={onFlagPickOpen}
+        onFlagPickClose={onFlagPickClose}
+        onFlagSearch={onFlagSearch}
+        onAddFlag={onAddFlag}
+        onFlagDone={onFlagDone}
+        onRemoveFlag={onRemoveFlag}
+        onToggleKeep={onToggleKeep}
+      />
+
+      {locked ? (
+        <div className="card" style={{ borderColor: 'var(--green)', background: '#e8f3ea' }}>
+          <SignatureBadge committedBy={committed.committedBy} overriddenBy={committed.overriddenBy} />
+          <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 4 }}>
+            Committed and locked. A correction is a new record, not an edit.
+          </div>
+        </div>
+      ) : (
+        <>
+          <button className="btn btn-outline-brown" onClick={onAddMore}>+ Add more damage photos</button>
+          <button
+            className={'btn btn-green' + (lines.length ? '' : ' disabled')}
+            style={{ height: 48, opacity: lines.length ? 1 : 0.6 }}
+            onClick={() => lines.length && onCommit()}
+          >
+            ✍ Commit quote
+          </button>
+        </>
+      )}
+
+      {/* Export bar — COPY / IMAGE / PDF (dark, sticky) */}
+      <div style={{ position: 'sticky', bottom: 0, margin: '4px -14px -12px', background: '#23201a', padding: '12px 16px calc(12px + env(safe-area-inset-bottom))', display: 'flex', alignItems: 'center', gap: 10, zIndex: 40 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span className="oswald" style={{ fontWeight: 700, fontSize: 18, letterSpacing: 1, color: '#f2efe8', whiteSpace: 'nowrap' }}>
+            TOTAL {fmt1(totals.hrs)} HR
+          </span>
+          <span className="oswald" style={{ fontWeight: 600, fontSize: 10, letterSpacing: 1.8, color: '#b5ac97' }}>FIXED RATE TABLE HOURS</span>
+        </div>
+        <button onClick={onCopy} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>COPY</button>
+        <button onClick={onImage} style={{ background: '#b0322a', border: 'none', borderRadius: 10, color: '#fff', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: 1.2, padding: '0 16px', height: 48, cursor: 'pointer' }}>IMAGE</button>
+        <button onClick={onPrint} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>PDF</button>
+      </div>
+    </>
+  );
+}
+
+/* ---------- flags / keep / notes — shared across confirm, photos & quote steps ---------- */
+function QuoteExtras({ rates, locked, flags, keep, notes, notesOpen, flagPick, flagSearch,
+  onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep }) {
+  return (
+    <>
       {/* FLAGS */}
       <div className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1548,39 +1641,6 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
         </span>
       </button>
 
-      {locked ? (
-        <div className="card" style={{ borderColor: 'var(--green)', background: '#e8f3ea' }}>
-          <SignatureBadge committedBy={committed.committedBy} overriddenBy={committed.overriddenBy} />
-          <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 4 }}>
-            Committed and locked. A correction is a new record, not an edit.
-          </div>
-        </div>
-      ) : (
-        <>
-          <button className="btn btn-outline-brown" onClick={onAddMore}>+ Add more damage photos</button>
-          <button
-            className={'btn btn-green' + (lines.length ? '' : ' disabled')}
-            style={{ height: 48, opacity: lines.length ? 1 : 0.6 }}
-            onClick={() => lines.length && onCommit()}
-          >
-            ✍ Commit quote
-          </button>
-        </>
-      )}
-
-      {/* Export bar — COPY / IMAGE / PDF (dark, sticky) */}
-      <div style={{ position: 'sticky', bottom: 0, margin: '4px -14px -12px', background: '#23201a', padding: '12px 16px calc(12px + env(safe-area-inset-bottom))', display: 'flex', alignItems: 'center', gap: 10, zIndex: 40 }}>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
-          <span className="oswald" style={{ fontWeight: 700, fontSize: 18, letterSpacing: 1, color: '#f2efe8', whiteSpace: 'nowrap' }}>
-            TOTAL {fmt1(totals.hrs)} HR{rates.showPricing ? ` · ${totals.usd.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })}` : ''}
-          </span>
-          <span className="oswald" style={{ fontWeight: 600, fontSize: 10, letterSpacing: 1.8, color: '#b5ac97' }}>RATE TABLE PRICING</span>
-        </div>
-        <button onClick={onCopy} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>COPY</button>
-        <button onClick={onImage} style={{ background: '#b0322a', border: 'none', borderRadius: 10, color: '#fff', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: 1.2, padding: '0 16px', height: 48, cursor: 'pointer' }}>IMAGE</button>
-        <button onClick={onPrint} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>PDF</button>
-      </div>
-
       {/* Flag picker */}
       {flagPick && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(20,17,12,.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={onFlagPickClose}>
@@ -1639,12 +1699,11 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
   );
 }
 
-function Bucket({ label, hrs, usd }) {
+function Bucket({ label, hrs }) {
   return (
     <div style={{ background: 'var(--panel)', borderRadius: 8, padding: '7px 6px', textAlign: 'center' }}>
       <div style={{ fontSize: 8.5, fontWeight: 700, color: 'var(--muted)', letterSpacing: 0.6 }}>{label}</div>
-      {hrs != null && <div className="oswald" style={{ fontWeight: 700, fontSize: 15 }}>{fmt1(hrs)}</div>}
-      <div className="mono" style={{ fontSize: 10.5, color: 'var(--brown)', marginTop: hrs != null ? 0 : 4 }}>${(usd || 0).toLocaleString()}</div>
+      <div className="oswald" style={{ fontWeight: 700, fontSize: 15 }}>{fmt1(hrs || 0)}<span style={{ fontSize: 9.5, color: 'var(--muted)', fontWeight: 600 }}> hr</span></div>
     </div>
   );
 }

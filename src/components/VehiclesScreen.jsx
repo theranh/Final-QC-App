@@ -124,7 +124,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onOpenIntake(v)} />
+            <RecentQuoteCard key={v.vin} quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} />
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
@@ -135,8 +135,8 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
             const money =
               v.tracker && v.tracker.retailPlan != null && v.tracker.closedRO != null
                 ? `${usd(v.tracker.retailPlan)} plan · ${usd(v.tracker.closedRO)} closed`
-                : v.quote && v.quote.usd != null
-                ? `${usd(v.quote.usd)} quoted${v.quote.hrs != null ? ` · ${v.quote.hrs} hrs` : ''}`
+                : v.quote && v.quote.hrs != null
+                ? `${v.quote.hrs} hrs quoted`
                 : 'Quote unavailable';
             return (
               <div

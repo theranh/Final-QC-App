@@ -173,15 +173,18 @@ export type CompletedIntake = {
   vehicle: string;
   estimator: string | null;
   completedAt: number | null;
+  inProgress: boolean;
 };
 
-/** All completed intakes, newest first, VIN normalized (trim/upper). */
+/** All intakes for the In-Take Quotes bucket — committed (completed) ones plus
+ *  in-progress ones still being worked, newest activity first, VIN normalized. */
 export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
   const r = await db.execute(sql`
-    SELECT vin, stock, vehicle, estimator, EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms
+    SELECT vin, stock, vehicle, estimator,
+           EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms,
+           EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
     FROM intakes
-    WHERE completed_at IS NOT NULL
-    ORDER BY completed_at DESC
+    ORDER BY COALESCE(completed_at, updated_at) DESC
   `);
   return rowsOf(r)
     .map((row) => ({
@@ -189,7 +192,10 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
       stock: String(row.stock ?? "").trim(),
       vehicle: String(row.vehicle ?? "").trim(),
       estimator: row.estimator != null ? String(row.estimator).trim() || null : null,
-      completedAt: row.completed_ms != null ? Math.round(Number(row.completed_ms)) : null,
+      completedAt: row.completed_ms != null
+        ? Math.round(Number(row.completed_ms))
+        : row.updated_ms != null ? Math.round(Number(row.updated_ms)) : null,
+      inProgress: row.completed_ms == null,
     }))
     .filter((row) => row.vin.length >= 6);
 }

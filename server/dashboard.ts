@@ -465,8 +465,15 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // A plain join now that intakes are local: every completed intake whose VIN
   // has no inspection row (VINs already normalized trim/upper on both sides).
   const inspectedVins = new Set(rows.map((r) => r.vin));
-  const awaitingBase = completedIntakes
-    .filter((i) => !inspectedVins.has(i.vin))
+  // One card per VIN: prefer a committed intake over an in-progress one; the
+  // source list is newest-activity-first, so the first match per VIN wins.
+  const byVin = new Map<string, (typeof completedIntakes)[number]>();
+  for (const i of completedIntakes) {
+    if (inspectedVins.has(i.vin)) continue;
+    const cur = byVin.get(i.vin);
+    if (!cur || (cur.inProgress && !i.inProgress)) byVin.set(i.vin, i);
+  }
+  const awaitingBase = [...byVin.values()]
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
   // Enrich each In-Take Quotes card with its quote's cover thumb + figures so
   // the Vehicles bucket mirrors the intake app's all-quotes list.

@@ -121,7 +121,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         saveIntake({ miles: String(q.miles) });
       }
       const lines = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls) : [];
-      api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: 0 }));
+      api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: 0 }));
     }).catch(() => {});
     return () => { live = false; };
   }, [intakeQuoteId, intakeVin]);
@@ -589,7 +589,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               <div className="card-title">{quoteSummary ? 'BODY QUOTE LINKED' : 'BODY QUOTER'}</div>
               {quoteSummary ? (
                 <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 12, fontWeight: 700 }}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr</span><span>${Number(quoteSummary.usd).toLocaleString()}</span><span>{quoteSummary.photoCount} photos</span></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 12, fontWeight: 700 }}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr of work</span><span>{quoteSummary.photoCount} photos</span></div>
+                  {(quoteSummary.notes || '').trim() && <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: 'var(--panel)', fontSize: 11.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}><b style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8 }}>NOTES</b><br />{quoteSummary.notes.trim()}</div>}
                   <button className="btn btn-outline-red" style={{ marginTop: 9 }} onClick={() => { setQuoting(true); }}>REOPEN QUOTE</button>
                 </>
               ) : (
@@ -651,7 +652,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
 // Vehicles tab). Shows the first damage-line thumbnail when available.
 export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
   const hrs = q.totals?.hrs ?? q.hrs ?? 0;
-  const usd = q.totals?.usd ?? q.usd ?? 0;
   const lineCount = Number.isFinite(q.lineCount)
     ? q.lineCount
     : Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls).length : 0;
@@ -673,8 +673,7 @@ export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 10px', fontSize: 10, color: 'var(--brown)', marginTop: 5 }}>
           <span>{date}</span>
           {lineCount > 0 && <span>{lineCount} lines</span>}
-          {hrs > 0 && <span>{hrs} hr</span>}
-          {usd > 0 && <b>${Number(usd).toLocaleString()}</b>}
+          {hrs > 0 && <b>{hrs} hr</b>}
         </div>
         {footer && <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>{footer}</div>}
       </div>
@@ -741,7 +740,7 @@ function IntakeHomeCard({ row, onClick }) {
   return <button className="card" onClick={onClick} style={{textAlign:'left',width:'100%',cursor:'pointer',padding:13}}>
     <div style={{display:'flex',gap:8,alignItems:'center'}}><span className="oswald" style={{fontSize:16}}>{row.vehicle || 'Vehicle not decoded'}</span><span style={{marginLeft:'auto',fontSize:10,color:row.completedAt?'var(--green)':'var(--amber)',fontWeight:700}}>{row.completedAt ? 'COMPLETE ✓' : 'IN PROGRESS'}</span></div>
     <div className="mono" style={{fontSize:11,color:'var(--muted)',marginTop:5}}>{row.vin}</div>
-    <div style={{display:'flex',flexWrap:'wrap',gap:'4px 12px',fontSize:10,color:'var(--brown)',marginTop:8}}><span>STOCK {row.stock || '—'}</span><span>{row.estimator || 'No estimator'}</span><span>{row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}</span>{row.quote && <><span>{row.quote.lineCount} lines</span><span>{row.quote.hrs} hr</span><b>${Number(row.quote.usd).toLocaleString()}</b></>}</div>
+    <div style={{display:'flex',flexWrap:'wrap',gap:'4px 12px',fontSize:10,color:'var(--brown)',marginTop:8}}><span>STOCK {row.stock || '—'}</span><span>{row.estimator || 'No estimator'}</span><span>{row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}</span>{row.quote && <><span>{row.quote.lineCount} lines</span><b>{row.quote.hrs} hr</b></>}</div>
   </button>;
 }
 
