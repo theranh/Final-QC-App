@@ -187,3 +187,46 @@
 /* ---------- misc ---------- */
 .mono { font-family: 'IBM Plex Mono', monospace; }
 .oswald { font-family: 'Oswald', sans-serif; }
+
+/* ---------- quote print view (PDF button = window.print) ---------- */
+.quote-print { display: none; }
+@media print {
+  body * { visibility: hidden !important; }
+  .quote-print, .quote-print * { visibility: visible !important; }
+  /* Release the on-screen frame's height/overflow clamps so a multi-page
+     quote paginates instead of being clipped to one viewport. */
+  html, body, #root, .app-shell, .app-frame, .screen, .screen-body {
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    max-width: none !important;
+    overflow: visible !important;
+    display: block !important;
+    box-shadow: none !important;
+    position: static !important;
+  }
+  .quote-print {
+    display: block !important;
+    position: static !important; width: 100%;
+    padding: 24px 28px; color: #1a1a1a; background: #fff;
+    font-family: 'IBM Plex Sans', Arial, sans-serif;
+  }
+  .quote-print table { page-break-inside: auto; }
+  .quote-print tr { page-break-inside: avoid; }
+  .quote-print h1 { font-family: 'Oswald', sans-serif; font-size: 22px; letter-spacing: 0.5px; margin: 0; }
+  .quote-print .qp-sub { font-size: 12px; color: #6b6357; margin: 2px 0 0; }
+  .quote-print .qp-meta { font-size: 13px; margin: 10px 0; }
+  .quote-print .qp-rule { border-top: 2px solid #1a1a1a; margin: 8px 0 12px; }
+  .quote-print table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .quote-print th { text-align: left; font-size: 10px; letter-spacing: 0.5px; color: #6b6357; border-bottom: 1.5px solid #1a1a1a; padding: 4px 6px; }
+  .quote-print td { padding: 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  .quote-print td.num { text-align: right; font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
+  .quote-print .qp-flag { color: #7a5c10; }
+  .quote-print .qp-dim { color: #857d70; }
+  .quote-print .qp-totals { margin-top: 14px; font-size: 13px; }
+  .quote-print .qp-totals .qp-total-row { display: flex; justify-content: space-between; border-top: 2px solid #1a1a1a; margin-top: 6px; padding-top: 6px; font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 16px; }
+  .quote-print .qp-extra { margin-top: 14px; font-size: 12px; }
+  .quote-print .qp-extra b { font-family: 'Oswald', sans-serif; letter-spacing: 1px; }
+  .quote-print .qp-foot { margin-top: 18px; font-size: 11px; color: #6b6357; }
+  @page { margin: 12mm; }
+}

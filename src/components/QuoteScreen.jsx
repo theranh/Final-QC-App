@@ -7,7 +7,8 @@ import WalkAroundCamera from './WalkAroundCamera';
 import PinDialog, { SignatureBadge } from './PinDialog';
 import {
   PANELS, DAMAGE, SEVS, PARTS,
-  defaultRates, quoteTotals, lineHours, pdrEligible,
+  defaultRates, defaultFlags, quoteTotals, lineHours, pdrEligible,
+  billingMap, bodyAlloc, billingCls, rn,
 } from '../lib/quoterPricing';
 import {
   panelLabel, sysPrompt, parseCls, correctionDiffs,
@@ -34,6 +35,415 @@ const DMG_LABEL = {
   rust: 'Rust', missing_part: 'Missing part', paint_only: 'Paint only',
 };
 const partLabel = (p) => String(p || '').replace(/_/g, ' ');
+
+// Merge the live snapshot with an explicit per-tick override so autosave never
+// serializes the previous render's flags/keep/notes. Exported for unit tests.
+export function mergeQuoteSnapshot(base, overrides) {
+  return { ...(base || {}), ...(overrides || {}) };
+}
+
+// Normalize the old-app-compatible extras (flags/keep/notes) for persistence.
+// Exported so a round-trip test can assert the stored shape.
+export function quoteExtras(snapshot) {
+  const s = snapshot || {};
+  return {
+    notes: s.notes || '',
+    flags: (s.flags || []).map((f) => ({ id: f.id, done: !!f.done })),
+    keep: { tires: !!(s.keep && s.keep.tires), wheels: !!(s.keep && s.keep.wheels), set: !!(s.keep && s.keep.set) },
+  };
+}
+
+// ---------- flags (ported from the old quoter) ----------
+const FLAG_PALETTE = {
+  teal: { bg: '#e2f4f7', bd: '#8ecbd6', fg: '#1d6b78' },
+  blue: { bg: '#e3edfb', bd: '#a9c4ea', fg: '#2f5da8' },
+  green: { bg: '#e7f5e9', bd: '#9ec4a8', fg: '#2e7d46' },
+  yellow: { bg: '#fdf3e0', bd: '#e3c07f', fg: '#8a6210' },
+  gray: { bg: '#f0eee9', bd: '#d9d2c4', fg: '#5a5348' },
+  slate: { bg: '#e6e3dc', bd: '#c8c1b2', fg: '#4a453c' },
+  dark: { bg: '#555046', bd: '#3b372f', fg: '#f2efe8' },
+  orange: { bg: '#fbe9d8', bd: '#e0ab77', fg: '#96551a' },
+  sky: { bg: '#e6f1f8', bd: '#a9cbe0', fg: '#2b6389' },
+  red: { bg: '#f9e7e6', bd: '#d99b96', fg: '#b0322a' },
+};
+// The pickable flag list = server rates.flags override (if present) else the
+// bundled default list. Each entry is resolved to its palette colors.
+function flagDefs(rates) {
+  const list = (rates && Array.isArray(rates.flags)) ? rates.flags : defaultFlags();
+  return list.map((f) => ({ id: f.id, label: f.label, color: f.color, ...(FLAG_PALETTE[f.color] || FLAG_PALETTE.gray) }));
+}
+function flagDef(rates, id) {
+  const hit = flagDefs(rates).find((d) => d.id === id);
+  if (hit) return hit;
+  const label = String(id).replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return { id, label, ...FLAG_PALETTE.gray };
+}
+
+const usd = (n) => '$' + Math.round(Number(n) || 0).toLocaleString();
+const dateDisp = (iso) => { try { return new Date(iso || Date.now()).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch { return ''; } };
+const sevWord = (s) => ({ minor: 'small', moderate: 'medium', heavy: 'large' }[s] || s);
+
+// ---------- plain-text quote summary (ported from buildSummary) ----------
+function buildSummary({ lines, rates, veh, vehicleText, stock, miles, vin, estimator, notes, keep, flags }) {
+  const t = quoteTotals(lines, rates);
+  const d = rates.dollars;
+  const bmap = billingMap(lines);
+  const vehTitle = (veh && [veh.year, veh.make, veh.model, veh.trim].filter(Boolean).join(' ')) || vehicleText || 'Vehicle';
+  const L = [];
+  L.push('TRUCK RANCH — PAINT & BODY QUOTE');
+  L.push(vehTitle + '  ·  Stock ' + (stock || '—') + '  ·  ' + (miles ? miles + ' mi' : '— mi'));
+  L.push('VIN ' + (vin || '—'));
+  L.push('Estimator ' + (estimator || '—') + '  ·  ' + dateDisp());
+  L.push('');
+  let i = 1;
+  for (const l of lines) {
+    if (l.status !== 'done' || !l.cls) continue;
+    const name = panelLabel(l.cls.panel);
+    if (l.review) { L.push(i + '. ' + name + ' — NEEDS HUMAN REVIEW (not quoted)'); }
+    else {
+      const bm = bmap[l.cls.panel];
+      const isX = !!(bm && (bm.extras || []).some((x) => x.id === l.id));
+      if (isX) {
+        const xb = bodyAlloc(l.cls.panel, bm, rates).byId[l.id] || 0;
+        L.push(i + '. ' + name + ' — 2nd damage area, ' + l.cls.damage_type.replace(/_/g, ' ') + ', ' + l.cls.severity);
+        L.push('   Body +' + fmt1(xb) + ' (paint & parts billed once per panel)');
+      } else if (bm && bm.winner !== l.id) {
+        L.push(i + '. ' + name + ' — duplicate panel photo (merged, billed once)');
+      } else if (bm) {
+        const h = lineHours(billingCls(l.cls.panel, bm), rates);
+        const sevW = sevWord(bm.sev);
+        if (h.pdr) {
+          L.push(i + '. ' + name + ' — ' + l.cls.damage_type.replace(/_/g, ' ') + ', ' + sevW + ' — PDR');
+          L.push('   Paintless dent repair, flat $' + Math.round(h.pdrUsd || 0) + (h.ri > 0 ? ' · R&I ' + fmt1(h.ri) : ''));
+        } else {
+          const wb = bodyAlloc(l.cls.panel, bm, rates).byId[l.id];
+          L.push(i + '. ' + name + ' — ' + l.cls.damage_type.replace(/_/g, ' ') + ', ' + sevW + (bm.paint ? ', paint' : ''));
+          L.push('   Body ' + fmt1(wb != null ? wb : h.b) + ' · Paint ' + fmt1(h.p) + ' · R&I ' + fmt1(h.ri) + (h.capped ? ' (capped at ' + fmt1(h.cap) + ' hr max)' : ''));
+        }
+      }
+    }
+    i++;
+  }
+  L.push('');
+  if (rates.showPricing) {
+    L.push('Body repair   ' + fmt1(t.B) + ' hr × $' + rn(d.body) + ' = ' + usd(t.usdB));
+    L.push('Paint refinish ' + fmt1(t.P) + ' hr × $' + rn(d.paint) + ' = ' + usd(t.usdP) + (t.overlap > 0 ? ' (incl. −' + fmt1(t.overlap) + ' hr blend overlap)' : ''));
+    L.push('R&I           ' + fmt1(t.RI) + ' hr × $' + rn(d.ri) + ' = ' + usd(t.usdRI));
+    if (t.usdPDR > 0) L.push('PDR — paintless repair, flat ' + usd(t.usdPDR));
+    L.push('TOTAL ' + fmt1(t.hrs) + ' HR — ' + usd(t.usd));
+  } else {
+    L.push('Body repair   ' + fmt1(t.B) + ' hr');
+    L.push('Paint refinish ' + fmt1(t.P) + ' hr' + (t.overlap > 0 ? ' (incl. −' + fmt1(t.overlap) + ' hr blend overlap)' : ''));
+    L.push('R&I           ' + fmt1(t.RI) + ' hr');
+    if (t.usdPDR > 0) L.push('PDR — paintless repair, flat rate');
+    L.push('TOTAL ' + fmt1(t.hrs) + ' HR');
+  }
+  if (t.flagged > 0) L.push('(' + t.flagged + ' photo' + (t.flagged > 1 ? 's' : '') + ' flagged for review, excluded)');
+  if ((notes || '').trim()) { L.push(''); L.push('NOTES: ' + notes.trim()); }
+  const K = keep || {};
+  if (K.tires || K.wheels || K.set) {
+    L.push('');
+    L.push('KEEP: ' + [K.tires && 'Tires', K.wheels && 'Wheels', K.set && 'Set'].filter(Boolean).join(', '));
+  }
+  if ((flags || []).length) {
+    L.push('');
+    L.push('FLAGS: ' + flags.map((f) => flagDef(rates, f.id).label + (f.done ? ' ✓' : '')).join(', '));
+  }
+  L.push('');
+  L.push('Hours from Truck Ranch fixed rate table — same classification = same hours.');
+  return L.join('\n');
+}
+
+function copyFallback(txt) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+function copySummary(txt, showToast) {
+  const done = () => showToast && showToast('Quote summary copied');
+  const fail = () => showToast && showToast('Copy failed on this device');
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done, () => (copyFallback(txt) ? done() : fail()));
+    } else { copyFallback(txt) ? done() : fail(); }
+  } catch { fail(); }
+}
+
+// Per-line "work to be performed" bullets (ported from workDesc).
+function workDesc(cls, h) {
+  const ops = [];
+  const dmg = (cls.damage_type || '').replace(/_/g, ' ');
+  if (h && h.pdr) {
+    ops.push('Paintless dent repair (PDR) — flat rate, no body/paint labor');
+    if (h.riList && h.riList.length) ops.push('R&I: ' + h.riList.map((r) => r.part.replace(/_/g, ' ') + ' (' + fmt1(r.hrs) + ' hr)').join(', '));
+    if (cls.notes) ops.push('“' + cls.notes + '”');
+    return ops;
+  }
+  if (cls.severity === 'replace') ops.push('Replace panel' + (dmg && dmg !== 'missing part' ? ' (' + dmg + ')' : ''));
+  else ops.push('Repair ' + (dmg || 'damage') + ' — ' + sevWord(cls.severity) + ' damage');
+  if (h && h.capped) ops.push('Hours capped at panel max (' + fmt1(h.cap || 0) + ' hr body + paint)');
+  if (cls.paint_damaged) {
+    ops.push(h.partial ? 'Partial refinish (spot paint)' : 'Refinish panel (full paint)');
+    if (h.blends && h.blends.length) ops.push('Blend adjacent: ' + h.blends.map((b) => panelLabel(b.panel) + ' (+' + fmt1(b.hrs) + ' hr)').join(', '));
+  } else ops.push('No refinish needed');
+  if (h.riOverridden) ops.push('R&I — adjusted to ' + fmt1(h.ri) + ' hr' + (h.riList && h.riList.length ? ' (' + h.riList.map((r) => r.part.replace(/_/g, ' ')).join(', ') + ')' : ''));
+  else if (h.riList && h.riList.length) ops.push('R&I: ' + h.riList.map((r) => r.part.replace(/_/g, ' ') + ' (' + fmt1(r.hrs) + ' hr)').join(', '));
+  if (cls.notes) ops.push('“' + cls.notes + '”');
+  return ops;
+}
+
+// Compute the per-line worksheet rows shared by the image and print views
+// (ported from exportImage's row loop).
+function quoteRows(lines, rates) {
+  const bmap = billingMap(lines);
+  const d = rates.dollars;
+  const rows = [];
+  let pidx = 0;
+  for (const l of lines) {
+    if (l.status !== 'done' || !l.cls) continue;
+    pidx++;
+    const name = panelLabel(l.cls.panel);
+    if (l.review) { rows.push({ idx: pidx, panel: name, thumb: l.thumb, ops: ['NEEDS HUMAN REVIEW — not quoted; classify manually before writing the RO'], flag: true }); continue; }
+    const bm = bmap[l.cls.panel];
+    const isW = !!(bm && bm.winner === l.id);
+    const isX = !!(bm && (bm.extras || []).some((x) => x.id === l.id));
+    if (bm && !isW && !isX) { rows.push({ idx: pidx, panel: name, thumb: l.thumb, ops: ['Duplicate photo of this panel — billed on the panel line above'], dim: true }); continue; }
+    const alloc = bm ? bodyAlloc(l.cls.panel, bm, rates) : null;
+    if (isX) {
+      const xb = alloc && alloc.byId[l.id] != null ? alloc.byId[l.id] : 0;
+      rows.push({ idx: pidx, panel: name, thumb: l.thumb, ops: ['Separate damage area on this panel — body hours added (paint & R&I billed on the panel line above)'], b: xb, isX: true, tot: xb, usd: Math.round(xb * rn(d.body)) });
+      continue;
+    }
+    const cls = bm ? { ...billingCls(l.cls.panel, bm), damage_type: l.cls.damage_type, notes: l.cls.notes } : l.cls;
+    const h = lineHours(cls, rates);
+    const wb = alloc && alloc.byId[l.id] != null ? alloc.byId[l.id] : h.b;
+    rows.push(h.pdr ? {
+      idx: pidx, panel: name, thumb: l.thumb, ops: workDesc(cls, h), b: 0, p: 0, ri: h.ri, tot: h.ri, isPdr: true, usd: Math.round(rn(h.pdrUsd) + h.ri * rn(d.ri)),
+    } : {
+      idx: pidx, panel: name, thumb: l.thumb, ops: workDesc(cls, h), b: wb, p: h.p, ri: h.ri, tot: Math.round((wb + h.p + h.ri) * 10) / 10, usd: Math.round(wb * rn(d.body) + h.p * rn(d.paint) + h.ri * rn(d.ri)),
+    });
+  }
+  return rows;
+}
+
+// ---------- canvas image export (ported from exportImage) ----------
+function exportImage(ctx0, showToast) {
+  const { lines, rates, veh, vehicleText, stock, miles, vin, estimator } = ctx0;
+  try {
+    const t = quoteTotals(lines, rates);
+    const SP = !!rates.showPricing;
+    const d = rates.dollars;
+    const vehTitle = (veh && [veh.year, veh.make, veh.model, veh.trim].filter(Boolean).join(' ')) || vehicleText || 'Vehicle';
+    const dISO = new Date().toISOString();
+    const rows = quoteRows(lines, rates);
+    const W = 1240, M = 46, scale = 2, TH_W = 92, TH_H = 69;
+    const cThumb = M, cPanel = M + TH_W + 16, cWork = M + 300,
+      wWork = SP ? 440 : 460,
+      cB = SP ? 858 : 920, cP = SP ? 938 : 1010, cRI = SP ? 1010 : 1088, cHr = SP ? 1088 : W - M, cUsd = W - M;
+    const meas = document.createElement('canvas').getContext('2d');
+    const wrap = (ctx, text, maxW, font) => {
+      ctx.font = font;
+      const words = String(text).split(' '); const out = []; let cur = '';
+      for (const w of words) {
+        const test = cur ? cur + ' ' + w : w;
+        if (ctx.measureText(test).width > maxW && cur) { out.push(cur); cur = w; } else cur = test;
+      }
+      if (cur) out.push(cur);
+      return out;
+    };
+    const opFont = '20px Barlow, Arial, sans-serif';
+    let bodyH = 0;
+    const rowLayouts = rows.map((r) => {
+      const ls = [];
+      for (const op of r.ops) for (const ln of wrap(meas, '• ' + op, wWork, opFont)) ls.push(ln);
+      const rh = Math.max(r.thumb ? TH_H + 26 : 34, 30 + ls.length * 26 + 12);
+      bodyH += rh;
+      return { lines: ls, rh };
+    });
+    const H = 280 + 46 + bodyH + 220 + (SP ? 120 : 0) + (t.overlap > 0 ? 50 : 0) + (t.flagged > 0 ? 40 : 0);
+    const loadThumb = (src) => new Promise((resolve) => {
+      if (!src) return resolve(null);
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => resolve(null);
+      im.src = src;
+    });
+    Promise.all(rows.map((r) => loadThumb(r.thumb))).then((thumbs) => {
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = W * scale; cv.height = H * scale;
+        const ctx = cv.getContext('2d');
+        ctx.scale(scale, scale);
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#1a1a1a';
+        ctx.font = '700 40px "Barlow Condensed", Arial, sans-serif';
+        ctx.fillText('TRUCK RANCH — PAINT & BODY', M, 66);
+        ctx.font = '600 22px "Barlow Condensed", Arial, sans-serif';
+        ctx.fillStyle = '#6b6357';
+        ctx.fillText('REPAIR ORDER WORKSHEET', M, 96);
+        ctx.textAlign = 'right';
+        ctx.font = '20px "IBM Plex Mono", monospace';
+        ctx.fillText(dateDisp(dISO), W - M, 66);
+        ctx.textAlign = 'left';
+        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(M, 112); ctx.lineTo(W - M, 112); ctx.stroke();
+        ctx.font = '600 21px Barlow, Arial, sans-serif'; ctx.fillStyle = '#1a1a1a';
+        ctx.fillText('Vehicle: ' + vehTitle + '    Stock #: ' + (stock || '—') + '    Miles: ' + (miles || '—'), M, 148);
+        ctx.fillText('VIN: ' + (vin || '—') + '    Estimator: ' + (estimator || '—'), M, 178);
+        ctx.font = '600 19px Barlow, Arial, sans-serif'; ctx.fillStyle = '#6b6357';
+        ctx.fillText('All figures are labor hours for RO entry.', M, 208);
+        let y = 252;
+        ctx.font = '700 19px "Barlow Condensed", Arial, sans-serif'; ctx.fillStyle = '#6b6357';
+        ctx.fillText('PHOTO', cThumb, y);
+        ctx.fillText('PANEL', cPanel, y);
+        ctx.fillText('WORK TO BE PERFORMED', cWork, y);
+        ctx.textAlign = 'right';
+        ctx.fillText('BODY', cB, y); ctx.fillText('PAINT', cP, y); ctx.fillText('R&I', cRI, y); ctx.fillText('TOTAL HRS', cHr, y);
+        if (SP) ctx.fillText('USD', cUsd, y);
+        ctx.textAlign = 'left';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(M, y + 12); ctx.lineTo(W - M, y + 12); ctx.stroke();
+        y += 16;
+        rows.forEach((r, i) => {
+          const LY = rowLayouts[i];
+          const rowTop = y + 14;
+          let ry = y + 34;
+          const im = thumbs[i];
+          if (im) {
+            try { ctx.drawImage(im, cThumb, rowTop, TH_W, TH_H); } catch { /* skip */ }
+            ctx.strokeStyle = '#d9d2c4'; ctx.lineWidth = 1;
+            ctx.strokeRect(cThumb + 0.5, rowTop + 0.5, TH_W - 1, TH_H - 1);
+            ctx.strokeStyle = '#1a1a1a';
+          }
+          ctx.fillStyle = r.flag ? '#7a5c10' : '#1a1a1a';
+          ctx.font = '700 23px Barlow, Arial, sans-serif';
+          for (const pl of wrap(ctx, r.idx + '. ' + r.panel, cWork - cPanel - 16, '700 23px Barlow, Arial, sans-serif')) { ctx.fillText(pl, cPanel, ry); ry += 27; }
+          ry = y + 34;
+          ctx.font = opFont;
+          ctx.fillStyle = r.flag ? '#7a5c10' : r.dim ? '#857d70' : '#3a352c';
+          let oy = ry;
+          for (const ln of LY.lines) { ctx.fillText(ln, cWork, oy); oy += 26; }
+          if (r.tot != null) {
+            ctx.textAlign = 'right';
+            ctx.font = '21px "IBM Plex Mono", monospace'; ctx.fillStyle = '#1a1a1a';
+            ctx.fillText(fmt1(r.b), cB, ry);
+            ctx.fillText(r.isX ? '—' : fmt1(r.p), cP, ry);
+            ctx.fillText(r.isX ? '—' : fmt1(r.ri), cRI, ry);
+            ctx.font = '700 21px "IBM Plex Mono", monospace';
+            ctx.fillText(fmt1(r.tot), cHr, ry);
+            if (SP && r.usd != null) ctx.fillText(usd(r.usd), cUsd, ry);
+            ctx.textAlign = 'left';
+          }
+          y += LY.rh;
+          ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(M, y + 6); ctx.lineTo(W - M, y + 6); ctx.stroke();
+          ctx.strokeStyle = '#1a1a1a';
+        });
+        if (t.overlap > 0) {
+          ctx.font = '600 20px Barlow, Arial, sans-serif'; ctx.fillStyle = '#6b6357';
+          ctx.fillText('Blend overlap credit — adjacent panels painted together', cThumb, y + 30);
+          ctx.textAlign = 'right'; ctx.fillStyle = '#1a1a1a';
+          ctx.font = '700 21px "IBM Plex Mono", monospace';
+          ctx.fillText('−' + fmt1(t.overlap) + ' hr', cHr, y + 30);
+          ctx.textAlign = 'left';
+          y += 44;
+          ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(M, y + 6); ctx.lineTo(W - M, y + 6); ctx.stroke();
+          ctx.strokeStyle = '#1a1a1a';
+        }
+        y += 50;
+        ctx.font = '600 22px Barlow, Arial, sans-serif'; ctx.fillStyle = '#1a1a1a';
+        const cVal = SP ? cUsd : cHr;
+        const sub = (label, val) => {
+          ctx.fillStyle = '#6b6357'; ctx.fillText(label, cWork, y);
+          ctx.textAlign = 'right'; ctx.fillStyle = '#1a1a1a'; ctx.fillText(val, cVal, y); ctx.textAlign = 'left';
+          y += 32;
+        };
+        if (SP) {
+          sub('Body repair — ' + fmt1(t.B) + ' hr × $' + rn(d.body), usd(t.usdB));
+          sub('Paint refinish — ' + fmt1(t.P) + ' hr × $' + rn(d.paint) + (t.overlap > 0 ? ' (−' + fmt1(t.overlap) + ' hr blend overlap)' : ''), usd(t.usdP));
+          sub('R&I — ' + fmt1(t.RI) + ' hr × $' + rn(d.ri), usd(t.usdRI));
+          if (t.usdPDR > 0) sub('PDR — paintless repair, flat', usd(t.usdPDR));
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(cWork, y - 18); ctx.lineTo(cUsd, y - 18); ctx.stroke();
+          ctx.font = '700 30px "Barlow Condensed", Arial, sans-serif';
+          ctx.fillText('TOTAL ' + fmt1(t.hrs) + ' HR', cWork, y + 16);
+          ctx.textAlign = 'right'; ctx.fillText(usd(t.usd), cUsd, y + 16); ctx.textAlign = 'left';
+          y += 56;
+          const paintAmt = Math.round(t.usd * 0.30), suppliesAmt = Math.round(t.usd * 0.05), laborAmt = t.usd - paintAmt - suppliesAmt;
+          ctx.font = '700 19px "Barlow Condensed", Arial, sans-serif'; ctx.fillStyle = '#6b6357';
+          ctx.fillText('RATE BREAKDOWN — FOR RO ENTRY', cWork, y);
+          y += 30;
+          ctx.font = '600 21px Barlow, Arial, sans-serif';
+          const bd = (label, val) => {
+            ctx.fillStyle = '#6b6357'; ctx.fillText(label, cWork, y);
+            ctx.textAlign = 'right'; ctx.fillStyle = '#1a1a1a'; ctx.fillText(val, cUsd, y); ctx.textAlign = 'left';
+            y += 30;
+          };
+          bd('Labor (65%)', usd(laborAmt));
+          bd('Paint materials (30%)', usd(paintAmt));
+          bd('Shop supplies (5%)', usd(suppliesAmt));
+        } else {
+          sub('Body repair', fmt1(t.B) + ' hr');
+          sub('Paint refinish' + (t.overlap > 0 ? ' (−' + fmt1(t.overlap) + ' hr blend overlap)' : ''), fmt1(t.P) + ' hr');
+          sub('R&I', fmt1(t.RI) + ' hr');
+          if (t.usdPDR > 0) sub('PDR — paintless repair', 'flat rate');
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(cWork, y - 18); ctx.lineTo(cHr, y - 18); ctx.stroke();
+          ctx.font = '700 30px "Barlow Condensed", Arial, sans-serif';
+          ctx.fillText('TOTAL', cWork, y + 16);
+          ctx.textAlign = 'right'; ctx.fillText(fmt1(t.hrs) + ' HR', cHr, y + 16); ctx.textAlign = 'left';
+          y += 56;
+        }
+        if (t.flagged > 0) {
+          y += 22;
+          ctx.font = '600 19px Barlow, Arial, sans-serif'; ctx.fillStyle = '#7a5c10';
+          ctx.fillText(t.flagged + ' photo' + (t.flagged === 1 ? '' : 's') + ' flagged for human review — excluded from totals.', M, y);
+        }
+        const stockName = (stock || vin || 'quote').replace(/[^A-Za-z0-9-]+/g, '');
+        const fname = 'paint-body-quote-' + (stockName || 'quote') + '-' + dISO.slice(0, 10) + '.png';
+        const deliver = (url, revoke) => {
+          const a = document.createElement('a');
+          const canDownload = 'download' in a;
+          if (canDownload) {
+            a.href = url; a.download = fname;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            showToast && showToast('Quote image saved — upload it to MDD');
+          } else {
+            window.open(url, '_blank');
+            showToast && showToast('Image opened — press and hold to save, then upload to MDD');
+          }
+          if (revoke) setTimeout(() => URL.revokeObjectURL(url), 10000);
+        };
+        const shareIt = (blob) => {
+          try {
+            if (!blob || !navigator.share || !navigator.canShare) return false;
+            const file = new File([blob], fname, { type: 'image/png' });
+            if (!navigator.canShare({ files: [file] })) return false;
+            navigator.share({ files: [file], title: 'Paint & Body Quote' })
+              .then(() => showToast && showToast('Shared — attach it to the MDD card'))
+              .catch((err) => { if (!err || err.name !== 'AbortError') deliver(URL.createObjectURL(blob), true); });
+            return true;
+          } catch { return false; }
+        };
+        const isTouch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        if (cv.toBlob) {
+          cv.toBlob((blob) => {
+            if (blob) { if (!(isTouch && shareIt(blob))) deliver(URL.createObjectURL(blob), true); }
+            else deliver(cv.toDataURL('image/png'), false);
+          }, 'image/png');
+        } else {
+          deliver(cv.toDataURL('image/png'), false);
+        }
+      } catch { showToast && showToast('Image export failed'); }
+    });
+  } catch { showToast && showToast('Image export failed'); }
+}
 
 // Downscale a file to a base64 JPEG for classify (no data: prefix) and a
 // data-URL for photo upload / thumbnail — mirrors the old scaleImage().
@@ -103,6 +513,13 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [photos, setPhotos] = useState([]);
   const [walkOpen, setWalkOpen] = useState(false);
   const [walkInitialMode, setWalkInitialMode] = useState('guided');
+  // Flags / keep / notes (ported from the old app — persisted with the quote)
+  const [flags, setFlags] = useState(() => (Array.isArray(prefill?.flags) ? prefill.flags.map((f) => ({ id: f.id, done: !!f.done })) : []));
+  const [keep, setKeep] = useState(() => ({ tires: !!prefill?.keep?.tires, wheels: !!prefill?.keep?.wheels, set: !!prefill?.keep?.set }));
+  const [notes, setNotes] = useState(() => prefill?.notes || '');
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [flagPick, setFlagPick] = useState(false);
+  const [flagSearch, setFlagSearch] = useState('');
   const [armedDelete, setArmedDelete] = useState(null);
   const [hydrating, setHydrating] = useState(!!prefill?.quoteId);
   const [hydrateError, setHydrateError] = useState('');
@@ -125,6 +542,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       setStock(q.stock || p.stock || ''); setMiles(q.miles || p.miles || '');
       setEstimator(q.estimator || p.estimator || ''); setVehicleText(q.vehicle || p.vehicle || '');
       setVeh(q.veh || { year: '', make: '', model: '', trim: '', body: '' });
+      setFlags(Array.isArray(q.flags) ? q.flags.map((f) => ({ id: f.id, done: !!f.done })) : []);
+      setKeep({ tires: !!(q.keep && q.keep.tires), wheels: !!(q.keep && q.keep.wheels), set: !!(q.keep && q.keep.set) });
+      setNotes(q.notes || '');
       const restored = Array.isArray(q.lines) ? q.lines.map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' })) : [];
       setLines(restored); setStep(restored.length ? 'quote' : 'confirm'); hydratedRef.current = true; setHydrating(false);
     }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
@@ -197,11 +617,22 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   // ---------- autosave (debounced), mirrors old autosave() ----------
   const saveTimer = useRef(null);
   const stateRef = useRef({});
-  stateRef.current = { quoteId, vin, stock, miles, veh, estimator, vehicleText };
-  const buildEntry = useCallback((ls) => {
+  // Live refs for the fields mutated imperatively (flags/keep/notes): kept in
+  // sync inside the setState updaters so a commit or export right after a
+  // change always reads the just-computed value, not the previous render's.
+  const flagsRef = useRef(flags);
+  const keepRef = useRef(keep);
+  const notesRef = useRef(notes);
+  flagsRef.current = flags; keepRef.current = keep; notesRef.current = notes;
+  stateRef.current = { quoteId, vin, stock, miles, veh, estimator, vehicleText, flags: flagsRef.current, keep: keepRef.current, notes: notesRef.current };
+  // `overrides` carries the just-computed next snapshot for state the caller
+  // has updated in the same tick (flags/keep/notes), because stateRef.current
+  // still holds the PREVIOUS render's values until React re-renders.
+  const buildEntry = useCallback((ls, overrides) => {
     const t = quoteTotals(ls, rates);
     const cover = (ls[0] && ls[0].thumb) || '';
-    const s = stateRef.current;
+    const s = mergeQuoteSnapshot(stateRef.current, overrides);
+    const extras = quoteExtras(s);
     return {
       cover,
       id: s.quoteId,
@@ -219,14 +650,18 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         cls: l.cls, review: l.review, manual: l.manual, errMsg: l.errMsg || '',
       })),
       totals: { hrs: t.hrs, usd: t.usd, B: t.B, P: t.P, RI: t.RI, usdPDR: t.usdPDR },
+      // Old-app compatible extras — kept so imported quotes round-trip.
+      notes: extras.notes,
+      flags: extras.flags,
+      keep: extras.keep,
     };
   }, [rates]);
 
-  const autosave = useCallback((ls) => {
+  const autosave = useCallback((ls, overrides) => {
     if (!hydratedRef.current) return;
-    const s = stateRef.current;
+    const s = { ...stateRef.current, ...(overrides || {}) };
     if (!s.quoteId) return;
-    const entry = buildEntry(ls != null ? ls : linesRef.current);
+    const entry = buildEntry(ls != null ? ls : linesRef.current, overrides);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       api.putQuote({ id: entry.id, data: entry }).catch(() => { /* offline — retries on next save */ });
@@ -466,6 +901,65 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     });
   };
 
+  // ---------- flags / keep / notes ----------
+  // Each mutator computes the explicit next value inside the setState updater
+  // and hands that exact snapshot to autosave (overrides), so we never persist
+  // the stale pre-render value from stateRef.
+  const addFlag = useCallback((id) => {
+    setFlags((prev) => {
+      if (prev.some((f) => f.id === id)) return prev;
+      const next = [...prev, { id, done: false }];
+      flagsRef.current = next;
+      autosave(null, { flags: next });
+      return next;
+    });
+    setFlagPick(false); setFlagSearch('');
+  }, [autosave]);
+  const setFlagDone = useCallback((id, done) => {
+    setFlags((prev) => {
+      const next = prev.map((f) => (f.id === id ? { ...f, done } : f));
+      flagsRef.current = next;
+      autosave(null, { flags: next });
+      return next;
+    });
+  }, [autosave]);
+  const removeFlag = useCallback((id) => {
+    setFlags((prev) => {
+      const next = prev.filter((f) => f.id !== id);
+      flagsRef.current = next;
+      autosave(null, { flags: next });
+      return next;
+    });
+  }, [autosave]);
+  const toggleKeep = useCallback((k) => {
+    setKeep((prev) => {
+      const next = { ...prev, [k]: !prev[k] };
+      keepRef.current = next;
+      autosave(null, { keep: next });
+      return next;
+    });
+  }, [autosave]);
+  const onNotesChange = useCallback((v) => {
+    const next = String(v || '').slice(0, 2000);
+    notesRef.current = next;
+    setNotes(next);
+  }, []);
+  const closeNotes = useCallback(() => {
+    setNotesOpen(false);
+    autosave(null, { notes: notesRef.current });
+  }, [autosave]);
+
+  const exportCtx = () => ({
+    lines: linesRef.current, rates,
+    veh: stateRef.current.veh, vehicleText: stateRef.current.vehicleText,
+    stock: stateRef.current.stock, miles: stateRef.current.miles,
+    vin: stateRef.current.vin, estimator: stateRef.current.estimator,
+    notes: stateRef.current.notes, keep: stateRef.current.keep, flags: stateRef.current.flags,
+  });
+  const doCopy = () => copySummary(buildSummary(exportCtx()), showToast);
+  const doImage = () => exportImage(exportCtx(), showToast);
+  const doPrint = () => { try { window.print(); } catch { /* no-op */ } };
+
   // ---------- commit sign-off ----------
   const doCommit = ({ signerId, pin, forEmployeeId }) => {
     const id = ensureQuoteId();
@@ -585,6 +1079,40 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onTogglePart={togglePart}
             onAddMore={() => setStep('photos')}
             onCommit={() => setPinOpen(true)}
+            flags={flags}
+            keep={keep}
+            notes={notes}
+            notesOpen={notesOpen}
+            flagPick={flagPick}
+            flagSearch={flagSearch}
+            onOpenNotes={() => setNotesOpen(true)}
+            onCloseNotes={closeNotes}
+            onNotesChange={onNotesChange}
+            onFlagPickOpen={() => { setFlagPick(true); setFlagSearch(''); }}
+            onFlagPickClose={() => setFlagPick(false)}
+            onFlagSearch={setFlagSearch}
+            onAddFlag={addFlag}
+            onFlagDone={setFlagDone}
+            onRemoveFlag={removeFlag}
+            onToggleKeep={toggleKeep}
+            onCopy={doCopy}
+            onImage={doImage}
+            onPrint={doPrint}
+          />
+        )}
+        {step === 'quote' && (
+          <QuotePrint
+            lines={lines}
+            rates={rates}
+            veh={veh}
+            vehicleText={vehicleText}
+            stock={stock}
+            miles={miles}
+            vin={vin}
+            estimator={estimator}
+            notes={notes}
+            keep={keep}
+            flags={flags}
           />
         )}
         </>}
@@ -619,6 +1147,77 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         style={{ display: 'none' }}
       />
       {scanning && <VinScanner onDetected={onScannerHit} onCancel={() => setScanning(false)} />}
+    </div>
+  );
+}
+
+/* ---------- print view (PDF button) ---------- */
+function QuotePrint({ lines, rates, veh, vehicleText, stock, miles, vin, estimator, notes, keep, flags }) {
+  const t = quoteTotals(lines, rates);
+  const SP = !!rates.showPricing;
+  const rows = quoteRows(lines, rates);
+  const vehTitle = (veh && [veh.year, veh.make, veh.model, veh.trim].filter(Boolean).join(' ')) || vehicleText || 'Vehicle';
+  const K = keep || {};
+  const keepList = [K.tires && 'Tires', K.wheels && 'Wheels', K.set && 'Set'].filter(Boolean);
+  return (
+    <div className="quote-print" aria-hidden="true">
+      <h1>TRUCK RANCH — PAINT & BODY</h1>
+      <div className="qp-sub">REPAIR ORDER WORKSHEET · {dateDisp()}</div>
+      <div className="qp-rule" />
+      <div className="qp-meta">
+        <div><b>Vehicle:</b> {vehTitle} &nbsp;&nbsp; <b>Stock #:</b> {stock || '—'} &nbsp;&nbsp; <b>Miles:</b> {miles || '—'}</div>
+        <div><b>VIN:</b> {vin || '—'} &nbsp;&nbsp; <b>Estimator:</b> {estimator || '—'}</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>PANEL</th>
+            <th>WORK TO BE PERFORMED</th>
+            <th style={{ textAlign: 'right' }}>BODY</th>
+            <th style={{ textAlign: 'right' }}>PAINT</th>
+            <th style={{ textAlign: 'right' }}>R&I</th>
+            <th style={{ textAlign: 'right' }}>TOTAL HRS</th>
+            {SP && <th style={{ textAlign: 'right' }}>USD</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className={r.flag ? 'qp-flag' : r.dim ? 'qp-dim' : ''}>
+              <td>{r.idx}. {r.panel}</td>
+              <td>{r.ops.map((op, j) => <div key={j}>• {op}</div>)}</td>
+              <td className="num">{r.tot != null ? fmt1(r.b) : ''}</td>
+              <td className="num">{r.tot != null ? (r.isX ? '—' : fmt1(r.p)) : ''}</td>
+              <td className="num">{r.tot != null ? (r.isX ? '—' : fmt1(r.ri)) : ''}</td>
+              <td className="num">{r.tot != null ? fmt1(r.tot) : ''}</td>
+              {SP && <td className="num">{r.tot != null && r.usd != null ? usd(r.usd) : ''}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="qp-totals">
+        {SP ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Body repair — {fmt1(t.B)} hr × ${rn(rates.dollars.body)}</span><span>{usd(t.usdB)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Paint refinish — {fmt1(t.P)} hr × ${rn(rates.dollars.paint)}</span><span>{usd(t.usdP)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>R&I — {fmt1(t.RI)} hr × ${rn(rates.dollars.ri)}</span><span>{usd(t.usdRI)}</span></div>
+            {t.usdPDR > 0 && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>PDR — paintless repair, flat</span><span>{usd(t.usdPDR)}</span></div>}
+            <div className="qp-total-row"><span>TOTAL {fmt1(t.hrs)} HR</span><span>{usd(t.usd)}</span></div>
+          </>
+        ) : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Body repair</span><span>{fmt1(t.B)} hr</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Paint refinish</span><span>{fmt1(t.P)} hr</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>R&I</span><span>{fmt1(t.RI)} hr</span></div>
+            {t.usdPDR > 0 && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>PDR — paintless repair</span><span>flat rate</span></div>}
+            <div className="qp-total-row"><span>TOTAL</span><span>{fmt1(t.hrs)} HR</span></div>
+          </>
+        )}
+      </div>
+      {t.flagged > 0 && <div className="qp-extra qp-flag">{t.flagged} photo{t.flagged === 1 ? '' : 's'} flagged for human review — excluded from totals.</div>}
+      {(notes || '').trim() && <div className="qp-extra"><b>NOTES:</b> {notes.trim()}</div>}
+      {keepList.length > 0 && <div className="qp-extra"><b>KEEP:</b> {keepList.join(', ')}</div>}
+      {(flags || []).length > 0 && <div className="qp-extra"><b>FLAGS:</b> {flags.map((f) => flagDef(rates, f.id).label + (f.done ? ' ✓' : '')).join(', ')}</div>}
+      <div className="qp-foot">Hours from Truck Ranch fixed rate table — same classification = same hours.</div>
     </div>
   );
 }
@@ -770,7 +1369,9 @@ function PhotosStep({ photos, lineCount, committed, armedDelete, onAdd, onWalk, 
 }
 
 /* ---------- quote editor ---------- */
-function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onCommit }) {
+function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onCommit,
+  flags, keep, notes, notesOpen, flagPick, flagSearch,
+  onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep, onCopy, onImage, onPrint }) {
   const locked = !!committed;
   return (
     <>
@@ -816,6 +1417,78 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
 
       {!lines.length && <div className="empty-note">No damage lines yet.</div>}
 
+      {/* FLAGS */}
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span className="oswald" style={{ fontWeight: 700, fontSize: 13, letterSpacing: 1.4, color: 'var(--muted)' }}>FLAGS</span>
+          {!locked && (
+            <button
+              onClick={onFlagPickOpen}
+              style={{ background: '#fff', border: '1.5px solid var(--border)', borderRadius: 9, padding: '7px 12px', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: 1, color: 'var(--ink)', cursor: 'pointer' }}
+            >
+              ＋ ADD FLAG
+            </button>
+          )}
+        </div>
+        {!(flags || []).length && (
+          <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8 }}>No flags yet. Tap ＋ ADD FLAG to tag what this truck needs.</div>
+        )}
+        {(flags || []).length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+            {(flags || []).map((f) => {
+              const d = flagDef(rates, f.id);
+              const bg = f.done ? '#f5f3ee' : d.bg, fg = f.done ? '#857d70' : d.fg;
+              return (
+                <span key={f.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, borderRadius: 9, padding: '7px 10px', border: `1.3px solid ${d.bd}`, background: bg }}>
+                  <button
+                    onClick={() => onFlagDone(f.id, !f.done)}
+                    aria-label="Mark flag complete"
+                    style={{ width: 24, height: 24, flex: 'none', background: '#fff', border: `1.5px solid ${d.bd}`, borderRadius: 6, color: 'var(--green)', fontSize: 15, fontWeight: 700, lineHeight: 1, cursor: 'pointer', padding: 0 }}
+                  >
+                    {f.done ? '✓' : ''}
+                  </button>
+                  <span className="oswald" style={{ fontWeight: 700, fontSize: 13.5, letterSpacing: 0.6, color: fg, textDecoration: f.done ? 'line-through' : 'none' }}>{d.label}</span>
+                  {!locked && (
+                    <button onClick={() => onRemoveFlag(f.id)} aria-label="Remove flag" style={{ background: 'none', border: 'none', color: fg, opacity: 0.55, fontSize: 13, cursor: 'pointer', padding: '0 2px' }}>✕</button>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* KEEP */}
+      <div className="card">
+        <span className="oswald" style={{ fontWeight: 700, fontSize: 13, letterSpacing: 1.4, color: 'var(--muted)' }}>KEEP</span>
+        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+          {[['tires', 'KEEP TIRES'], ['wheels', 'KEEP WHEELS'], ['set', 'KEEP SET']].map(([k, label]) => {
+            const on = !!(keep && keep[k]);
+            return (
+              <button
+                key={k}
+                onClick={locked ? undefined : () => onToggleKeep(k)}
+                style={{ flex: 1, minWidth: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 8, padding: '7px 4px', border: `1.3px solid ${on ? 'var(--green)' : 'var(--border)'}`, background: on ? '#e8f3ea' : '#fff', cursor: locked ? 'default' : 'pointer' }}
+              >
+                <span style={{ width: 17, height: 17, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#fff', border: `1.5px solid ${on ? 'var(--green)' : 'var(--border)'}`, borderRadius: 5, color: 'var(--green)', fontSize: 12, fontWeight: 700, lineHeight: 1 }}>{on ? '✓' : ''}</span>
+                <span className="oswald" style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.4, color: 'var(--ink)', whiteSpace: 'nowrap' }}>{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* NOTES */}
+      <button
+        onClick={onOpenNotes}
+        style={{ background: '#fff', border: '1.5px solid var(--border)', borderRadius: 12, padding: 13, cursor: 'pointer', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 4 }}
+      >
+        <span className="oswald" style={{ fontWeight: 700, fontSize: 12, letterSpacing: 1.2, color: 'var(--muted)' }}>{(notes || '').trim() ? 'NOTES' : '＋ ADD NOTES'}</span>
+        <span style={{ fontSize: 13.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+          {(notes || '').trim() || 'Tap to jot down anything about this truck.'}
+        </span>
+      </button>
+
       {locked ? (
         <div className="card" style={{ borderColor: 'var(--green)', background: '#e8f3ea' }}>
           <SignatureBadge committedBy={committed.committedBy} overriddenBy={committed.overriddenBy} />
@@ -834,6 +1507,74 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
             ✍ Commit quote
           </button>
         </>
+      )}
+
+      {/* Export bar — COPY / IMAGE / PDF (dark, sticky) */}
+      <div style={{ position: 'sticky', bottom: 0, margin: '4px -14px -12px', background: '#23201a', padding: '12px 16px calc(12px + env(safe-area-inset-bottom))', display: 'flex', alignItems: 'center', gap: 10, zIndex: 40 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span className="oswald" style={{ fontWeight: 700, fontSize: 18, letterSpacing: 1, color: '#f2efe8', whiteSpace: 'nowrap' }}>
+            TOTAL {fmt1(totals.hrs)} HR{rates.showPricing ? ` · ${totals.usd.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })}` : ''}
+          </span>
+          <span className="oswald" style={{ fontWeight: 600, fontSize: 10, letterSpacing: 1.8, color: '#b5ac97' }}>RATE TABLE PRICING</span>
+        </div>
+        <button onClick={onCopy} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>COPY</button>
+        <button onClick={onImage} style={{ background: '#b0322a', border: 'none', borderRadius: 10, color: '#fff', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: 1.2, padding: '0 16px', height: 48, cursor: 'pointer' }}>IMAGE</button>
+        <button onClick={onPrint} style={{ background: 'none', border: '1.5px solid #4a453c', borderRadius: 10, color: '#f2efe8', fontFamily: "'Oswald', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: 1.2, padding: '0 14px', height: 48, cursor: 'pointer' }}>PDF</button>
+      </div>
+
+      {/* Flag picker */}
+      {flagPick && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(20,17,12,.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={onFlagPickClose}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 520, background: '#f5f3ee', borderRadius: '18px 18px 0 0', padding: '16px 16px calc(16px + env(safe-area-inset-bottom))', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span className="oswald" style={{ fontWeight: 700, fontSize: 15, letterSpacing: 1.6, color: 'var(--ink)' }}>ADD FLAG</span>
+              <button onClick={onFlagPickClose} style={{ background: 'none', border: '1.5px solid var(--border)', borderRadius: 9, color: 'var(--brown)', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 13, letterSpacing: 1.2, padding: '8px 14px', cursor: 'pointer' }}>CANCEL</button>
+            </div>
+            <input
+              className="input"
+              value={flagSearch}
+              onChange={(e) => onFlagSearch(e.target.value)}
+              placeholder="Search flags…"
+              autoFocus
+            />
+            {(() => {
+              const opts = flagDefs(rates).filter((dd) => !(flags || []).some((f) => f.id === dd.id) && dd.label.toUpperCase().includes((flagSearch || '').trim().toUpperCase()));
+              if (!opts.length) return <div style={{ fontSize: 13, color: 'var(--muted)' }}>No flags match.</div>;
+              return (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: '45vh', overflow: 'auto' }}>
+                  {opts.map((o) => (
+                    <button key={o.id} onClick={() => onAddFlag(o.id)} style={{ display: 'inline-flex', borderRadius: 9, padding: '10px 14px', border: `1.3px solid ${o.bd}`, background: o.bg, color: o.fg, fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: 0.8, cursor: 'pointer' }}>{o.label}</button>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Notes editor */}
+      {notesOpen && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(20,17,12,.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={onCloseNotes}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 520, background: '#f5f3ee', borderRadius: '18px 18px 0 0', padding: '16px 16px calc(16px + env(safe-area-inset-bottom))', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span className="oswald" style={{ fontWeight: 700, fontSize: 15, letterSpacing: 1.6, color: 'var(--ink)' }}>QUOTE NOTES</span>
+              <button onClick={onCloseNotes} style={{ background: 'var(--green)', border: 'none', borderRadius: 9, color: '#fff', fontFamily: "'Oswald', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: 1.2, padding: '9px 18px', cursor: 'pointer' }}>DONE</button>
+            </div>
+            {locked ? (
+              <div style={{ width: '100%', boxSizing: 'border-box', background: '#f0eee9', border: '1.5px solid var(--border)', borderRadius: 12, padding: 12, fontSize: 15, lineHeight: 1.45, color: 'var(--brown)', minHeight: 150, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{notes}</div>
+            ) : (
+              <textarea
+                rows={7}
+                maxLength={2000}
+                placeholder="Anything worth remembering about this truck — prior damage, customer requests, parts to order…"
+                value={notes}
+                onChange={(e) => onNotesChange(e.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box', background: '#fff', border: '1.5px solid var(--border)', borderRadius: 12, padding: 12, fontFamily: 'inherit', fontSize: 15, lineHeight: 1.45, color: 'var(--ink)', resize: 'none', minHeight: 150 }}
+              />
+            )}
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{locked ? 'Committed — these notes are read-only.' : 'Saved with this quote — you’ll see them any time you reopen it.'}</span>
+          </div>
+        </div>
       )}
     </>
   );

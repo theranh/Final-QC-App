@@ -135,6 +135,7 @@ export default function IntakeScreen({ showToast }) {
   const [vin, setVin] = useState('');
   const [intake, setIntake] = useState(null);
   const [quoting, setQuoting] = useState(false); // Body Quoter sub-view
+  const [standaloneQuote, setStandaloneQuote] = useState(null); // recent-quote reopen from landing
   const [homeRows, setHomeRows] = useState([]);
   const [homeSearch, setHomeSearch] = useState('');
   const [scanning, setScanning] = useState(false);
@@ -144,9 +145,23 @@ export default function IntakeScreen({ showToast }) {
   const [, setDecoding] = useState(false);
   const [estimators, setEstimators] = useState([]);
   const [quoteSummary, setQuoteSummary] = useState(null);
+  // Landing "QUOTE DETAILS" prefill + recent quotes (mirrors the old home)
+  const [homeStock, setHomeStock] = useState('');
+  const [homeMiles, setHomeMiles] = useState('');
+  const [homeEstimator, setHomeEstimator] = useState('');
+  const [homeMddTags, setHomeMddTags] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [recentQuotes, setRecentQuotes] = useState([]);
   const intakeRef = useRef(null);
   intakeRef.current = intake;
   useEffect(() => { if (!intake) api.listIntakes().then((j) => setHomeRows(j?.intakes || [])).catch(() => {}); }, [intake]);
+  useEffect(() => {
+    if (intake) return;
+    api.quoterSync().then((j) => {
+      const qs = (j?.quotes || []).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      setRecentQuotes(qs);
+    }).catch(() => {});
+  }, [intake]);
   useEffect(() => {
     api.signers().then((j) => setEstimators((j?.signers || []).filter((s) => s.active !== false).map((s) => s.name || s.displayName).filter(Boolean))).catch(() => {});
   }, []);
@@ -252,10 +267,20 @@ export default function IntakeScreen({ showToast }) {
 
   // Open an intake for a VIN: prefer the local cache, then fetch the server copy.
   const openFor = useCallback(
-    (raw) => {
+    (raw, seed) => {
       const v = String(raw || '').trim().toUpperCase();
       const cache = loadCache();
-      const it = v && cache[v] ? cache[v] : blankIntake(v);
+      let it = v && cache[v] ? cache[v] : blankIntake(v);
+      // Seed the landing QUOTE DETAILS onto a fresh (untouched) intake only.
+      if (seed && (!it.ts || it.ts === 0)) {
+        it = {
+          ...it,
+          stock: it.stock || seed.stock || '',
+          miles: it.miles || seed.miles || '',
+          estimator: it.estimator || seed.estimator || '',
+          mddTags: it.mddTags || !!seed.mddTags,
+        };
+      }
       setIntake(it);
       if (v.length >= 6) refreshFromServer(v);
     },
@@ -267,7 +292,8 @@ export default function IntakeScreen({ showToast }) {
     if (v.length !== 17) { setVinMessage('VIN must be 17 characters to start a new intake.'); return; }
     if (!vinValid(v) && !overridden) { setVinMessage('Invalid VIN check digit. Verify the VIN or use check digit override.'); return; }
     setVinMessage(overridden ? 'Check digit override accepted — verify against the door label.' : 'Valid VIN');
-    setVin(v); setVinOverride(overridden); openFor(v);
+    setVin(v); setVinOverride(overridden);
+    openFor(v, { stock: homeStock, miles: homeMiles, estimator: homeEstimator, mddTags: homeMddTags });
   };
   const ensureIntakeQuote = async () => {
     if (intake?.quoteId) return intake.quoteId;
@@ -355,22 +381,122 @@ export default function IntakeScreen({ showToast }) {
     );
   }
 
-  if (!started) return (
-    <div className="screen">
-      <div className="screen-topbar"><div className="screen-title-row"><span className="screen-title">Intake</span><span className="mono" style={{fontSize:9.5,color:'var(--muted)'}}>TR-INTAKE-V2</span></div></div>
-      <div className="screen-body">
-        <div className="card" style={{background:'linear-gradient(180deg,#a8322b,#ce1b1b)',color:'#fff',padding:18}}>
-          <div className="oswald" style={{fontSize:22,letterSpacing:1}}>START INTAKE</div>
-          <div style={{fontSize:12,opacity:.85,marginTop:4}}>Scan the door-jamb barcode or enter the VIN.</div>
-          <button className="btn" style={{marginTop:14,background:'#262220',color:'#fff'}} onClick={() => setScanning(true)}>▣ SCAN VIN</button>
+  // Reopen a saved quote directly from the landing "RECENT QUOTES" list.
+  if (standaloneQuote) {
+    return (
+      <QuoteScreen
+        prefill={standaloneQuote}
+        onClose={() => setStandaloneQuote(null)}
+        showToast={showToast}
+      />
+    );
+  }
+
+  if (!started) {
+    const recentSearch = homeSearch.trim().toUpperCase();
+    const recentFiltered = recentQuotes.filter((q) => !recentSearch || [q.vin, q.stock, q.vehicle, q.estimator].join(' ').toUpperCase().includes(recentSearch));
+    const knownEst = homeEstimator && estimators.includes(homeEstimator);
+    return (
+      <div className="screen">
+        <div className="screen-topbar"><div className="screen-title-row"><span className="screen-title">Intake</span><span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>TR-INTAKE-V2</span></div></div>
+        <div className="screen-body">
+          {/* QUOTE DETAILS */}
+          <div className="card">
+            <div className="card-title">QUOTE DETAILS</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
+              <div>
+                <div className="field-label">STOCK #</div>
+                <input className="input mono" value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
+              </div>
+              <div>
+                <div className="field-label">MILES</div>
+                <input className="input mono" value={homeMiles} inputMode="numeric" placeholder="e.g. 45000" onChange={(e) => setHomeMiles(e.target.value.replace(/[^0-9]/g, ''))} />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <div className="field-label">ESTIMATOR</div>
+                <select className="input" value={knownEst ? homeEstimator : (homeEstimator ? '__custom' : '')} onChange={(e) => setHomeEstimator(e.target.value === '__custom' ? '' : e.target.value)}>
+                  <option value="">Select name…</option>
+                  {estimators.map((name) => <option key={name} value={name}>{name}</option>)}
+                  <option value="__custom">Other / enter manually</option>
+                </select>
+                {(!knownEst) && <input className="input" style={{ marginTop: 6 }} value={homeEstimator} placeholder="Estimator name" onChange={(e) => setHomeEstimator(e.target.value)} />}
+              </div>
+            </div>
+          </div>
+
+          {/* MDD tags */}
+          <label className="card" style={{ display: 'flex', alignItems: 'center', gap: 11, cursor: 'pointer' }}>
+            <input type="checkbox" checked={homeMddTags} onChange={(e) => setHomeMddTags(e.target.checked)} style={{ width: 22, height: 22, flex: 'none', accentColor: 'var(--red)', cursor: 'pointer' }} />
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Are both Key &amp; Vehicle MDD tags present?</span>
+          </label>
+
+          {/* SCAN VIN */}
+          <button className="btn btn-red" style={{ height: 60, fontSize: 20, letterSpacing: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }} onClick={() => setScanning(true)}>
+            <span aria-hidden="true">📷</span> SCAN VIN
+          </button>
+
+          {/* OR divider */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+            <span className="oswald" style={{ fontWeight: 600, fontSize: 12, letterSpacing: 2, color: 'var(--muted)' }}>OR</span>
+            <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+          </div>
+
+          {/* ENTER VIN MANUALLY */}
+          <button className="btn btn-outline-brown" style={{ height: 50, fontSize: 16, letterSpacing: 1 }} onClick={() => setManualOpen((v) => !v)}>ENTER VIN MANUALLY</button>
+          {manualOpen && (
+            <div className="card">
+              <div className="field-label">17-CHARACTER VIN</div>
+              <input className="input mono" value={vin} maxLength={17} autoFocus onChange={(e) => { setVin(e.target.value.toUpperCase()); setVinMessage(''); }} placeholder="17-character VIN" autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
+              <div style={{ fontSize: 11, marginTop: 7, color: vinMessage === 'Valid VIN' ? 'var(--green)' : 'var(--red)' }}>{vin.length}/17 {vinMessage}</div>
+              <button className="btn btn-dark" style={{ marginTop: 9 }} disabled={vin.length !== 17} onClick={() => acceptVin(vin)}>Start / Resume</button>
+              <button className="btn btn-outline" style={{ marginTop: 7 }} disabled={vin.length !== 17 || vinValid(vin)} onClick={() => acceptVin(vin, true)}>Use check digit override</button>
+            </div>
+          )}
+
+          {/* INTAKE CHECKLIST toggle → opens the manual-VIN entry to start the 4-step checklist */}
+          <button
+            className="btn"
+            style={{ height: 50, fontSize: 16, letterSpacing: 1, background: '#fff', border: '1.5px solid var(--border)', borderLeft: '5px solid var(--red)', color: 'var(--ink)', textAlign: 'left', justifyContent: 'flex-start' }}
+            onClick={() => setManualOpen(true)}
+          >
+            ☑ INTAKE CHECKLIST
+          </button>
+
+          {/* RECENT QUOTES */}
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 8 }}>
+            <div className="oswald" style={{ fontWeight: 700, fontSize: 13.5, letterSpacing: 2, color: 'var(--muted)' }}>RECENT QUOTES</div>
+            <span style={{ color: 'var(--red)', fontWeight: 600, fontSize: 13 }}>All quotes ({recentQuotes.length}) →</span>
+          </div>
+          {recentQuotes.length > 5 && (
+            <input className="input" placeholder="Search VIN, stock, vehicle, estimator…" value={homeSearch} onChange={(e) => setHomeSearch(e.target.value)} />
+          )}
+          {!recentQuotes.length ? (
+            <div className="empty-note">No quotes yet — scan your first truck.</div>
+          ) : !recentFiltered.length ? (
+            <div className="empty-note">No saved quotes match.</div>
+          ) : (
+            recentFiltered.slice(0, homeSearch ? 20 : 6).map((q) => (
+              <RecentQuoteCard key={q.id} quote={q} onClick={() => setStandaloneQuote({ vin: q.vin, stock: q.stock, vehicle: q.vehicle, estimator: q.estimator, miles: q.miles, quoteId: q.id })} />
+            ))
+          )}
+
+          {/* Existing in-progress / completed intakes (kept for resume) */}
+          {homeRows.length > 0 && ['IN PROGRESS', 'COMPLETED'].map((label) => {
+            const rows = homeRows.filter((r) => (!!r.completedAt) === (label === 'COMPLETED'));
+            if (!rows.length) return null;
+            return (
+              <div key={label}>
+                <div className="card-title" style={{ padding: '7px 2px' }}>{label} INTAKES · {rows.length}</div>
+                {rows.map((r) => <IntakeHomeCard key={r.id} row={r} onClick={() => openExisting(r)} />)}
+              </div>
+            );
+          })}
         </div>
-        <div className="card"><div className="field-label">ENTER VIN MANUALLY</div><input className="input mono" value={vin} maxLength={17} onChange={e => {setVin(e.target.value.toUpperCase());setVinMessage('')}} placeholder="17-character VIN"/><div style={{fontSize:11,marginTop:7,color: vinMessage === 'Valid VIN' ? 'var(--green)' : 'var(--red)'}}>{vin.length}/17 {vinMessage}</div><button className="btn btn-dark" style={{marginTop:9}} disabled={vin.length !== 17} onClick={() => acceptVin(vin)}>Start / Resume</button><button className="btn btn-outline" style={{marginTop:7}} disabled={vin.length !== 17 || vinValid(vin)} onClick={() => acceptVin(vin,true)}>Use check digit override</button></div>
-        <input className="input" placeholder="Search VIN, stock, vehicle, estimator…" value={homeSearch} onChange={e => setHomeSearch(e.target.value)}/>
-        {['IN PROGRESS','COMPLETED'].map((label) => { const rows = homeRows.filter(r => (!!r.completedAt) === (label === 'COMPLETED')).filter(r => !homeSearch || [r.vin,r.stock,r.vehicle,r.estimator].join(' ').toLowerCase().includes(homeSearch.toLowerCase())); return <div key={label}><div className="card-title" style={{padding:'7px 2px'}}>{label} · {rows.length}</div>{rows.length ? rows.map(r => <IntakeHomeCard key={r.id} row={r} onClick={() => openExisting(r)}/>) : <div className="empty-note">No saved intakes match.</div>}</div>; })}
+        {scanning && <VinScanner onDetected={(v, ok) => { setScanning(false); acceptVin(v, !ok); }} onCancel={() => setScanning(false)} />}
       </div>
-      {scanning && <VinScanner onDetected={(v, ok) => {setScanning(false); acceptVin(v,!ok)}} onCancel={() => setScanning(false)}/>}
-    </div>
-  );
+    );
+  }
 
   return (
     <div className="screen">
@@ -591,6 +717,32 @@ export default function IntakeScreen({ showToast }) {
         <WalkAroundCamera quoteId={intake.quoteId} committed={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
       )}
     </div>
+  );
+}
+
+function RecentQuoteCard({ quote: q, onClick }) {
+  const hrs = q.totals?.hrs ?? q.hrs ?? 0;
+  const usd = q.totals?.usd ?? q.usd ?? 0;
+  const lineCount = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls).length : 0;
+  const date = q.ts ? new Date(q.ts).toLocaleDateString() : (q.dateISO ? new Date(q.dateISO).toLocaleDateString() : '—');
+  return (
+    <button className="card" onClick={onClick} style={{ textAlign: 'left', width: '100%', cursor: 'pointer', padding: 13, display: 'flex', gap: 11, alignItems: 'center' }}>
+      {q.cover ? (
+        <img src={q.cover} alt="" style={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', flex: '0 0 auto', border: '1px solid var(--border)' }} />
+      ) : (
+        <div style={{ width: 46, height: 46, borderRadius: 8, flex: '0 0 auto', background: 'var(--panel)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted2)', fontSize: 18 }}>🚚</div>
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="oswald" style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{q.vehicle || 'Vehicle not decoded'}</div>
+        <div className="mono" style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>{q.stock ? 'STOCK ' + q.stock + ' · ' : ''}{q.vin ? q.vin.slice(-8) : ''}</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 10px', fontSize: 10, color: 'var(--brown)', marginTop: 5 }}>
+          <span>{date}</span>
+          {lineCount > 0 && <span>{lineCount} lines</span>}
+          {hrs > 0 && <span>{hrs} hr</span>}
+          {usd > 0 && <b>${Number(usd).toLocaleString()}</b>}
+        </div>
+      </div>
+    </button>
   );
 }
 
