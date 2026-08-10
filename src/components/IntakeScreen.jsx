@@ -79,7 +79,7 @@ function blankIntake(vin) {
   };
 }
 
-export default function IntakeScreen({ showToast }) {
+export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) {
   const [vin, setVin] = useState('');
   const [intake, setIntake] = useState(null);
   const [quoting, setQuoting] = useState(false); // Body Quoter sub-view
@@ -239,6 +239,14 @@ export default function IntakeScreen({ showToast }) {
     [refreshFromServer]
   );
   const openExisting = (row) => { setVin(row.vin); openFor(row.vin); };
+  // Auto-open a VIN handed in from another tab (e.g. tapping an In-Take Quote
+  // card on the Vehicles tab). Consumed once so back-navigation still works.
+  useEffect(() => {
+    if (!openVin) return;
+    setVin(openVin);
+    openFor(openVin);
+    onOpenVinConsumed?.();
+  }, [openVin, openFor, onOpenVinConsumed]);
   // Commit to opening an intake for an already-validated VIN, seeding the
   // landing QUOTE DETAILS. Used by the plain (no-duplicate) path and by the
   // quote-only "Start intake anyway" path (both create a fresh intake, so the

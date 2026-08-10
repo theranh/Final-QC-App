@@ -23,7 +23,7 @@ const usd = (v) =>
 // Green <3 days, yellow 3–6, red 7+.
 
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onStartQc }) {
+export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onOpenIntake }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -119,7 +119,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onStartQc(v)} />
+            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onOpenIntake(v)} />
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>

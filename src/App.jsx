@@ -62,6 +62,7 @@ function AuthedApp({ me, onAuthRefresh }) {
   const [saving, setSaving] = useState(false);
 
   const [tab, setTab] = useState('dash');
+  const [intakeOpenVin, setIntakeOpenVin] = useState(null); // VIN to auto-open on the Intake tab
   const [stage, setStage] = useState(() => boot.stage);
   const [draft, setDraft] = useState(() => boot.draft);
   const [marks, setMarks] = useState(() => boot.marks);
@@ -535,25 +536,15 @@ function AuthedApp({ me, onAuthRefresh }) {
     if (k !== 'vehicles') setVehSel(null);
     if (k === 'dash' || k === 'vehicles') refreshDash();
   };
+  // Open the intake (walk-around photos + details) for an awaiting-QC unit.
+  const openIntakeFor = (v) => {
+    setIntakeOpenVin(v.vin);
+    setTab('intake');
+  };
   const openVehicle = (vin, qcNumber) => {
     setTab('vehicles');
     setVehSel({ vin, qcNumber });
   };
-  // Start a Final QC prefilled from an awaiting-QC intake. Never silently
-  // discard an inspection that's already in progress.
-  const startQcFor = (v) => {
-    const hasWork = stage != null && (draft.stock || draft.vehicle || draft.vin);
-    if (hasWork && !window.confirm('An inspection is already in progress. Replace it with ' + (v.stock || v.vin) + '?')) {
-      setTab('inspect');
-      return;
-    }
-    setDraft({ ...newDraft('me'), stock: v.stock || '', vehicle: v.vehicle || '', vin: v.vin || '' });
-    setMarks({}); setNotes({}); setPhotosMap({}); setOptOut({});
-    setSigSigned(false);
-    setStage('form');
-    setTab('inspect');
-  };
-
   // Stale-backup nudge (admins): no server export in the audit log for over a
   // week — or ever. Hidden until the status has actually loaded.
   const backupNudge =
@@ -669,10 +660,10 @@ function AuthedApp({ me, onAuthRefresh }) {
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onStartQc={startQcFor} />
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onOpenIntake={openIntakeFor} />
     );
   } else if (tab === 'intake') {
-    content = <IntakeScreen showToast={showToast} />;
+    content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} />;
   } else if (tab === 'inspect') {
     content = (
       <HomeScreen
