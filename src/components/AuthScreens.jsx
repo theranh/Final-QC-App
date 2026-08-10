@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 function Shell({ children }) {
   return (
     <div className="app-shell">
@@ -87,6 +89,34 @@ export function AccessScreen({ status, email }) {
 }
 
 export function ErrorScreen({ onRetry, detail }) {
+  const [testResult, setTestResult] = useState(null);
+  const [testing, setTesting] = useState(false);
+
+  const runTest = async () => {
+    setTesting(true);
+    const lines = [];
+    const stamp = new Date().toLocaleTimeString();
+    lines.push(`Test at ${stamp}`);
+    for (const path of ['/api/health', '/api/me']) {
+      try {
+        const start = Date.now();
+        const res = await fetch(`${path}?diag=${Date.now()}`, { cache: 'no-store', credentials: 'include' });
+        const ms = Date.now() - start;
+        let bodyNote = '';
+        const text = await res.text();
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('json')) bodyNote = ` (non-JSON reply: ${text.slice(0, 60) || 'empty'})`;
+        lines.push(`${path}: ${res.status} in ${ms}ms${bodyNote}`);
+      } catch (err) {
+        lines.push(`${path}: failed — ${err?.message || err}`);
+      }
+    }
+    lines.push(`Service worker: ${navigator.serviceWorker?.controller ? 'active' : 'none'}`);
+    lines.push(`Online: ${navigator.onLine}`);
+    setTestResult(lines.join('\n'));
+    setTesting(false);
+  };
+
   return (
     <Shell>
       <div style={{ fontSize: 12, color: 'var(--red)', fontWeight: 700 }}>Could not reach the server.</div>
@@ -96,6 +126,18 @@ export function ErrorScreen({ onRetry, detail }) {
       <div className="btn btn-outline" style={{ width: 180, height: 46, fontSize: 12 }} onClick={onRetry}>
         Try again
       </div>
+      <div
+        className="btn btn-outline"
+        style={{ width: 180, height: 38, fontSize: 11, opacity: 0.8 }}
+        onClick={testing ? undefined : runTest}
+      >
+        {testing ? 'Testing…' : 'Run connection test'}
+      </div>
+      {testResult ? (
+        <pre style={{ fontSize: 10, color: 'var(--muted)', maxWidth: 300, lineHeight: 1.6, whiteSpace: 'pre-wrap', textAlign: 'left', margin: 0 }}>
+          {testResult}
+        </pre>
+      ) : null}
     </Shell>
   );
 }
