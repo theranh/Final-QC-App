@@ -199,6 +199,52 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
         return res.json({ phase, read: rows.length, inserted, alreadyPresent: present });
       }
 
+      if (phase === "intake_backfill") {
+        // One-time backfill: the old Quoter app never had intake rows — its
+        // quotes ARE the intakes. Derive one completed intake per distinct
+        // VIN from THIS server's quotes table (latest quote wins), insert-only:
+        // VINs that already have any intake row are skipped, so real intakes
+        // made in this app are never touched. Marked in notes as imported.
+        const rows = (
+          await destQuery(
+            `SELECT DISTINCT ON (UPPER(TRIM(data->>'vin')))
+                    id, data, updated_at
+             FROM quotes
+             WHERE LENGTH(TRIM(COALESCE(data->>'vin',''))) >= 6
+             ORDER BY UPPER(TRIM(data->>'vin')), updated_at DESC NULLS LAST, id DESC`,
+          )
+        ).rows;
+        let inserted = 0, skippedExistingVin = 0;
+        const intakeData = JSON.stringify({
+          steps: { "1": [], "2": [], "3": [], "4": [] },
+          roReady: [true, true, true, true, true, true, true, true, true],
+          photoCount: 0,
+          notes: "Imported from old Body Quoter",
+          mddTags: false,
+        });
+        for (const r of rows) {
+          const d = r.data || {};
+          const vin = String(d.vin || "").trim().toUpperCase();
+          const veh = d.veh && typeof d.veh === "object" ? d.veh : {};
+          const vehicle = [veh.year, veh.make, veh.model].filter(Boolean).join(" ").slice(0, 120);
+          const completedAt = d.dateISO ? new Date(String(d.dateISO)) : r.updated_at;
+          const q = await destQuery(
+            `INSERT INTO intakes
+               (id, vin, stock, vehicle, miles, estimator, quote_id, data, completed_at, updated_at, committed_by)
+             SELECT $1,$2,$3,$4,'',$5,$6,$7::jsonb,$8,$9,$10
+             WHERE NOT EXISTS (SELECT 1 FROM intakes WHERE UPPER(TRIM(vin)) = $2)`,
+            [
+              `imp-${r.id}`.slice(0, 60), vin, String(d.stock || "").slice(0, 40), vehicle,
+              String(d.estimator || "").slice(0, 40), r.id, intakeData,
+              completedAt, r.updated_at ?? completedAt,
+              d.estimator ? String(d.estimator).slice(0, 40) : null,
+            ],
+          );
+          q.rowCount ? inserted++ : skippedExistingVin++;
+        }
+        return res.json({ phase, distinctVins: rows.length, inserted, skippedExistingVin });
+      }
+
       if (phase === "spotcheck") {
         // 5 random source quotes: VIN, line count, hours, total — source vs dest.
         const rows = (
