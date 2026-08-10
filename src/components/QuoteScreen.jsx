@@ -1055,6 +1055,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         {step === 'photos' && (
           <PhotosStep
             photos={photos}
+            damageFocus={!!prefill?.startAtPhotos}
             serverPhotos={serverPhotos}
             onEnlarge={setLightbox}
             lineCount={lines.length}
@@ -1343,11 +1344,11 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 }
 
 /* ---------- photos step ---------- */
-function PhotosStep({ photos, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
+function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
   const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
   return (
     <>
-      <div className="card">
+      {!damageFocus && <div className="card">
         <div className="card-title">WALK-AROUND PHOTOS · {walkShots.length}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Circle the truck and shoot everything — sides, corners, interior, wheels. Photos save automatically as you go.
@@ -1367,11 +1368,11 @@ function PhotosStep({ photos, serverPhotos = [], onEnlarge, lineCount, committed
           </div>
         )}
         {!committed && <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onWalk}>📷 TAKE PHOTOS</button>}
-      </div>
+      </div>}
       <div className="card">
-        <div className="card-title">DAMAGE FOR THE QUOTE · {Math.max(serverPhotos.length - walkShots.length, photos.length)}</div>
+        <div className="card-title">DAMAGE PHOTOS · {Math.max(serverPhotos.length - walkShots.length, photos.length)}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
-          Found damage? Take a close-up of each spot — these go to the AI for the body quote.
+          Take a close-up of each damage spot — these go to the AI for the body quote.
         </div>
         {serverPhotos.length - walkShots.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>

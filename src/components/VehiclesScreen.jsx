@@ -64,14 +64,14 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
     if (!matchPerson(v, 'inspector')) return false;
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
-  });
+  }).sort((a, b) => (b.finalizedTs ?? b.createdTs ?? 0) - (a.finalizedTs ?? a.createdTs ?? 0)); // newest first
   // Awaiting Final QC = completed intake, no inspection yet — server-composed
   // list from this app's local intakes table.
   const awaiting = (dash?.awaiting || []).filter((v) => {
     if (!matchPerson(v, 'estimator')) return false;
     if (!needle) return true;
     return (v.stock || '').toUpperCase().includes(needle) || (v.vin || '').toUpperCase().includes(needle);
-  });
+  }).sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0)); // newest first
 
   const setBucket = (k) => {
     setPerson('');
