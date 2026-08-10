@@ -10,10 +10,14 @@ const INVALID_VIN = '1HGCM82633A004353'; // same VIN, broken check digit
 
 // ---- mocks --------------------------------------------------------------
 const putIntake = vi.fn(() => Promise.resolve({}));
+// Per-test data for the landing lists — the duplicate-VIN guard matches the
+// entered VIN against these rows.
+let serverIntakes = [];
+let serverQuotes = [];
 vi.mock('../lib/api', () => ({
   api: {
-    listIntakes: () => Promise.resolve({ intakes: [] }),
-    quoterSync: () => Promise.resolve({ quotes: [] }),
+    listIntakes: () => Promise.resolve({ intakes: serverIntakes }),
+    quoterSync: () => Promise.resolve({ quotes: serverQuotes }),
     signers: () => Promise.resolve({ signers: [] }),
     getIntake: () => Promise.resolve({ found: false }),
     quotePhotos: () => Promise.resolve({ photos: [] }),
@@ -61,6 +65,8 @@ import IntakeScreen from './IntakeScreen';
 beforeEach(() => {
   localStorage.clear();
   putIntake.mockClear();
+  serverIntakes = [];
+  serverQuotes = [];
 });
 afterEach(cleanup);
 
@@ -135,5 +141,96 @@ describe('IntakeScreen manual check-digit override', () => {
     fireEvent.click(override);
     expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByPlaceholderText('VIN…')).toHaveValue(INVALID_VIN));
+  });
+});
+
+// Duplicate-VIN guard: entering a VIN that already has an intake and/or quote
+// must interpose the "Record already exists" dialog instead of silently
+// creating a second record for the same truck.
+describe('IntakeScreen duplicate-VIN guard', () => {
+  const EXISTING_INTAKE = {
+    id: 'in-existing',
+    vin: VALID_VIN,
+    vehicle: '2021 Ford F-150',
+    stock: 'S123',
+    estimator: 'Sam',
+    pct: 40,
+    completedAt: null,
+    updatedAt: 1700000000000,
+  };
+  const EXISTING_QUOTE = {
+    id: 'q-existing',
+    vin: VALID_VIN,
+    vehicle: '2021 Ford F-150',
+    stock: 'S123',
+    estimator: 'Sam',
+    ts: 1700000000000,
+    lines: [],
+    totals: { hrs: 0, usd: 0 },
+  };
+
+  // Type the VIN into manual entry and press Start / Resume.
+  const submitVin = async () => {
+    render(<IntakeScreen showToast={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /enter vin manually/i }));
+    const input = await screen.findByPlaceholderText('17-character VIN');
+    await userEvent.type(input, VALID_VIN);
+    // Wait until the landing lists have loaded, so the guard has rows to match.
+    fireEvent.click(screen.getByRole('button', { name: /start \/ resume/i }));
+    return screen.findByText(/Record already exists/i);
+  };
+
+  it('shows the dialog when the VIN matches an existing intake row', async () => {
+    serverIntakes = [EXISTING_INTAKE];
+    await submitVin();
+
+    // Intake-exists variant: Resume is offered, Start anyway is NOT (one intake per VIN).
+    // (The VIN also appears on the landing card, so match all occurrences.)
+    expect(screen.getAllByText(VALID_VIN).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /resume existing intake/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start intake anyway/i })).not.toBeInTheDocument();
+
+    // Blocked behind the dialog: no intake was opened or persisted.
+    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(putIntake).not.toHaveBeenCalled();
+  });
+
+  it('Resume opens the existing intake instead of creating a new one', async () => {
+    serverIntakes = [EXISTING_INTAKE];
+    await submitVin();
+
+    fireEvent.click(screen.getByRole('button', { name: /resume existing intake/i }));
+    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
+    // Opening an existing intake only reads; nothing new is written.
+    expect(putIntake).not.toHaveBeenCalled();
+  });
+
+  it('a VIN with only a quote offers Start anyway, which creates a fresh intake', async () => {
+    serverQuotes = [EXISTING_QUOTE];
+    await submitVin();
+
+    // Quote-only variant of the dialog.
+    expect(screen.getByRole('button', { name: /open existing quote/i })).toBeInTheDocument();
+    const startAnyway = screen.getByRole('button', { name: /start intake anyway/i });
+
+    fireEvent.click(startAnyway);
+    expect(await screen.findByText('INTAKE PROGRESS')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
+    expect(screen.queryByText(/Record already exists/i)).not.toBeInTheDocument();
+  });
+
+  it('Cancel closes the dialog and stays on the landing screen', async () => {
+    serverIntakes = [EXISTING_INTAKE];
+    await submitVin();
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await waitFor(() =>
+      expect(screen.queryByText(/Record already exists/i)).not.toBeInTheDocument()
+    );
+    // Back on the landing screen, nothing started or persisted.
+    expect(screen.queryByText('INTAKE PROGRESS')).not.toBeInTheDocument();
+    expect(putIntake).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /scan vin/i })).toBeInTheDocument();
   });
 });
