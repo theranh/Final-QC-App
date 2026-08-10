@@ -7,6 +7,7 @@ import { frozenMonth } from "./tracker";
 import {
   fetchCompletedIntakes,
   fetchIntakeStats,
+  fetchQuoteCovers,
   lookupIntakeByVin,
 } from "./localQuote";
 
@@ -464,9 +465,22 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // A plain join now that intakes are local: every completed intake whose VIN
   // has no inspection row (VINs already normalized trim/upper on both sides).
   const inspectedVins = new Set(rows.map((r) => r.vin));
-  const awaiting = completedIntakes
+  const awaitingBase = completedIntakes
     .filter((i) => !inspectedVins.has(i.vin))
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+  // Enrich each In-Take Quotes card with its quote's cover thumb + figures so
+  // the Vehicles bucket mirrors the intake app's all-quotes list.
+  const awaitingCovers = await fetchQuoteCovers(awaitingBase.map((i) => i.vin));
+  const awaiting = awaitingBase.map((i) => {
+    const c = awaitingCovers.get(i.vin);
+    return {
+      ...i,
+      cover: c?.cover ?? null,
+      hrs: c?.hrs ?? null,
+      usd: c?.usd ?? null,
+      lineCount: c?.lineCount ?? 0,
+    };
+  });
 
   // ----- byStatus -----
   const byStatus = {

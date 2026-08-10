@@ -399,7 +399,16 @@ export default function IntakeScreen({ showToast }) {
             <span style={{ color: 'var(--red)', fontWeight: 600, fontSize: 13 }}>All quotes ({recentQuotes.length}) →</span>
           </div>
           {recentQuotes.length > 5 && (
-            <input className="input" placeholder="Search VIN, stock, vehicle, estimator…" value={homeSearch} onChange={(e) => setHomeSearch(e.target.value)} />
+            <div style={{ position: 'relative' }}>
+              <span aria-hidden="true" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--red)', pointerEvents: 'none' }}>🔍</span>
+              <input
+                className="input"
+                style={{ paddingLeft: 38, background: '#fff', border: '2px solid var(--red)', borderRadius: 11, fontWeight: 600, boxShadow: '0 1px 4px rgba(176,50,42,.12)' }}
+                placeholder="Search VIN, stock, vehicle, estimator…"
+                value={homeSearch}
+                onChange={(e) => setHomeSearch(e.target.value)}
+              />
+            </div>
           )}
           {!recentQuotes.length ? (
             <div className="empty-note">No quotes yet — scan your first truck.</div>
@@ -411,17 +420,18 @@ export default function IntakeScreen({ showToast }) {
             ))
           )}
 
-          {/* Existing in-progress / completed intakes (kept for resume) */}
-          {homeRows.length > 0 && ['IN PROGRESS', 'COMPLETED'].map((label) => {
-            const rows = homeRows.filter((r) => (!!r.completedAt) === (label === 'COMPLETED'));
+          {/* In-progress intakes (resume). Completed intakes live under the
+              Vehicles tab's In-Take Quotes bucket, so they're omitted here. */}
+          {(() => {
+            const rows = homeRows.filter((r) => !r.completedAt);
             if (!rows.length) return null;
             return (
-              <div key={label}>
-                <div className="card-title" style={{ padding: '7px 2px' }}>{label} INTAKES · {rows.length}</div>
+              <div>
+                <div className="card-title" style={{ padding: '7px 2px' }}>IN PROGRESS INTAKES · {rows.length}</div>
                 {rows.map((r) => <IntakeHomeCard key={r.id} row={r} onClick={() => openExisting(r)} />)}
               </div>
             );
-          })}
+          })()}
         </div>
         {scanning && <VinScanner onDetected={(v, ok) => { setScanning(false); acceptVin(v, !ok); }} onCancel={() => setScanning(false)} />}
       </div>
@@ -608,11 +618,16 @@ export default function IntakeScreen({ showToast }) {
   );
 }
 
-function RecentQuoteCard({ quote: q, onClick }) {
+// Shared quote-list card (recent quotes on the landing + In-Take Quotes on the
+// Vehicles tab). Shows the first damage-line thumbnail when available.
+export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
   const hrs = q.totals?.hrs ?? q.hrs ?? 0;
   const usd = q.totals?.usd ?? q.usd ?? 0;
-  const lineCount = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls).length : 0;
-  const date = q.ts ? new Date(q.ts).toLocaleDateString() : (q.dateISO ? new Date(q.dateISO).toLocaleDateString() : '—');
+  const lineCount = Number.isFinite(q.lineCount)
+    ? q.lineCount
+    : Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls).length : 0;
+  const stamp = q.ts ?? q.completedAt ?? null;
+  const date = stamp ? new Date(stamp).toLocaleDateString() : (q.dateISO ? new Date(q.dateISO).toLocaleDateString() : '—');
   return (
     <button className="card" onClick={onClick} style={{ textAlign: 'left', width: '100%', cursor: 'pointer', padding: 13, display: 'flex', gap: 11, alignItems: 'center' }}>
       {q.cover ? (
@@ -621,7 +636,10 @@ function RecentQuoteCard({ quote: q, onClick }) {
         <div style={{ width: 46, height: 46, borderRadius: 8, flex: '0 0 auto', background: 'var(--panel)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted2)', fontSize: 18 }}>🚚</div>
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="oswald" style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{q.vehicle || 'Vehicle not decoded'}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span className="oswald" style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>{q.vehicle || 'Vehicle not decoded'}</span>
+          {badge && <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--gold)', padding: '2px 7px', borderRadius: 4, flex: '0 0 auto' }}>{badge}</span>}
+        </div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>{q.stock ? 'STOCK ' + q.stock + ' · ' : ''}{q.vin ? q.vin.slice(-8) : ''}</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 10px', fontSize: 10, color: 'var(--brown)', marginTop: 5 }}>
           <span>{date}</span>
@@ -629,6 +647,7 @@ function RecentQuoteCard({ quote: q, onClick }) {
           {hrs > 0 && <span>{hrs} hr</span>}
           {usd > 0 && <b>${Number(usd).toLocaleString()}</b>}
         </div>
+        {footer && <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>{footer}</div>}
       </div>
     </button>
   );

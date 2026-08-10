@@ -187,6 +187,43 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
     .filter((row) => row.vin.length >= 6);
 }
 
+// ---------- quote covers for the In-Take Quotes bucket ----------
+
+export type QuoteCover = { cover: string | null; hrs: number | null; usd: number | null; lineCount: number };
+
+/** Latest quote per VIN → its cover thumbnail (first damage-line thumb stored
+ *  as `data.cover`) plus hrs/usd/lineCount. Used to enrich the awaiting-QC
+ *  cards with a photo, mirroring the old all-quotes list. Read-only. */
+export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, QuoteCover>> {
+  const out = new Map<string, QuoteCover>();
+  const unique = [...new Set(vins.map((v) => String(v || "").trim().toUpperCase()).filter((v) => v.length >= 6))];
+  if (!unique.length) return out;
+  const res = await db.execute(sql`
+    SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, data
+    FROM quotes
+    WHERE UPPER(data->>'vin') = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+    ORDER BY UPPER(data->>'vin'), (data->>'ts')::bigint DESC
+  `);
+  for (const r of rowsOf(res)) {
+    const q = (r.data as any) || {};
+    const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
+    // Prefer the stored cover; fall back to the first line that has a thumb.
+    const cover =
+      typeof q.cover === "string" && q.cover
+        ? q.cover
+        : Array.isArray(q.lines)
+        ? (q.lines.find((l: any) => l && typeof l.thumb === "string" && l.thumb)?.thumb ?? null)
+        : null;
+    out.set(String(r.vin), {
+      cover: cover || null,
+      hrs: q.totals?.hrs ?? null,
+      usd: q.totals?.usd ?? null,
+      lineCount,
+    });
+  }
+  return out;
+}
+
 // ---------- route: read-only intake damage quote by VIN ----------
 
 /** Serves the vehicle-quote card. Same response shape as the old fleet

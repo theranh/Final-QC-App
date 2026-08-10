@@ -2,6 +2,8 @@
 // and Completed QC's (every vehicle with an inspection). Searchable by stock # or
 // VIN. All figures come from /api/dashboard (server-computed); this screen only renders.
 
+import { RecentQuoteCard } from './IntakeScreen';
+
 const FILTERS = [
   ['awaitingFinalQc', 'In-Take Quotes'],
   ['completed', "Completed QC's"],
@@ -64,28 +66,13 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <div
+            <RecentQuoteCard
               key={v.vin}
+              quote={v}
               onClick={() => onStartQc(v)}
-              style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {[v.stock, v.vehicle].filter(Boolean).join(' · ') || v.vin}
-                </span>
-                <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--gold)', padding: '2px 7px', borderRadius: 4, flex: '0 0 auto' }}>AWAITING QC</span>
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'baseline' }}>
-                <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>…{(v.vin || '').slice(-8)}</span>
-                <span style={{ flex: 1 }} />
-                {v.completedAt != null && (
-                  <span style={{ fontSize: 9.5, fontWeight: 600, color: 'var(--muted)' }}>
-                    intake {new Date(v.completedAt).toLocaleDateString()}
-                  </span>
-                )}
-              </div>
-              <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>Tap to start Final QC →</div>
-            </div>
+              badge="AWAITING QC"
+              footer="Tap to start Final QC →"
+            />
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
