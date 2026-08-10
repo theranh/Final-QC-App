@@ -19,40 +19,9 @@ const STATUS_META = {
 const usd = (v) =>
   v == null ? null : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
-// Whole-day age from a completion timestamp (ms) to now.
-function ageDays(completedAt) {
-  if (completedAt == null) return null;
-  const d = Math.floor((Date.now() - Number(completedAt)) / 86400000);
-  return d < 0 ? 0 : d;
-}
 
 // Green <3 days, yellow 3–6, red 7+.
-function ageColor(days) {
-  if (days == null) return 'var(--muted)';
-  if (days >= 7) return 'var(--red)';
-  if (days >= 3) return 'var(--amber)';
-  return 'var(--green)';
-}
 
-function AgeBadge({ completedAt }) {
-  const days = ageDays(completedAt);
-  if (days == null) return null;
-  return (
-    <span
-      style={{
-        fontSize: 8.5,
-        fontWeight: 700,
-        color: '#fff',
-        background: ageColor(days),
-        padding: '2px 7px',
-        borderRadius: 4,
-        flex: '0 0 auto',
-      }}
-    >
-      {days}d waiting
-    </span>
-  );
-}
 
 export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onStartQc }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
@@ -150,16 +119,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <div key={v.vin} style={{ position: 'relative' }}>
-              <RecentQuoteCard
-                quote={v}
-                onClick={() => onStartQc(v)}
-                badge="AWAITING QC"
-              />
-              <div style={{ position: 'absolute', top: 8, right: 8, pointerEvents: 'none' }}>
-                <AgeBadge completedAt={v.completedAt} />
-              </div>
-            </div>
+            <RecentQuoteCard key={v.vin} quote={v} onClick={() => onStartQc(v)} badge="AWAITING QC" />
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
