@@ -139,15 +139,9 @@
 /* ---------- bottom nav ---------- */
 .bottom-nav { flex: 0 0 auto; background: #fff; border-top: 1px solid var(--border); display: flex; padding: 8px 8px 12px; }
 .nav-tab { flex: 1; min-height: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; position: relative; background: none; border: none; font-family: inherit; }
-.nav-tab-icon { position: relative; width: 22px; height: 22px; flex: 0 0 auto; border: 2px solid var(--muted); background: transparent; }
-.nav-tab.active .nav-tab-icon { background: var(--red); border: none; }
-.nav-tab-icon.dash { border-radius: 4px; }
-.nav-tab-icon.vehicles { border-radius: 50%; }
-.nav-tab-icon.intake { border-radius: 8px; }
-.nav-tab-icon.inspect { border-radius: 6px; }
-.nav-tab-icon.records { border-radius: 50%; }
-.nav-tab-icon.reports { border-radius: 4px; }
-.nav-tab-icon.settings { border-radius: 8px; }
+.nav-tab-icon { position: relative; width: 24px; height: 24px; flex: 0 0 auto; color: var(--muted); display: flex; align-items: center; justify-content: center; transition: color 0.15s ease, transform 0.15s ease; }
+.nav-tab-icon svg { width: 100%; height: 100%; display: block; }
+.nav-tab.active .nav-tab-icon { color: var(--red); transform: translateY(-1px); }
 .nav-tab-label { font-size: 9px; font-weight: 700; color: var(--muted); }
 .nav-tab.active .nav-tab-label { color: var(--red); }
 .nav-badge {

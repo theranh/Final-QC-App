@@ -155,7 +155,6 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
                 quote={v}
                 onClick={() => onStartQc(v)}
                 badge="AWAITING QC"
-                footer="Tap to start Final QC →"
               />
               <div style={{ position: 'absolute', top: 8, right: 8, pointerEvents: 'none' }}>
                 <AgeBadge completedAt={v.completedAt} />
