@@ -23,6 +23,9 @@ const usd = (v) =>
 // Green <3 days, yellow 3–6, red 7+.
 
 
+// "mike smith" → "Mike Smith" (also after hyphens: "mary-jo" → "Mary-Jo").
+const titleCaseName = (s) => s.replace(/(^|[\s-])([a-zà-ö])/g, (m, sep, ch) => sep + ch.toUpperCase());
+
 export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onOpenIntake }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
@@ -39,12 +42,14 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
   const people = useMemo(() => {
     const src = bucket === 'awaitingFinalQc' ? dash?.awaiting || [] : dash?.vehicles || [];
     const key = bucket === 'awaitingFinalQc' ? 'estimator' : 'inspector';
-    const names = new Set();
+    // Keyed by lowercase so "mike" and "Mike" collapse to one entry, always
+    // displayed in Title Case.
+    const names = new Map();
     for (const r of src) {
-      const name = (r[key] || '').trim();
-      if (name) names.add(name);
+      const name = titleCaseName((r[key] || '').trim());
+      if (name && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
     }
-    return [...names].sort((a, b) => a.localeCompare(b));
+    return [...names.values()].sort((a, b) => a.localeCompare(b));
   }, [dash, bucket]);
 
   // If a data refresh drops the selected name from the current bucket, clear the
@@ -53,7 +58,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
     if (person && !people.includes(person)) setPerson('');
   }, [person, people]);
 
-  const matchPerson = (r, key) => !person || (r[key] || '').trim() === person;
+  const matchPerson = (r, key) => !person || (r[key] || '').trim().toLowerCase() === person.toLowerCase();
 
   const list = vehicles.filter((v) => {
     if (!matchPerson(v, 'inspector')) return false;

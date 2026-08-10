@@ -513,6 +513,16 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   // photos not yet analyzed: { id, thumb, base64, dataUrl }
   const [photos, setPhotos] = useState([]);
   const [walkOpen, setWalkOpen] = useState(false);
+  // Every photo already saved on the server for this quote — walk-arounds and
+  // damage close-ups alike — so a reopened quote shows the full photo set.
+  const [serverPhotos, setServerPhotos] = useState([]);
+  const [lightbox, setLightbox] = useState(null);
+  useEffect(() => {
+    if (!quoteId || walkOpen) return;
+    let live = true;
+    api.quotePhotos(quoteId).then((j) => { if (live) setServerPhotos(j?.photos || []); }).catch(() => {});
+    return () => { live = false; };
+  }, [quoteId, walkOpen, photos.length]);
   const [walkInitialMode, setWalkInitialMode] = useState('guided');
   // Flags / keep / notes (ported from the old app — persisted with the quote)
   const [flags, setFlags] = useState(() => (Array.isArray(prefill?.flags) ? prefill.flags.map((f) => ({ id: f.id, done: !!f.done })) : []));
@@ -1035,6 +1045,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         {step === 'photos' && (
           <PhotosStep
             photos={photos}
+            serverPhotos={serverPhotos}
+            onEnlarge={setLightbox}
             lineCount={lines.length}
             committed={!!committed}
             armedDelete={armedDelete}
@@ -1149,6 +1161,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         style={{ display: 'none' }}
       />
       {scanning && <VinScanner onDetected={onScannerHit} onCancel={() => setScanning(false)} />}
+      {lightbox && (
+        <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
+          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox}")` }} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1316,21 +1333,50 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 }
 
 /* ---------- photos step ---------- */
-function PhotosStep({ photos, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
+function PhotosStep({ photos, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
+  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
   return (
     <>
       <div className="card">
-        <div className="card-title">WALK-AROUND PHOTOS · {photos.length}</div>
+        <div className="card-title">WALK-AROUND PHOTOS · {walkShots.length}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Circle the truck and shoot everything — sides, corners, interior, wheels. Photos save automatically as you go.
         </div>
+        {walkShots.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+            {walkShots.map((p) => (
+              <img
+                key={p.id}
+                src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                alt={p.slot || 'walk-around photo'}
+                loading="lazy"
+                onClick={() => onEnlarge && onEnlarge(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
+              />
+            ))}
+          </div>
+        )}
         {!committed && <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onWalk}>📷 TAKE PHOTOS</button>}
       </div>
       <div className="card">
-        <div className="card-title">DAMAGE FOR THE QUOTE · {photos.length}</div>
+        <div className="card-title">DAMAGE FOR THE QUOTE · {Math.max(serverPhotos.length - walkShots.length, photos.length)}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Found damage? Take a close-up of each spot — these go to the AI for the body quote.
         </div>
+        {serverPhotos.length - walkShots.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+            {serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg') && !photos.some((lp) => lp.id === p.id)).map((p) => (
+              <img
+                key={p.id}
+                src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                alt="damage close-up"
+                loading="lazy"
+                onClick={() => onEnlarge && onEnlarge(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
+              />
+            ))}
+          </div>
+        )}
         {!committed && <><button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onDamage}>⚠ ADD DAMAGE CLOSE-UP</button>
           <button className="btn btn-outline-brown" style={{ marginTop: 8 }} onClick={onAdd}>Choose from device</button></>}
         {photos.length > 0 && (

@@ -114,6 +114,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       const qs = (j?.quotes || []).filter((q) => q && (intakeQuoteId ? q.id === intakeQuoteId : String(q.vin || '').toUpperCase() === intakeVin));
       const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
       if (!q) return setQuoteSummary(null);
+      // Backfill mileage from the linked quote when the intake has none, so
+      // the miles field is always populated when the quote knows it.
+      const cur = intakeRef.current;
+      if (cur && !String(cur.miles || '').trim() && String(q.miles || '').trim() && !cur.committedBy) {
+        saveIntake({ miles: String(q.miles) });
+      }
       const lines = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls) : [];
       api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, usd: q.totals?.usd || 0, photoCount: 0 }));
     }).catch(() => {});
@@ -310,6 +316,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   // Walk-around photos for the opened intake (thumbnails shown inline).
   // Refreshed when the camera closes so new shots appear immediately.
   const [intakePhotos, setIntakePhotos] = useState([]);
+  const [lightbox, setLightbox] = useState(null); // enlarged photo URL
   const photoQuoteId = intake?.quoteId ?? null;
   useEffect(() => {
     if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
@@ -553,7 +560,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                       src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
                       alt={p.slot || 'walk-around photo'}
                       loading="lazy"
-                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)' }}
+                      onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
                     />
                   ))}
                 </div>
@@ -612,6 +620,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       )}
       {walkOpen && (
         <WalkAroundCamera quoteId={intake.quoteId} committed={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
+      )}
+      {lightbox && (
+        <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
+          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox}")` }} />
+        </div>
       )}
     </div>
   );
