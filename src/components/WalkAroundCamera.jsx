@@ -27,9 +27,10 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
   const [mode, setMode] = useState(initialMode);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
-  const rotationRef = useRef(0);
   const [flash, setFlash] = useState(false);
   const [error, setError] = useState('');
+  const [landscape, setLandscape] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(orientation: landscape)').matches);
+  const [zoomCaps, setZoomCaps] = useState(null);
   const videoRef = useRef(null); const streamRef = useRef(null); const trackRef = useRef(null);
   const fileRef = useRef(null); const canvasRef = useRef(null);
   const progress = walkProgress(WALK_SLOTS, taken, skipped);
@@ -49,6 +50,7 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       streamRef.current = stream; trackRef.current = stream.getVideoTracks()[0];
       if (videoRef.current) videoRef.current.srcObject = stream;
       const caps = trackRef.current.getCapabilities ? trackRef.current.getCapabilities() : {};
+      setZoomCaps(caps.zoom || null);
       if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
     } catch { if (!cancelled) setError('Camera unavailable. Choose a photo from your device instead.'); }
     return () => { cancelled = true; };
@@ -60,29 +62,18 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
   }, [startCamera, stopCamera]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => {
-    const onMotion = (event) => {
-      const g = event.accelerationIncludingGravity;
-      if (!g) return;
-      if (Math.abs(g.x) > Math.abs(g.y)) rotationRef.current = g.x > 0 ? 90 : -90;
-      else rotationRef.current = g.y < 0 ? 0 : 180;
-    };
-    const enable = async () => {
-      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        try { if (await DeviceMotionEvent.requestPermission() !== 'granted') return; } catch { return; }
-      }
-      window.addEventListener('devicemotion', onMotion);
-    };
-    enable();
-    return () => window.removeEventListener('devicemotion', onMotion);
+    const mq = window.matchMedia?.('(orientation: landscape)');
+    if (!mq) return;
+    const onChange = (e) => setLandscape(e.matches);
+    mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+    return () => { mq.removeEventListener ? mq.removeEventListener('change', onChange) : mq.removeListener(onChange); };
   }, []);
   useEffect(() => {
     const track = trackRef.current; const caps = track?.getCapabilities?.();
     if (track && caps?.zoom) track.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoom)) }] }).catch(() => {});
   }, [zoom]);
 
-  const nativeZooms = trackRef.current?.getCapabilities?.().zoom
-    ? zooms.filter((z) => z >= trackRef.current.getCapabilities().zoom.min && z <= trackRef.current.getCapabilities().zoom.max)
-    : [];
+  const nativeZooms = zoomCaps ? zooms.filter((z) => z >= zoomCaps.min && z <= zoomCaps.max) : [];
   const shownZooms = nativeZooms.length ? nativeZooms : [1, 2, 3];
 
   const saveGuided = async (dataUrl) => {
@@ -106,15 +97,15 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     const video = videoRef.current; const canvas = canvasRef.current || document.createElement('canvas');
     const aspect = video.clientWidth / video.clientHeight; let w = video.videoWidth; let h = Math.round(w / aspect);
     if (h > video.videoHeight) { h = video.videoHeight; w = Math.round(h * aspect); }
-    const z = Math.max(1, zoomRef.current);
+    // Only digital zoom (crop) applies when the camera lacks native zoom;
+    // the video feed itself is already orientation-correct, so no rotation
+    // compensation is needed — rotating here corrupts captures.
+    const z = nativeZooms.length ? 1 : Math.max(1, zoomRef.current);
     w /= z; h /= z;
-    const angle = rotationRef.current * Math.PI / 180;
-    const outW = Math.max(1, Math.round(Math.abs(Math.cos(angle) * w) + Math.abs(Math.sin(angle) * h)));
-    const outH = Math.max(1, Math.round(Math.abs(Math.sin(angle) * w) + Math.abs(Math.cos(angle) * h)));
-    const scale = Math.min(1, MAX / Math.max(outW, outH));
-    canvas.width = Math.max(1, Math.round(outW * scale)); canvas.height = Math.max(1, Math.round(outH * scale));
-    const ctx = canvas.getContext('2d'); ctx.save(); ctx.translate(canvas.width / 2, canvas.height / 2); ctx.rotate(angle); ctx.scale(scale, scale);
-    ctx.drawImage(video, (video.videoWidth - w) / 2, (video.videoHeight - h) / 2, w, h, -w / 2, -h / 2, w, h); ctx.restore();
+    const scale = Math.min(1, MAX / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale)); canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, (video.videoWidth - w) / 2, (video.videoHeight - h) / 2, w, h, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     if (mode === 'damage') { if (!committed) onDamageCapture?.(dataUrl); }
     else await saveGuided(dataUrl);
@@ -133,11 +124,11 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
-      <div style={{ padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #3a362f' }}>
+      {(!landscape || mode === 'review') && <div style={{ padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #3a362f' }}>
         <button className="btn btn-outline" style={{ color: '#f5f3ee', borderColor: '#5c554b', width: 42, padding: 8 }} onClick={onClose}>×</button>
         <div style={{ flex: 1 }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : 'WALK-AROUND'}</div><div style={{ fontSize: 12, color: '#aaa092' }}>{mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured` : 'Found damage? Take a close-up of each spot — these go to the AI for the body quote.'}</div></div>
         {mode === 'guided' && <button className="btn btn-outline" style={{ color: '#f5f3ee', borderColor: '#5c554b', padding: '8px 10px' }} onClick={() => setMode('review')}>Review</button>}
-      </div>
+      </div>}
       {mode === 'review' ? (
         <div style={{ padding: 16, overflow: 'auto' }}>
           <div className="card-title" style={{ color: '#d9d2c4', marginBottom: 12 }}>SHOT LIST · {progress.captured} TAKEN · {progress.skipped} SKIPPED</div>
@@ -148,6 +139,12 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
       ) : (
         <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', justifyContent: 'center', background: '#080807' }}>
           {mode !== 'review' && <><video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} /><div style={{ position: 'absolute', top: 16, left: 16, right: 16, textAlign: 'center' }}>{mode === 'guided' ? <><div style={{ fontFamily: 'var(--font-display, sans-serif)', fontSize: 27, fontWeight: 700 }}>{slot.label}</div><div style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 4, color: '#d9d2c4' }}>{current + 1} / 24</div></> : <div style={{ fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}</div></>}
+          {landscape && (
+            <>
+              <button aria-label="Close camera" onClick={onClose} style={{ position: 'absolute', top: 'calc(10px + env(safe-area-inset-top))', left: 'calc(12px + env(safe-area-inset-left))', width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,255,255,.35)', background: 'rgba(0,0,0,.45)', color: '#f5f3ee', fontSize: 18 }}>×</button>
+              {mode === 'guided' && <button onClick={() => setMode('review')} style={{ position: 'absolute', top: 'calc(10px + env(safe-area-inset-top))', right: 'calc(12px + env(safe-area-inset-right))', borderRadius: 20, border: '1px solid rgba(255,255,255,.35)', background: 'rgba(0,0,0,.45)', color: '#f5f3ee', fontSize: 12, padding: '9px 14px' }}>Review</button>}
+            </>
+          )}
           {error && <div style={{ position: 'absolute', bottom: 120, left: 20, right: 20, padding: 12, borderRadius: 8, background: '#3a362f', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '16px 18px calc(18px + env(safe-area-inset-bottom))', background: 'linear-gradient(transparent, rgba(0,0,0,.85))' }}>
             <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginBottom: 14 }}>{shownZooms.map((z) => <button key={z} onClick={() => setZoom(z)} style={{ border: 0, borderRadius: 20, padding: '6px 9px', background: zoom === z ? '#b0322a' : '#332f2a', color: '#fff', fontSize: 11 }}>{z}×</button>)}</div>
