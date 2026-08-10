@@ -6,66 +6,13 @@ import VinScanner from './VinScanner';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 
-// Intake tab — the TR-INTAKE-V2 checklist, in-app. Replaces the old deep link
-// into the Body Quoter. Wording below is copied verbatim from the Quoter's
-// intakeSpec()/intakeRoSpec(); the persistence shape matches the old client.
+// Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
+// commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
+// which feeds the In-Take Quotes bucket. The persistence shape matches the old
+// client (a `steps` key may still exist in saved data for compat; it is no
+// longer rendered or required).
 
-// ---------- checklist spec (verbatim from the Quoter) ----------
-const INTAKE_SPEC = [
-  {
-    k: '1',
-    title: 'UVEye Scan',
-    tag: 'UVEYE',
-    intro: 'This is the first thing that happens. It creates the condition scan the whole intake hangs on.',
-    items: [
-      'Pull the truck through the UVEye machine — full body, undercarriage, and tire scan.',
-      'Tie the VIN to the scan right away, before moving on — so the scan attaches to the correct truck.',
-      'Glance at the scan for anything flagged (tires, damage, leaks) to carry into the walk-around.',
-    ],
-  },
-  {
-    k: '2',
-    title: 'vAuto Appraisal & Photos',
-    tag: 'VAUTO',
-    intro: 'Build the working record off the original appraisal, then document the truck as it sits.',
-    items: [
-      'Open vAuto and find the truck\u2019s original appraisal (click Appraisals, enter the last 6 of the VIN).',
-      'Click on the original appraisal, then click the 3 dots in the top-right corner and select \u201cCopy as New\u201d to create the working record.',
-      'Update the mileage to the actual odometer reading.',
-      'Add walk-around photos — see the shot list below.',
-      'Mark and photograph every damage or fix on the truck. If it needs work, it gets a photo.',
-      'Final step: click the 3 dots in the top-right corner again and click \u201cSave\u201d.',
-    ],
-  },
-  {
-    k: '3',
-    title: 'Body Quoter App',
-    tag: 'BODY QUOTER',
-    intro: 'Turn the damage into priced work the RO can quote from. In the app:',
-    items: [
-      'Scan or manually enter the VIN to start the quote.',
-      'Verify the truck information is correct.',
-      'Add the stock # and the Estimator.',
-      'Take and upload photos of the damage.',
-      'Confirm the quote is accurate and make any necessary adjustments.',
-      'Click the PDF button and attach the quote to the MDD card in the attachment file (Step 4).',
-    ],
-  },
-  {
-    k: '4',
-    title: 'Enter Everything in MDD',
-    tag: 'MDD',
-    intro: 'MDD is the finish line. This is where the RO gets written from — nothing should be missing.',
-    items: [
-      'Add the tasks the truck needs from the catalog, comparing against your walk-around (Body Shop, Bumper, PDR, Tires, Detail, etc.).',
-      'If emissions are not ready, add a Drive Cycle task.',
-      'Confirm the Body Quoter estimate PDF has been added to the MDD card.',
-      'Make sure all relevant flags are added to the vehicle card.',
-      'In Communications, spell out the body shop work in detail — note each damage, the specific panels affected, and exactly what needs to be repaired or replaced.',
-    ],
-  },
-];
-
+// ---------- RO-ready sign-off (verbatim from the Quoter) ----------
 const RO_SPEC = [
   'VIN tied to the UVEye scan',
   'Current mileage entered',
@@ -149,6 +96,8 @@ export default function IntakeScreen({ showToast }) {
   const [homeStock, setHomeStock] = useState('');
   const [homeMiles, setHomeMiles] = useState('');
   const [homeEstimator, setHomeEstimator] = useState('');
+  const [homeEstCustom, setHomeEstCustom] = useState(false);
+  const [estCustom, setEstCustom] = useState(false);
   const [homeMddTags, setHomeMddTags] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [recentQuotes, setRecentQuotes] = useState([]);
@@ -329,11 +278,6 @@ export default function IntakeScreen({ showToast }) {
   const [pinOpen, setPinOpen] = useState(false);
   const locked = !!(intake && intake.committedBy); // committed → read-only
 
-  const ikToggleStep = (k, idx) => {
-    if (!intake || locked) return;
-    const steps = { ...intake.steps, [k]: (intake.steps[k] || []).map((val, i) => (i === idx ? !val : val)) };
-    saveIntake({ steps });
-  };
   const ikToggleRo = (idx) => {
     if (!intake || locked) return;
     const roReady = (intake.roReady || []).map((val, i) => (i === idx ? !val : val));
@@ -355,17 +299,12 @@ export default function IntakeScreen({ showToast }) {
   const started = intake && cleanVin.length >= 6;
 
   // ---------- progress ----------
-  let overallDone = 0;
-  let overallTotal = 0;
-  if (intake) {
-    INTAKE_SPEC.forEach((sp) => {
-      const vals = intake.steps[sp.k] || [];
-      overallTotal += sp.items.length;
-      overallDone += sp.items.filter((_, i) => vals[i]).length;
-    });
-  }
-  const overallPct = overallTotal ? Math.round((overallDone / overallTotal) * 100) : 0;
+  // Progress and completion track the 9-item RO-ready sign-off, which is what
+  // gates completed_at on the server (PUT /api/quoter/intakes: roReady 9/9).
   const roDone = intake ? (intake.roReady || []).filter(Boolean).length : 0;
+  const overallDone = roDone;
+  const overallTotal = 9;
+  const overallPct = Math.round((roDone / 9) * 100);
   const complete = roDone === 9 || (intake && intake.completedAt);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
@@ -414,12 +353,12 @@ export default function IntakeScreen({ showToast }) {
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
                 <div className="field-label">ESTIMATOR</div>
-                <select className="input" value={knownEst ? homeEstimator : (homeEstimator ? '__custom' : '')} onChange={(e) => setHomeEstimator(e.target.value === '__custom' ? '' : e.target.value)}>
+                <select className="input" value={knownEst ? homeEstimator : (homeEstCustom || homeEstimator ? '__custom' : '')} onChange={(e) => { if (e.target.value === '__custom') { setHomeEstCustom(true); setHomeEstimator(''); } else { setHomeEstCustom(false); setHomeEstimator(e.target.value); } }}>
                   <option value="">Select name…</option>
                   {estimators.map((name) => <option key={name} value={name}>{name}</option>)}
                   <option value="__custom">Other / enter manually</option>
                 </select>
-                {(!knownEst) && <input className="input" style={{ marginTop: 6 }} value={homeEstimator} placeholder="Estimator name" onChange={(e) => setHomeEstimator(e.target.value)} />}
+                {(homeEstCustom || (homeEstimator && !knownEst)) && <input className="input" style={{ marginTop: 6 }} value={homeEstimator} placeholder="Estimator name" onChange={(e) => setHomeEstimator(e.target.value)} />}
               </div>
             </div>
           </div>
@@ -453,15 +392,6 @@ export default function IntakeScreen({ showToast }) {
               <button className="btn btn-outline" style={{ marginTop: 7 }} disabled={vin.length !== 17 || vinValid(vin)} onClick={() => acceptVin(vin, true)}>Use check digit override</button>
             </div>
           )}
-
-          {/* INTAKE CHECKLIST toggle → opens the manual-VIN entry to start the 4-step checklist */}
-          <button
-            className="btn"
-            style={{ height: 50, fontSize: 16, letterSpacing: 1, background: '#fff', border: '1.5px solid var(--border)', borderLeft: '5px solid var(--red)', color: 'var(--ink)', textAlign: 'left', justifyContent: 'flex-start' }}
-            onClick={() => setManualOpen(true)}
-          >
-            ☑ INTAKE CHECKLIST
-          </button>
 
           {/* RECENT QUOTES */}
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 8 }}>
@@ -532,7 +462,7 @@ export default function IntakeScreen({ showToast }) {
                   {overallPct}%
                 </span>
                 <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>
-                  {overallDone}/{overallTotal} steps done
+                  {overallDone}/{overallTotal} RO-ready
                 </span>
                 <span style={{ flex: 1 }} />
                 <span
@@ -592,12 +522,12 @@ export default function IntakeScreen({ showToast }) {
                 </div>
                 <div style={{ gridColumn: '1 / span 2' }}>
                   <div className="field-label">ESTIMATOR</div>
-                   <select disabled={locked} className="input" value={estimators.includes(intake.estimator) ? intake.estimator : (intake.estimator ? '__custom' : '')} onChange={(e) => saveIntake({ estimator: e.target.value === '__custom' ? '' : e.target.value })}>
+                   <select disabled={locked} className="input" value={estimators.includes(intake.estimator) ? intake.estimator : (estCustom || intake.estimator ? '__custom' : '')} onChange={(e) => { if (e.target.value === '__custom') { setEstCustom(true); saveIntake({ estimator: '' }); } else { setEstCustom(false); saveIntake({ estimator: e.target.value }); } }}>
                      <option value="">Select estimator…</option>
                      {estimators.map((name) => <option key={name} value={name}>{name}</option>)}
                      <option value="__custom">Other / enter manually</option>
                    </select>
-                    {(!estimators.includes(intake.estimator) || intake.estimator === '') && <input disabled={locked} className="input" style={{marginTop:6}} value={intake.estimator} placeholder="Estimator name" onChange={(e) => saveIntake({ estimator: e.target.value })} />}
+                    {(estCustom || (intake.estimator !== '' && !estimators.includes(intake.estimator))) && <input disabled={locked} className="input" style={{marginTop:6}} value={intake.estimator} placeholder="Estimator name" onChange={(e) => saveIntake({ estimator: e.target.value })} />}
                 </div>
                 <label style={{ gridColumn: '1 / span 2', display:'flex', alignItems:'center', gap:9, padding:'10px', border:'1px solid var(--border)', borderRadius:9, fontSize:12, fontWeight:600 }}>
                   <input type="checkbox" checked={!!intake.mddTags} disabled={locked} onChange={e => saveIntake({ mddTags: e.target.checked })} />
@@ -610,65 +540,23 @@ export default function IntakeScreen({ showToast }) {
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { await ensureIntakeQuote(); setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
             </div>
-            {quoteSummary && <div className="card" style={{borderLeft:'4px solid var(--red)'}}>
-              <div className="card-title">BODY QUOTE LINKED</div>
-              <div style={{display:'flex',justifyContent:'space-between',marginTop:8,fontSize:12,fontWeight:700}}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr</span><span>${Number(quoteSummary.usd).toLocaleString()}</span><span>{quoteSummary.photoCount} photos</span></div>
-              <button className="btn btn-outline-red" style={{marginTop:9}} onClick={() => { setQuoting(true); }}>REOPEN QUOTE</button>
-            </div>}
-
-            {/* step cards */}
-            {INTAKE_SPEC.map((sp, si) => {
-              const vals = intake.steps[sp.k] || [];
-              const done = sp.items.filter((_, i) => vals[i]).length;
-              const stepComplete = done === sp.items.length;
-              return (
-                <div className="card" key={sp.k}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                    <span
-                      className="oswald"
-                      style={{
-                        width: 26,
-                        height: 26,
-                        borderRadius: 7,
-                        background: stepComplete ? 'var(--green)' : 'var(--red)',
-                        color: '#fff',
-                        fontWeight: 700,
-                        fontSize: 13,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        flex: '0 0 auto',
-                      }}
-                    >
-                      {si + 1}
-                    </span>
-                    <span className="oswald" style={{ fontWeight: 600, fontSize: 15, flex: 1, minWidth: 0 }}>
-                      {sp.title}
-                    </span>
-                    <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--brown)', padding: '2px 6px', borderRadius: 4, flex: '0 0 auto' }}>
-                      {sp.tag}
-                    </span>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: stepComplete ? 'var(--green)' : 'var(--muted)', flex: '0 0 auto' }}>
-                      {done}/{sp.items.length}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.45, marginTop: 6 }}>{sp.intro}</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-                    {sp.items.map((text, i) => (
-                       <IkRow key={i} text={text} on={!!vals[i]} onToggle={locked ? null : () => ikToggleStep(sp.k, i)} />
-                    ))}
-                  </div>
-                  {sp.k === '3' && (
-                    <>
-                      <button className="btn btn-red" style={{ marginTop: 10 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={() => setQuoting(true)}>
-                        Open Body Quoter
-                      </button>
-                      {!intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags ? <div style={{fontSize:10,color:'var(--red)',marginTop:6}}>Complete stock #, miles, estimator, and confirm both MDD tags before opening the Body Quoter.</div> : null}
-                    </>
-                  )}
-                </div>
-              );
-            })}
+            {/* Body Quoter */}
+            <div className="card" style={quoteSummary ? { borderLeft: '4px solid var(--red)' } : undefined}>
+              <div className="card-title">{quoteSummary ? 'BODY QUOTE LINKED' : 'BODY QUOTER'}</div>
+              {quoteSummary ? (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 12, fontWeight: 700 }}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr</span><span>${Number(quoteSummary.usd).toLocaleString()}</span><span>{quoteSummary.photoCount} photos</span></div>
+                  <button className="btn btn-outline-red" style={{ marginTop: 9 }} onClick={() => { setQuoting(true); }}>REOPEN QUOTE</button>
+                </>
+              ) : (
+                <>
+                  <button className="btn btn-red" style={{ marginTop: 9 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={() => setQuoting(true)}>
+                    Open Body Quoter
+                  </button>
+                  {!intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags ? <div style={{ fontSize: 10, color: 'var(--red)', marginTop: 6 }}>Complete stock #, miles, estimator, and confirm both MDD tags before opening the Body Quoter.</div> : null}
+                </>
+              )}
+            </div>
 
             {/* RO-Ready check */}
             <div className="card">
