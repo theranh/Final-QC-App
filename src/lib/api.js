@@ -23,7 +23,7 @@ async function request(method, url, body) {
     /* non-JSON response */
   }
   if (!res.ok) {
-    const err = new Error((data && data.message) || `Request failed (${res.status})`);
+    const err = new Error((data && (data.message || data.error)) || `Request failed (${res.status})`);
     err.status = res.status;
     err.data = data;
     throw err;

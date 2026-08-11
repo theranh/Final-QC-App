@@ -1378,9 +1378,9 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 
 /* ---------- photos step ---------- */
 function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
-  // Walk shots are strictly the 24 guided slots — damage close-ups ('dmg…')
-  // and after-the-fact extras ('xtra…') are shown/counted apart from them.
-  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg') && !String(p.slot || '').startsWith('xtra'));
+  // All non-damage shots — guided slots and after-the-fact extras — are one
+  // walk-around set; only damage close-ups ('dmg…') are shown apart.
+  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
   return (
     <>
       {!damageFocus && <div className="card">

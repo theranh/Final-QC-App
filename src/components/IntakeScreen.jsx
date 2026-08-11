@@ -402,11 +402,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [intakePhotos, setIntakePhotos] = useState([]);
   // Damage close-ups (slots starting with "dmg") are shown apart from the
   // walk-around set so reviewers see truck condition vs. quoted damage.
-  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg') && !String(p.slot || '').startsWith('xtra'));
+  // Everything else — guided slots AND after-the-fact extras — is one
+  // walk-around set; only the 24 guided slots count toward the checklist.
+  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
   const damagePhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('dmg'));
-  // After-the-fact additions on a saved truck — kept apart from the 24-shot walk-around.
-  const extraPhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('xtra'));
-  const [lightbox, setLightbox] = useState(null); // enlarged photo URL
+  const slotPhotos = walkPhotos.filter((p) => !String(p.slot || '').startsWith('xtra'));
+  const [lightbox, setLightbox] = useState(null); // { url, id } of enlarged photo
   const photoQuoteId = intake?.quoteId ?? null;
   useEffect(() => {
     if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
@@ -604,7 +605,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
             {/* "What's left" progress strip — tap a step to jump to its card. */}
             {(() => {
               const truckDone = !!(intake.stock.trim() && String(intake.miles).trim() && intake.estimator.trim() && intake.mddTags);
-              const photosDone = walkPhotos.length >= 24;
+              const photosDone = slotPhotos.length >= 24;
               const quoteDone = !!quoteSummary;
               const notesDone = !!(quoteNotes || '').trim();
               if (locked) {
@@ -616,7 +617,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               }
               const steps = [
                 { label: 'Truck info', done: truckDone, state: truckDone ? '✓' : '—', ref: truckCardRef },
-                { label: 'Photos', done: photosDone, state: `${walkPhotos.length}/24`, ref: photosCardRef },
+                { label: 'Photos', done: photosDone, state: `${slotPhotos.length}/24`, ref: photosCardRef },
                 { label: 'Damage quote', done: quoteDone, state: quoteDone ? '✓' : '—', ref: quoteCardRef },
                 { label: 'Notes', done: notesDone, state: notesDone ? '✓' : '—', ref: notesCardRef },
               ];
@@ -682,7 +683,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               </div>
             </div>
             <div className="card" ref={photosCardRef}>
-              <div className="card-title">WALK-AROUND PHOTOS · {walkPhotos.length} / 24</div>
+              <div className="card-title">WALK-AROUND PHOTOS · {slotPhotos.length} / 24{walkPhotos.length > slotPhotos.length ? ` (+${walkPhotos.length - slotPhotos.length})` : ''}</div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
               {walkPhotos.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
@@ -692,34 +693,17 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                       src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
                       alt={p.slot || 'walk-around photo'}
                       loading="lazy"
-                      onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                      onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
                       style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
                     />
                   ))}
                 </div>
               )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
-              {extraPhotos.length > 0 && (
-                <>
-                  <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 10 }}>EXTRA PHOTOS · {extraPhotos.length}</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
-                    {extraPhotos.map((p) => (
-                      <img
-                        key={p.id}
-                        src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
-                        alt="extra photo"
-                        loading="lazy"
-                        onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
-                        style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
-                      />
-                    ))}
-                  </div>
-                </>
-              )}
               {/* Saved trucks can always ADD new photos after the fact —
                   each one is a brand-new picture; nothing saved is touched. */}
               {locked && intake.quoteId && !quoteRowRef.current?.committedBy && (
-                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD EXTRA PHOTOS</button>
+                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD PHOTOS</button>
               )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
@@ -762,7 +746,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                             src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
                             alt="damage photo"
                             loading="lazy"
-                            onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                            onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
                             style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--red)', cursor: 'pointer' }}
                           />
                         ))}
@@ -819,7 +803,36 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
-          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox}")` }} />
+          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox.url}")` }} />
+          {/* Photos stay deletable until the body quote is signed off (PIN commit). */}
+          {lightbox.id && !quoteRowRef.current?.committedBy && (
+            <button
+              className="btn btn-outline-red"
+              style={{ position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)', minWidth: 200 }}
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (!window.confirm('Delete this photo? This can’t be undone.')) return;
+                try {
+                  await api.deleteQuotePhoto({ id: lightbox.id });
+                  setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));
+                  setLightbox(null);
+                  showToast?.('Photo deleted');
+                } catch (err) {
+                  if (err?.status === 409) {
+                    // Someone signed off the quote since this screen loaded —
+                    // it's frozen now. Reflect that so the delete button hides.
+                    if (quoteRowRef.current) quoteRowRef.current.committedBy = quoteRowRef.current.committedBy || 'committed';
+                    setLightbox(null);
+                    showToast?.('This quote has been signed off — its photos are locked.');
+                  } else {
+                    showToast?.(err?.message || 'Couldn’t delete the photo');
+                  }
+                }
+              }}
+            >
+              🗑 DELETE PHOTO
+            </button>
+          )}
         </div>
       )}
     </div>
