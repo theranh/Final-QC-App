@@ -106,6 +106,17 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       .finally(() => setBusyId(null));
   };
 
+  const [repairBusy, setRepairBusy] = useState(false);
+  const runRepair = () => {
+    if (repairBusy) return;
+    setRepairBusy(true);
+    api
+      .repairImportedRechecks()
+      .then((r) => showToast(r.scanned === 0 ? 'Nothing to repair — all re-checks are complete ✓' : `Repaired ${r.rebuilt} re-check${r.rebuilt === 1 ? '' : 's'}, cleared ${r.cleared} ✓`))
+      .catch((err) => showToast('Repair failed: ' + err.message))
+      .finally(() => setRepairBusy(false));
+  };
+
   const addEmployee = () => {
     const email = newEmail.trim().toLowerCase();
     if (!email.endsWith('@truckranch.com')) {
@@ -435,6 +446,22 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                   </span>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">REPAIR MIGRATED RE-CHECKS</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Re-checks brought over from the old app are missing their open-items list, so they can’t be completed. This rebuilds the list from the saved checklist; migrated trucks with no failed items are marked cleared. Safe to run more than once.
+            </div>
+            <div
+              className={'btn btn-brown' + (repairBusy ? ' disabled' : '')}
+              style={{ marginTop: 9, height: 44, fontSize: 12, opacity: repairBusy ? 0.6 : 1 }}
+              onClick={runRepair}
+            >
+              {repairBusy ? 'Repairing…' : '🔧 Repair migrated re-checks'}
             </div>
           </div>
         )}

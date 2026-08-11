@@ -8,7 +8,11 @@ async function request(method, url, body) {
     body: body != null ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
-    const err = new Error('Signed out');
+    // Session expired (common on a phone PWA left open for weeks). Tell the
+    // app shell so it can swap to the sign-in screen instead of leaving dead
+    // buttons behind.
+    try { window.dispatchEvent(new Event('auth:expired')); } catch { /* SSR/test */ }
+    const err = new Error('Signed out — please sign in again');
     err.status = 401;
     throw err;
   }
@@ -43,6 +47,7 @@ export const api = {
   exportBackup: () => request('GET', '/api/export'),
   backupStatus: () => request('GET', '/api/backup-status'),
   employees: () => request('GET', '/api/employees'),
+  repairImportedRechecks: () => request('POST', '/api/admin/repair-imported-rechecks'),
   addEmployee: (payload) => request('POST', '/api/employees', payload),
   updateEmployee: (id, patch) => request('PATCH', `/api/employees/${id}`, patch),
   setEmployeePin: (id, pin) => request('POST', `/api/employees/${id}/pin`, { pin }),

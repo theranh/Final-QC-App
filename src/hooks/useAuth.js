@@ -46,5 +46,17 @@ export function useAuth() {
     refresh();
   }, [refresh]);
 
+  // Any API call that hits a 401 fires this event (see src/lib/api.js). Flip
+  // to signed_out so a long-lived phone PWA shows the sign-in screen instead
+  // of dead buttons once the session expires.
+  useEffect(() => {
+    const onExpired = () => {
+      genRef.current += 1; // cancel any in-flight refresh
+      setState({ status: 'signed_out', email: '', employee: null });
+    };
+    window.addEventListener('auth:expired', onExpired);
+    return () => window.removeEventListener('auth:expired', onExpired);
+  }, []);
+
   return { ...state, refresh };
 }

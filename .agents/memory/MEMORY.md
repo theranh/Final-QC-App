@@ -8,4 +8,5 @@
 - [Intake completion](intake-completion.md) — checklists removed; PIN commit alone sets completed_at and must invalidate the dashboard cache.
 - [iOS gravity rotation](ios-gravity-rotation.md) — accelerationIncludingGravity sign is flipped on iOS vs Android; normalize before camera rotation logic. Notes edits outside QuoteScreen must use the notes-only PATCH.
 - [Hours-only display](hours-only-display.md) — quote UI shows hours only; usd stays in saved data for tracker sync; awaiting list dedupes per VIN with IN PROGRESS badge.
+- [Migrated re-checks](migrated-rechecks.md) — imported open inspections lacked openItems; admin repair button rebuilds them; 401s in a stale PWA now force the sign-in screen via auth:expired event.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

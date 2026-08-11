@@ -965,4 +965,65 @@ export function registerAppRoutes(app: Express) {
       next(err);
     }
   });
+
+  // ---------- admin: repair migrated re-checks ----------
+  // Imported "open" inspections from the old app arrived without data.openItems,
+  // so the re-check screen has nothing to work against. Rebuild that list from
+  // the saved checklist (items marked "f"); rows with zero failed items were
+  // mislabeled during migration and are cleared as passed. Idempotent — rows
+  // that already have openItems are untouched.
+  app.post("/api/admin/repair-imported-rechecks", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const rows = await db
+        .select()
+        .from(inspections)
+        .where(sql`status = 'open' AND imported = true AND data->'openItems' IS NULL`);
+      let rebuilt = 0;
+      let cleared = 0;
+      for (const row of rows) {
+        const data: any = row.data || {};
+        const failItems: { cat: string; item: string; note: string; photos: string[] }[] = [];
+        for (const [cat, arr] of Object.entries(data.items || {})) {
+          if (!Array.isArray(arr)) continue;
+          for (const it of arr as any[]) {
+            if (it && it.mark === "f") {
+              failItems.push({ cat, item: String(it.item || ""), note: String(it.note || ""), photos: Array.isArray(it.photos) ? it.photos : [] });
+            }
+          }
+        }
+        const base = { ...data, rechecks: Array.isArray(data.rechecks) ? data.rechecks : [] };
+        const patch =
+          failItems.length === 0
+            ? { status: "cleared", data: { ...base, openItems: [], clearedTs: Date.now() } }
+            : { data: { ...base, openItems: failItems, clearedTs: base.clearedTs ?? null } };
+        // Re-assert eligibility in the UPDATE itself: if a concurrent repair
+        // (or an inspector re-check after one) already touched this row, our
+        // snapshot is stale and writing it back would clobber newer state.
+        const updated = await db
+          .update(inspections)
+          .set({
+            ...patch,
+            updatedById: emp.userId || String(emp.id),
+            updatedByEmail: emp.email,
+            updatedByName: emp.name,
+            updatedAt: new Date(),
+          })
+          .where(sql`${inspections.id} = ${row.id} AND status = 'open' AND imported = true AND data->'openItems' IS NULL`)
+          .returning({ id: inspections.id });
+        if (!updated.length) continue; // someone else repaired it first — skip
+        if (failItems.length === 0) cleared += 1;
+        else rebuilt += 1;
+        await audit(db, emp, "imported_recheck_repaired", {
+          inspectionId: row.id,
+          qcNumber: row.qcNumber,
+          details: failItems.length === 0 ? { cleared: true } : { openItems: failItems.length },
+        });
+      }
+      if (rows.length) invalidateDashboardCache();
+      res.json({ scanned: rows.length, rebuilt, cleared });
+    } catch (err) {
+      next(err);
+    }
+  });
 }
