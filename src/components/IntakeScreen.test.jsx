@@ -89,7 +89,8 @@ describe('IntakeScreen scan wiring', () => {
     render(<IntakeScreen showToast={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /scan vin/i }));
     expect(screen.queryByTestId('mock-scanner')).not.toBeInTheDocument();
-    expect(screen.getByText(/Needed before scanning/i)).toBeInTheDocument();
+    // Required fields are marked with a red asterisk instead of a hint line.
+    expect(screen.getAllByText('*').length).toBeGreaterThanOrEqual(4);
   });
 
 

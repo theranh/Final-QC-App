@@ -195,6 +195,21 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     return () => { clearInterval(t); window.removeEventListener('online', flush); };
   }, [uploadPhoto]);
 
+  // Extra photos (after-the-fact shots on a saved truck): each capture gets a
+  // fresh timestamped slot/id, so nothing existing can ever be overwritten.
+  const saveExtra = async (dataUrl) => {
+    if (committed) return;
+    const thumb = await dataUrlImage(dataUrl, 340, 0.7, 1);
+    // Timestamp + random tail: two shots in the same millisecond (fast
+    // double-tap) must never collide into one id and silently drop a photo.
+    const tag = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+    const slotKey = `xtra_${tag}`;
+    const id = `${quoteId}_x${tag}`.slice(0, 60);
+    setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
+    await uploadPhoto({ id, slotKey, dataUrl });
+  };
+  const extraShots = Object.keys(photos).filter((k) => k.startsWith('xtra_') && photos[k]);
+
   const saveGuided = async (dataUrl) => {
     if (committed) return;
     if (addOnly) {
@@ -280,6 +295,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     ctx.restore();
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     if (mode === 'damage') { if (!committed) onDamageCapture?.(dataUrl); }
+    else if (mode === 'extra') await saveExtra(dataUrl);
     else await saveGuided(dataUrl);
   };
   const onFile = async (event) => {
@@ -287,7 +303,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const reader = new FileReader(); reader.onload = async () => {
       if (committed) return;
       const normalized = await dataUrlImage(reader.result, MAX, 0.8, zoomRef.current);
-      if (mode === 'damage') onDamageCapture?.(normalized); else await saveGuided(normalized);
+      if (mode === 'damage') onDamageCapture?.(normalized); else if (mode === 'extra') await saveExtra(normalized); else await saveGuided(normalized);
     }; reader.readAsDataURL(file);
   };
   const damage = () => { if (!committed && !addOnly) setMode('damage'); };
@@ -309,6 +325,14 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       {lastShot ? <img src={lastShot} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 9 }} /> : <span style={{ color: '#aaa092', fontSize: 10 }}>SHOTS</span>}
       {progress.captured > 0 && <span style={{ position: 'absolute', right: -6, top: -6, background: '#b0322a', color: '#fff', fontWeight: 700, fontSize: 12, minWidth: 20, height: 20, lineHeight: '20px', borderRadius: 10, padding: '0 4px' }}>{progress.captured}</span>}
     </button>
+  );
+  // Extra mode's bottom-left: last extra shot + count (display only).
+  const lastExtra = extraShots.length ? photos[extraShots[extraShots.length - 1]]?.thumb : null;
+  const extraThumb = (
+    <div aria-label="Extra photos taken" style={{ position: 'relative', flex: 'none', width: 64, height: 64, border: '2px solid #fff', borderRadius: 12, background: '#000', overflow: 'visible' }}>
+      {lastExtra ? <img src={lastExtra} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 9 }} /> : <span style={{ color: '#aaa092', fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>EXTRAS</span>}
+      {extraShots.length > 0 && <span style={{ position: 'absolute', right: -6, top: -6, background: '#b0322a', color: '#fff', fontWeight: 700, fontSize: 12, minWidth: 20, height: 20, lineHeight: '20px', borderRadius: 10, padding: '0 4px' }}>{extraShots.length}</span>}
+    </div>
   );
   // Zoom selector mirroring the native iPhone camera: plain white numbers
   // floating over the image; only the selected zoom gets a dark circle with
@@ -346,9 +370,10 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
         <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>×</button>
-        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : 'Close-ups go to the AI for the body quote.'}</div></div>
+        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : mode === 'extra' ? 'EXTRA PHOTOS' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${extraShots.length} added${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : 'Close-ups go to the AI for the body quote.'}</div></div>
         {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
+      {mode === 'extra' && !landscape && <div style={{ padding: '6px 14px', background: '#000', flex: 'none', textAlign: 'center', fontSize: 11, color: '#aaa092' }}>Every shot is added as a new photo — nothing already saved is touched.</div>}
       {mode === 'review' ? (
         <div style={{ padding: 16, overflow: 'auto' }}>
           <div className="card-title" style={{ color: '#d9d2c4', marginBottom: 12 }}>SHOT LIST · {progress.captured} TAKEN · {progress.skipped} SKIPPED</div>
@@ -365,7 +390,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
             <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>✕</button>
             {zoomDial(true)}
             {shutterBtn}
-            {mode === 'damage' ? <button style={chromeBtn} onClick={skipOrCancel}>CANCEL</button> : galleryBtn}
+            {mode === 'damage' ? <button style={chromeBtn} onClick={skipOrCancel}>CANCEL</button> : mode === 'extra' ? extraThumb : galleryBtn}
           </div>
           {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}
         </div>
@@ -375,7 +400,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
           <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
           <div style={{ flex: 'none', padding: '12px 18px calc(16px + env(safe-area-inset-bottom))', background: '#000' }}>
             <div style={{ display: 'flex', alignItems: 'center' }}>
-              {mode === 'damage' ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>CANCEL</button> : galleryBtn}
+              {mode === 'damage' ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>CANCEL</button> : mode === 'extra' ? extraThumb : galleryBtn}
               <span style={{ flex: 1 }} />
               {shutterBtn}
               <span style={{ flex: 1 }} />

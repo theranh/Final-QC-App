@@ -1378,7 +1378,9 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 
 /* ---------- photos step ---------- */
 function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
-  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
+  // Walk shots are strictly the 24 guided slots — damage close-ups ('dmg…')
+  // and after-the-fact extras ('xtra…') are shown/counted apart from them.
+  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg') && !String(p.slot || '').startsWith('xtra'));
   return (
     <>
       {!damageFocus && <div className="card">
@@ -1403,11 +1405,11 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge,
         {!committed && <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onWalk}>📷 TAKE PHOTOS</button>}
       </div>}
       <div className="card">
-        <div className="card-title">DAMAGE PHOTOS · {Math.max(serverPhotos.length - walkShots.length, photos.length)}</div>
+        <div className="card-title">DAMAGE PHOTOS · {Math.max(serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg')).length, photos.length)}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Take a close-up of each damage spot — these go to the AI for the body quote.
         </div>
-        {serverPhotos.length - walkShots.length > 0 && (
+        {serverPhotos.some((p) => String(p.slot || '').startsWith('dmg')) && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg') && !photos.some((lp) => lp.id === p.id)).map((p) => (
               <img

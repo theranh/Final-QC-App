@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireEmployee } from "./access";
 import { corrections, intakes, photos, quotes, settings } from "@shared/schema";
+import { bestWalkPhotoIds } from "./localQuote";
 
 // ---------------------------------------------------------------------------
 // Body Quoter API, ported from the old standalone server (attached_assets/
@@ -119,11 +120,15 @@ export function registerQuoterRoutes(app: Express) {
     guard(async (_req, res) => {
       const [st, qs, cs] = await Promise.all([
         db.execute(sql`SELECT key, value FROM settings`),
-        db.execute(sql`SELECT data FROM quotes ORDER BY updated_at DESC LIMIT 300`),
+        db.execute(sql`SELECT id, data FROM quotes ORDER BY updated_at DESC LIMIT 300`),
         db.execute(sql`SELECT ts, diffs FROM corrections ORDER BY id DESC LIMIT 200`),
       ]);
       const settingsMap: Record<string, unknown> = {};
       for (const r of st.rows as any[]) settingsMap[r.key] = r.value;
+      // Card thumbnails: the earliest walk-around shot wins (front driver
+      // corner, else next in line); the stored damage-thumb cover is only a
+      // fallback for trucks with no walk photos at all.
+      const walkCovers = await bestWalkPhotoIds((qs.rows as any[]).map((r) => String(r.id)));
       res.set("Cache-Control", "no-store");
       res.json({
         rates: (settingsMap as any).rates || null,
@@ -133,7 +138,10 @@ export function registerQuoterRoutes(app: Express) {
               hasPin: !!e.pin,
             }))
           : null,
-        quotes: (qs.rows as any[]).map((r) => r.data),
+        quotes: (qs.rows as any[]).map((r) => {
+          const walk = walkCovers.get(String(r.id));
+          return walk ? { ...r.data, cover: `/api/quoter/photo?id=${encodeURIComponent(walk.id)}` } : r.data;
+        }),
         corrections: cs.rows,
       });
     }),

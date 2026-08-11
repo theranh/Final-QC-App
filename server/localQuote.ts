@@ -214,6 +214,27 @@ const WALK_SLOT_ORDER = [
   "whl_lf", "trd_lf", "whl_lr", "trd_lr", "whl_rr", "trd_rr", "whl_rf", "trd_rf",
 ];
 
+/** For each quote id, the EARLIEST existing walk-around photo in shooting
+ *  order — front driver corner first, then on around the truck. Damage
+ *  close-ups and extras never qualify. One metadata-only query. */
+export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, { id: string; rank: number }>> {
+  const bestWalk = new Map<string, { id: string; rank: number }>();
+  const unique = [...new Set(quoteIds.filter(Boolean))];
+  if (!unique.length) return bestWalk;
+  const pr = await db.execute(sql`
+    SELECT id, quote_id, slot FROM photos
+    WHERE quote_id = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+  `);
+  for (const p of rowsOf(pr)) {
+    const rank = WALK_SLOT_ORDER.indexOf(String(p.slot));
+    if (rank < 0) continue; // not a walk-around slot (e.g. damage close-up)
+    const qid = String(p.quote_id);
+    const prev = bestWalk.get(qid);
+    if (!prev || rank < prev.rank) bestWalk.set(qid, { id: String(p.id), rank });
+  }
+  return bestWalk;
+}
+
 /** Latest quote per VIN → its cover thumbnail (first damage-line thumb stored
  *  as `data.cover`) plus hrs/usd/lineCount. Used to enrich the awaiting-QC
  *  cards with a photo, mirroring the old all-quotes list. Read-only. */
@@ -222,37 +243,18 @@ export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, Quot
   const unique = [...new Set(vins.map((v) => String(v || "").trim().toUpperCase()).filter((v) => v.length >= 6))];
   if (!unique.length) return out;
   const res = await db.execute(sql`
-    SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, data
+    SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, id, data
     FROM quotes
     WHERE UPPER(data->>'vin') = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
     ORDER BY UPPER(data->>'vin'), (data->>'ts')::bigint DESC
   `);
   const rows = rowsOf(res);
-  // The card thumbnail should be the EARLIEST walk-around shot in the guided
-  // order — front driver corner first, then on around the truck. If the first
-  // shot is missing, use the next one in line (per the user: never jump to a
-  // damage close-up while any walk photo exists). Walk photos live in the
-  // photos table under deterministic ids `<quoteId>_<slotKey>`, so one query
-  // over the quote ids finds every truck's earliest available shot.
-  const quoteIds = rows.map((r) => String((r.data as any)?.id || "")).filter(Boolean);
-  const bestWalk = new Map<string, { id: string; rank: number }>(); // quoteId → earliest walk photo
-  if (quoteIds.length) {
-    const pr = await db.execute(sql`
-      SELECT id, quote_id, slot FROM photos
-      WHERE quote_id = ANY(${sql.raw(`ARRAY[${quoteIds.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
-    `);
-    for (const p of rowsOf(pr)) {
-      const rank = WALK_SLOT_ORDER.indexOf(String(p.slot));
-      if (rank < 0) continue; // not a walk-around slot (e.g. damage close-up)
-      const qid = String(p.quote_id);
-      const prev = bestWalk.get(qid);
-      if (!prev || rank < prev.rank) bestWalk.set(qid, { id: String(p.id), rank });
-    }
-  }
+  // Use the DB row id (authoritative), not data->>'id' which can be absent.
+  const bestWalk = await bestWalkPhotoIds(rows.map((r) => String(r.id || "")).filter(Boolean));
   for (const r of rows) {
     const q = (r.data as any) || {};
     const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
-    const walkId = bestWalk.get(String(q.id || ""))?.id;
+    const walkId = bestWalk.get(String(r.id || ""))?.id;
     // Prefer the earliest walk-around shot; only a truck with NO walk photos
     // at all falls back to the stored cover / first damage-line thumb.
     const cover = walkId

@@ -77,6 +77,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
   const [walkOpen, setWalkOpen] = useState(false);
+  const [walkMode, setWalkMode] = useState('guided'); // 'guided' | 'extra' (after-the-fact additions)
   const [, setDecoding] = useState(false);
   const [estimators, setEstimators] = useState([]);
   const [quoteSummary, setQuoteSummary] = useState(null);
@@ -401,8 +402,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [intakePhotos, setIntakePhotos] = useState([]);
   // Damage close-ups (slots starting with "dmg") are shown apart from the
   // walk-around set so reviewers see truck condition vs. quoted damage.
-  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
+  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg') && !String(p.slot || '').startsWith('xtra'));
   const damagePhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('dmg'));
+  // After-the-fact additions on a saved truck — kept apart from the 24-shot walk-around.
+  const extraPhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('xtra'));
   const [lightbox, setLightbox] = useState(null); // enlarged photo URL
   const photoQuoteId = intake?.quoteId ?? null;
   useEffect(() => {
@@ -456,15 +459,15 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
             <div className="card-title">QUOTE DETAILS</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
               <div>
-                <div className="field-label">STOCK #</div>
+                <div className="field-label">STOCK # <span style={{ color: 'var(--red)' }}>*</span></div>
                 <input className="input mono" value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
               </div>
               <div>
-                <div className="field-label">MILES</div>
+                <div className="field-label">MILES <span style={{ color: 'var(--red)' }}>*</span></div>
                 <input className="input mono" value={homeMiles} inputMode="numeric" placeholder="e.g. 45000" onChange={(e) => setHomeMiles(e.target.value.replace(/[^0-9]/g, ''))} />
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
-                <div className="field-label">ESTIMATOR</div>
+                <div className="field-label">ESTIMATOR <span style={{ color: 'var(--red)' }}>*</span></div>
                 <select className="input" value={knownEst ? homeEstimator : (homeEstCustom || homeEstimator ? '__custom' : '')} onChange={(e) => { if (e.target.value === '__custom') { setHomeEstCustom(true); setHomeEstimator(''); } else { setHomeEstCustom(false); setHomeEstimator(e.target.value); } }}>
                   <option value="">Select name…</option>
                   {estimators.map((name) => <option key={name} value={name}>{name}</option>)}
@@ -478,7 +481,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
           {/* MDD tags */}
           <label className="card" style={{ display: 'flex', alignItems: 'center', gap: 11, cursor: 'pointer' }}>
             <input type="checkbox" checked={homeMddTags} onChange={(e) => setHomeMddTags(e.target.checked)} style={{ width: 22, height: 22, flex: 'none', accentColor: 'var(--red)', cursor: 'pointer' }} />
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Are both Key &amp; Vehicle MDD tags present?</span>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Are both Key &amp; Vehicle MDD tags present? <span style={{ color: 'var(--red)' }}>*</span></span>
           </label>
 
           {/* SCAN VIN — only once the quote details above are filled in */}
@@ -493,16 +496,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
           >
             <span aria-hidden="true">📷</span> SCAN VIN
           </button>
-          {!homeReady && <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center', marginTop: -6 }}>Needed before scanning: {missing.join(' · ')}</div>}
 
-          {/* OR divider */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-            <span className="oswald" style={{ fontWeight: 600, fontSize: 12, letterSpacing: 2, color: 'var(--muted)' }}>OR</span>
-            <span style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-          </div>
-
-          {/* ENTER VIN MANUALLY */}
+          {/* ENTER VIN MANUALLY — right under the scan button */}
           <button className="btn btn-outline-brown" style={{ height: 50, fontSize: 16, letterSpacing: 1 }} onClick={() => setManualOpen((v) => !v)}>ENTER VIN MANUALLY</button>
           {manualOpen && (
             <div className="card">
@@ -709,9 +704,31 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                   offered while the body quote itself isn't signed off. */}
               {locked && intake.quoteId && !quoteRowRef.current?.committedBy && walkPhotos.length < 24 && (
                 <>
-                  <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => setWalkOpen(true)}>+ ADD MISSING PHOTOS ({24 - walkPhotos.length} spots open)</button>
+                  <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('guided'); setWalkOpen(true); }}>+ ADD MISSING PHOTOS ({24 - walkPhotos.length} spots open)</button>
                   <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 5 }}>Only empty spots can be filled — photos already saved can’t be changed.</div>
                 </>
+              )}
+              {extraPhotos.length > 0 && (
+                <>
+                  <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 10 }}>EXTRA PHOTOS · {extraPhotos.length}</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
+                    {extraPhotos.map((p) => (
+                      <img
+                        key={p.id}
+                        src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                        alt="extra photo"
+                        loading="lazy"
+                        onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                        style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+              {/* Saved trucks can always ADD new photos after the fact —
+                  each one is a brand-new picture; nothing saved is touched. */}
+              {locked && intake.quoteId && !quoteRowRef.current?.committedBy && (
+                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD EXTRA PHOTOS</button>
               )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
@@ -807,7 +824,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         />
       )}
       {walkOpen && (
-        <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
+        <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkMode('guided'); }} showToast={showToast} />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
