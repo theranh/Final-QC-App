@@ -663,8 +663,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </div>
               )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
-              <div style={{ marginTop: 10 }}>
-                <div className="field-label">NOTES</div>
+            </div>
+            {/* Notes — its own card so it stands apart from the photo grid. */}
+            <div className="card" style={{ borderLeft: '4px solid var(--amber)' }}>
+              <div className="card-title">NOTES</div>
+              <div style={{ marginTop: 8 }}>
                 {locked || quoteRowRef.current?.committedBy ? (
                   (quoteNotes || '').trim()
                     ? <div style={{ padding: '9px 11px', borderRadius: 9, background: 'var(--panel)', border: '1px solid var(--border)', fontSize: 12.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{quoteNotes.trim()}</div>
