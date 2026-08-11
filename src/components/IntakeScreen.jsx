@@ -301,6 +301,24 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     setIntake((s) => s ? { ...s, quoteId: canonical } : s);
     return canonical;
   };
+  // Same as ensureIntakeQuote, but explains failures with a toast instead of
+  // dying silently (the camera/quote buttons looked "dead" otherwise).
+  // Returns the quote id on success, null on failure.
+  const ensureIntakeQuoteWithFeedback = async () => {
+    try {
+      return await ensureIntakeQuote();
+    } catch (e) {
+      if (e?.status === 409) {
+        showToast?.('This intake was already committed — it is locked. Refreshing…');
+        refreshFromServer(intake.vin);
+      } else if (e?.status === 401) {
+        showToast?.('You are signed out — sign in again first.');
+      } else {
+        showToast?.('Could not reach the server — check your connection and try again.');
+      }
+      return null;
+    }
+  };
   const decodeIntake = useCallback(async (v) => {
     // Read vehicle through the ref so this callback stays stable — otherwise
     // every keystroke in the vehicle field would recreate it.
@@ -610,7 +628,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                   ))}
                 </div>
               )}
-              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { await ensureIntakeQuote(); setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
               <div style={{ marginTop: 10 }}>
                 <div className="field-label">NOTES</div>
                 {locked || quoteRowRef.current?.committedBy ? (
@@ -643,7 +661,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </>
               ) : (
                 <>
-                  <button className="btn btn-red" style={{ marginTop: 9 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={async () => { await ensureIntakeQuote(); setQuoting('photos'); }}>
+                  <button className="btn btn-red" style={{ marginTop: 9 }} disabled={locked || !intake.stock.trim() || !String(intake.miles).trim() || !intake.estimator.trim() || !intake.mddTags} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setQuoting('photos'); }}>
                     Photo Damage
                   </button>
                   <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>Take close-ups of each damage spot, then run the assessment for hours &amp; price.</div>
