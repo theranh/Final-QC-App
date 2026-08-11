@@ -622,12 +622,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 { label: 'Notes', done: notesDone, state: notesDone ? '✓' : '—', ref: notesCardRef },
               ];
               return (
-                <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', gap: 6, padding: '7px 8px', borderRadius: 10, background: 'var(--panel, #fff)', border: '1px solid var(--border)', boxShadow: '0 2px 6px rgba(0,0,0,.06)', overflowX: 'auto' }}>
+                <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, padding: '7px 8px', borderRadius: 10, background: 'var(--panel, #fff)', border: '1px solid var(--border)', boxShadow: '0 2px 6px rgba(0,0,0,.06)' }}>
                   {steps.map((s) => (
                     <button
                       key={s.label}
                       onClick={() => scrollToCard(s.ref)}
-                      style={{ flex: '1 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, padding: '5px 9px', borderRadius: 8, border: '1px solid ' + (s.done ? 'var(--green)' : 'var(--border)'), background: s.done ? '#e8f3ea' : '#fff', color: s.done ? 'var(--green)' : 'var(--muted)', fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, padding: '7px 6px', minHeight: 34, borderRadius: 8, border: '1px solid ' + (s.done ? 'var(--green)' : 'var(--border)'), background: s.done ? '#e8f3ea' : '#fff', color: s.done ? 'var(--green)' : 'var(--muted)', fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden' }}
                     >
                       <span>{s.label}</span>
                       <span className="mono" style={{ fontWeight: 700 }}>{s.state}</span>
@@ -807,8 +807,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
           {/* Photos stay deletable until the body quote is signed off (PIN commit). */}
           {lightbox.id && !quoteRowRef.current?.committedBy && (
             <button
-              className="btn btn-outline-red"
-              style={{ position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)', minWidth: 200 }}
+              className="btn btn-outline-red lightbox-action"
               onClick={async (e) => {
                 e.stopPropagation();
                 if (!window.confirm('Delete this photo? This can’t be undone.')) return;

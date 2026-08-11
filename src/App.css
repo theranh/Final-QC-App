@@ -156,10 +156,12 @@
   padding: 12px 14px; font-size: 12px; font-weight: 600; z-index: 60; box-shadow: 0 8px 24px rgba(38, 34, 32, 0.3); text-align: center;
 }
 .lightbox-overlay {
-  position: absolute; inset: 0; background: rgba(38, 34, 32, 0.88); z-index: 80; display: flex; align-items: center;
-  justify-content: center; padding: 20px; cursor: pointer;
+  position: absolute; inset: 0; background: rgba(38, 34, 32, 0.88); z-index: 80; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px; cursor: pointer;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
 }
-.lightbox-img { width: 100%; height: 100%; background-size: contain; background-position: center; background-repeat: no-repeat; }
+.lightbox-img { flex: 1; min-height: 0; width: 100%; background-size: contain; background-position: center; background-repeat: no-repeat; }
+.lightbox-action { flex: none; align-self: center; width: min(260px, 100%); }
 
 /* ---------- signature pad ---------- */
 .sig-pad { margin-top: 6px; position: relative; border: 1.5px dashed var(--muted2); border-radius: 9px; background: #fdfcfb; overflow: hidden; }
