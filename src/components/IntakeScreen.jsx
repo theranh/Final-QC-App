@@ -203,6 +203,25 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     }
   }, []);
 
+  // Server payload for an intake row (shared by autosave and the repair path).
+  const intakePayload = (it) => ({
+    id: it.id,
+    vin: it.vin,
+    stock: it.stock,
+    vehicle: it.vehicle,
+    miles: it.miles,
+    estimator: it.estimator,
+    quoteId: it.quoteId || null,
+    ts: it.ts,
+    data: {
+      steps: { 1: it.steps[1], 2: it.steps[2], 3: it.steps[3], 4: it.steps[4] },
+      roReady: it.roReady,
+      photoCount: 0,
+      notes: it.notes || '',
+      mddTags: !!it.mddTags,
+    },
+  });
+
   // Persist every change: cache locally, then push to the server (unless noPush).
   const saveIntake = useCallback((patch, opts) => {
     const noPush = !!(opts && opts.noPush);
@@ -213,23 +232,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       saveToCache(next);
       if (!noPush && String(next.vin || '').length >= 6) {
         api
-          .putIntake({
-            id: next.id,
-            vin: next.vin,
-            stock: next.stock,
-            vehicle: next.vehicle,
-            miles: next.miles,
-            estimator: next.estimator,
-            quoteId: next.quoteId || null,
-            ts: next.ts,
-            data: {
-              steps: { 1: next.steps[1], 2: next.steps[2], 3: next.steps[3], 4: next.steps[4] },
-              roReady: next.roReady,
-              photoCount: 0,
-              notes: next.notes || '',
-              mddTags: !!next.mddTags,
-            },
-          })
+          .putIntake(intakePayload(next))
           .catch(() => {
             /* offline — the local cache keeps the work for resume */
           });
@@ -309,6 +312,33 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       return await ensureIntakeQuote();
     } catch (e) {
       if (e?.status === 409) {
+        // 409 means "committed or not found". Repair by VIN, never blindly:
+        // another phone may already own this VIN's server row under a
+        // different id, and re-pushing ours would split the truck across two
+        // rows. So: adopt an existing uncommitted VIN row (link against its
+        // id), stop on a committed one, and only re-push our row when the
+        // server has no row for this VIN at all (first save never landed).
+        try {
+          const cur = intakeRef.current;
+          if (cur && String(cur.vin || '').length >= 6) {
+            const j = await api.getIntake(cur.vin).catch(() => null);
+            if (j?.found && j.id) {
+              if (j.committedBy) {
+                showToast?.('This intake was already committed — it is locked. Refreshing…');
+                refreshFromServer(cur.vin);
+                return null;
+              }
+              if (j.quoteId) { refreshFromServer(cur.vin); return j.quoteId; }
+              const qid = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
+              const r = await api.linkIntakeQuote(j.id, qid);
+              const canonical = r?.quoteId || qid;
+              setIntake((s) => (s ? { ...s, id: j.id, quoteId: canonical } : s));
+              return canonical;
+            }
+            await api.putIntake(intakePayload(cur));
+            return await ensureIntakeQuote();
+          }
+        } catch { /* fall through to the committed message */ }
         showToast?.('This intake was already committed — it is locked. Refreshing…');
         refreshFromServer(intake.vin);
       } else if (e?.status === 401) {

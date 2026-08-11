@@ -217,12 +217,31 @@ export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, Quot
     WHERE UPPER(data->>'vin') = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
     ORDER BY UPPER(data->>'vin'), (data->>'ts')::bigint DESC
   `);
-  for (const r of rowsOf(res)) {
+  const rows = rowsOf(res);
+  // The card thumbnail should always be the first walk-around shot — the
+  // front driver-side corner — when it exists. Those photos live in the
+  // photos table under the deterministic id `<quoteId>_ext_fd_corner`, so one
+  // existence check per quote tells us whether to point the card at it.
+  const cornerIds = rows
+    .map((r) => `${String((r.data as any)?.id || "")}_ext_fd_corner`.slice(0, 60))
+    .filter((id) => id.length > "_ext_fd_corner".length);
+  const haveCorner = new Set<string>();
+  if (cornerIds.length) {
+    const pr = await db.execute(sql`
+      SELECT id FROM photos
+      WHERE id = ANY(${sql.raw(`ARRAY[${cornerIds.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+    `);
+    for (const p of rowsOf(pr)) haveCorner.add(String(p.id));
+  }
+  for (const r of rows) {
     const q = (r.data as any) || {};
     const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
-    // Prefer the stored cover; fall back to the first line that has a thumb.
-    const cover =
-      typeof q.cover === "string" && q.cover
+    const cornerId = `${String(q.id || "")}_ext_fd_corner`.slice(0, 60);
+    // Prefer the front driver-corner walk-around shot, then the stored cover
+    // (first damage-line thumb), then the first line that has a thumb.
+    const cover = haveCorner.has(cornerId)
+      ? `/api/quoter/photo?id=${encodeURIComponent(cornerId)}`
+      : typeof q.cover === "string" && q.cover
         ? q.cover
         : Array.isArray(q.lines)
         ? (q.lines.find((l: any) => l && typeof l.thumb === "string" && l.thumb)?.thumb ?? null)

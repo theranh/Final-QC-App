@@ -74,12 +74,16 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     const g = e.accelerationIncludingGravity;
     if (g && (g.x != null)) gravRef.current = { x: g.x, y: g.y, t: Date.now() };
   }, []);
+  // Resolves once the listener is attached (or permission is denied), so a
+  // caller can wait for gravity to start flowing before it matters.
   const enableMotion = useCallback(() => {
-    if (motionOnRef.current) return;
+    if (motionOnRef.current) return Promise.resolve();
     const attach = () => { motionOnRef.current = true; window.addEventListener('devicemotion', onMotion); };
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      DeviceMotionEvent.requestPermission().then((r) => { if (r === 'granted') attach(); }).catch(() => {});
-    } else if (typeof DeviceMotionEvent !== 'undefined') attach();
+      return DeviceMotionEvent.requestPermission().then((r) => { if (r === 'granted') attach(); }).catch(() => {});
+    }
+    if (typeof DeviceMotionEvent !== 'undefined') attach();
+    return Promise.resolve();
   }, [onMotion]);
   useEffect(() => {
     enableMotion();
@@ -119,10 +123,18 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
   // visible (object-fit: cover) region, apply digital-zoom crop, and rotate
   // upright only in the rotation-lock case (portrait feed, phone sideways).
   const capture = async () => {
-    enableMotion(); // iOS needs a user gesture to grant motion access
     setFlash(true); setTimeout(() => setFlash(false), 160);
     const v = videoRef.current;
     if (!v?.videoWidth) { fileRef.current?.click(); return; }
+    // Rotation-lock fix needs a gravity reading. If none has arrived yet
+    // (shutter can be the session's very first tap) and the feed is portrait,
+    // finish the permission handshake and give the sensor a beat to report —
+    // bounded so the shutter never feels stuck. Once readings flow, this
+    // costs nothing on later shots.
+    if (v.videoHeight > v.videoWidth && !(gravRef.current && (Date.now() - gravRef.current.t) < 1500)) {
+      await enableMotion(); // iOS grants motion access only from a user gesture
+      for (let i = 0; i < 4 && !gravRef.current; i += 1) await new Promise((r) => setTimeout(r, 60));
+    }
     let rot = 0;
     const gv = gravRef.current;
     const fresh = gv && (Date.now() - gv.t) < 1500;
@@ -210,7 +222,14 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     </div>
   );
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
+    // onPointerDown: iOS only grants motion-sensor access from a user gesture,
+    // and without it the rotation-lock fix has no gravity data — the FIRST tap
+    // anywhere in the camera (not just the shutter) asks for permission, so
+    // by the time the shutter fires the reading is already flowing. Without
+    // this, the first shot of a session (or every shot, if permission was
+    // asked mid-capture and dismissed) saved sideways when the phone was held
+    // landscape with the iPhone orientation lock on.
+    <div onPointerDown={enableMotion} style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
