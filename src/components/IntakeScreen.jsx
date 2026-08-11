@@ -886,7 +886,7 @@ function DuplicateVinDialog({ warn, onOpenIntake, onOpenQuote, onStartAnyway, on
       <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 380, maxHeight: '90%', overflowY: 'auto' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <span className="oswald" style={{ fontWeight: 700, fontSize: 18, flex: 1, color: 'var(--amber)' }}>Record already exists</span>
-          <span onClick={onCancel} style={{ fontSize: 20, color: 'var(--muted)', cursor: 'pointer', lineHeight: 1 }}>✕</span>
+          <button type="button" className="dialog-close" onClick={onCancel} aria-label="Close">✕</button>
         </div>
         <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{vin}</div>
         <div style={{ fontSize: 12, color: 'var(--brown)', marginTop: 10, lineHeight: 1.5 }}>

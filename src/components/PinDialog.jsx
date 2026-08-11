@@ -100,7 +100,7 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
       >
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <span className="oswald" style={{ fontWeight: 700, fontSize: 18, flex: 1 }}>{title}</span>
-          <span onClick={onClose} style={{ fontSize: 20, color: 'var(--muted)', cursor: 'pointer', lineHeight: 1 }}>✕</span>
+          <button type="button" className="dialog-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
         {subtitle && <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{subtitle}</div>}
 

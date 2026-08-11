@@ -1690,7 +1690,7 @@ function QuoteExtras({ rates, locked, flags, keep, notes, notesOpen, flagPick, f
                 placeholder="Anything worth remembering about this truck — prior damage, customer requests, parts to order…"
                 value={notes}
                 onChange={(e) => onNotesChange(e.target.value)}
-                style={{ width: '100%', boxSizing: 'border-box', background: '#fff', border: '1.5px solid var(--border)', borderRadius: 12, padding: 12, fontFamily: 'inherit', fontSize: 15, lineHeight: 1.45, color: 'var(--ink)', resize: 'none', minHeight: 150 }}
+                style={{ width: '100%', boxSizing: 'border-box', background: '#fff', border: '1.5px solid var(--border)', borderRadius: 12, padding: 12, fontFamily: 'inherit', fontSize: 16, lineHeight: 1.45, color: 'var(--ink)', resize: 'none', minHeight: 150 }}
               />
             )}
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>{locked ? 'Committed — these notes are read-only.' : 'Saved with this quote — you’ll see them any time you reopen it.'}</span>
