@@ -704,6 +704,15 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </div>
               )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              {/* Saved trucks can still fill EMPTY photo spots (e.g. an upload
+                  that never made it) — existing photos stay untouchable. Only
+                  offered while the body quote itself isn't signed off. */}
+              {locked && intake.quoteId && !quoteRowRef.current?.committedBy && walkPhotos.length < 24 && (
+                <>
+                  <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => setWalkOpen(true)}>+ ADD MISSING PHOTOS ({24 - walkPhotos.length} spots open)</button>
+                  <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 5 }}>Only empty spots can be filled — photos already saved can’t be changed.</div>
+                </>
+              )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
             <div className="card" ref={notesCardRef} style={{ borderLeft: '4px solid var(--amber)' }}>
@@ -798,7 +807,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         />
       )}
       {walkOpen && (
-        <WalkAroundCamera quoteId={intake.quoteId} committed={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
+        <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} onClose={() => setWalkOpen(false)} showToast={showToast} />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
