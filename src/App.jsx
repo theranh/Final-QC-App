@@ -32,6 +32,7 @@ import PrintReport from './components/PrintReport';
 import SettingsScreen from './components/SettingsScreen';
 import { LoadingScreen, LoginScreen, AccessScreen, ErrorScreen } from './components/AuthScreens';
 import UpdateBanner from './components/UpdateBanner';
+import PhotoQueueIndicator from './components/PhotoQueueIndicator';
 
 export default function App() {
   const auth = useAuth();
@@ -720,6 +721,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />
+        <PhotoQueueIndicator />
         <Lightbox src={lightbox} onClose={() => setLightbox(null)} />
         {scanning && <VinScanner onDetected={onVinDetected} onCancel={() => setScanning(false)} />}
         <input ref={photoInputRef} type="file" accept="image/*" capture="environment" onChange={onPhotoFile} style={{ display: 'none' }} />

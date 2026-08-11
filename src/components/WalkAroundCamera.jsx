@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { WALK_SLOTS, nextUntakenSlot, putSlotPhoto, walkProgress } from '../lib/walkSlots';
+import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, setCameraOpen } from '../lib/photoQueue';
 
 const MAX = 1600;
 // iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
@@ -38,6 +39,24 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const takenRef = useRef({}); // latest taken map for async callbacks
   useEffect(() => { takenRef.current = taken; }, [taken]);
   const interactedRef = useRef(false); // user captured/picked a slot already
+
+  // While the camera is open it owns the retry loop, so the app-level flusher
+  // pauses. Any photos persisted for this quote in an earlier force-closed
+  // session are picked back up into the in-memory queue here.
+  useEffect(() => {
+    setCameraOpen(true);
+    let live = true;
+    if (quoteId) {
+      pendingJobs(quoteId).then((jobs) => {
+        if (!live) return;
+        for (const job of jobs) {
+          if (!queueRef.current.some((j) => j.id === job.id)) queueRef.current.push(job);
+        }
+        if (queueRef.current.length) setPendingCount(queueRef.current.length);
+      });
+    }
+    return () => { live = false; setCameraOpen(false); };
+  }, [quoteId]);
   const [serverLoaded, setServerLoaded] = useState(false); // preload finished (or failed)
 
   // Resume where the truck left off: existing server photos mark their slots
@@ -157,22 +176,28 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       await api.putQuotePhoto({ id: job.id, quoteId, slot: job.slotKey, dataUrl: job.dataUrl });
       queueRef.current = queueRef.current.filter((j) => j.id !== job.id);
       setPendingCount(queueRef.current.length);
+      // Clear only THIS capture's on-disk copy: a retake of the same slot may
+      // already have persisted a newer record, which must stay queued.
+      removeJob(job.key);
       return true;
     } catch (e) {
-      if (e.status === 413 || e.status === 409 || e.status === 401 || e.status === 403) {
+      if (e.status === 413 || e.status === 409 || e.status === 403) {
         // Permanent — retrying won't help. Restore what the slot showed before
         // this shot (a prior server photo stays visible; an empty slot empties).
         queueRef.current = queueRef.current.filter((j) => j.id !== job.id);
         setPendingCount(queueRef.current.length);
+        removeJob(job.key); // retrying can never succeed — drop the on-disk copy too
         setTaken((p) => ({ ...p, [job.slotKey]: !!job.prev }));
         setPhotos((p) => ({ ...p, [job.slotKey]: job.prev || undefined }));
-        showToast?.(e.status === 413 ? 'Photo is too large — try again closer or with less zoom.' : e.status === 409 ? 'This quote is locked and cannot accept photos.' : 'Signed out — sign in again, then re-take this photo.');
+        showToast?.(e.status === 413 ? 'Photo is too large — try again closer or with less zoom.' : 'This quote is locked and cannot accept photos.');
         return false;
       }
-      // Transient (offline / server blip): queue it for auto-retry.
+      // Transient (offline / server blip / signed out): keep it queued —
+      // in memory AND on disk — for auto-retry. A 401 clears itself once the
+      // tech signs back in, so the shot must survive until then.
       if (!queueRef.current.some((j) => j.id === job.id)) queueRef.current.push(job);
       setPendingCount(queueRef.current.length);
-      if (!fromRetry) showToast?.('Weak signal — photo saved on screen, sending in background…');
+      if (!fromRetry) showToast?.(e.status === 401 ? 'Signed out — photo saved, it will send after you sign in again.' : 'Weak signal — photo saved on screen, sending in background…');
       return false;
     }
   }, [quoteId, showToast]);
@@ -185,7 +210,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       retryBusyRef.current = true;
       try {
         for (const job of [...queueRef.current]) {
-          // eslint-disable-next-line no-await-in-loop
+           
           await uploadPhoto(job, { fromRetry: true });
         }
       } finally { retryBusyRef.current = false; }
@@ -224,12 +249,26 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const prev = photos[slotKey]; // restored if the upload is permanently rejected
     // Optimistic: show the shot and advance right away; the upload (or its
     // retry queue) catches up in the background.
+    // Persist to disk BEFORE the upload attempt — and wait for the write to
+    // commit — so even a force-close mid-send (or a dead battery) can't lose
+    // the shot: it flushes on next app open. If IndexedDB is unavailable
+    // (private mode / quota), persistJob resolves anyway and the in-memory
+    // retry queue still covers the session. The key is unique per CAPTURE,
+    // so an in-flight older upload for this slot can only ever delete its
+    // own record, never this one.
+    const key = newJobKey(id);
+    await persistJob({ key, id, quoteId, slotKey, dataUrl });
+    // This shot supersedes any earlier queued capture of the same slot —
+    // purge them (disk + memory) so a stale retry can't overwrite it.
+    await removeJobsForPhoto(id, key);
+    queueRef.current = queueRef.current.filter((j) => j.id !== id);
+    setPendingCount(queueRef.current.length);
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
     setTaken((p) => ({ ...p, [slotKey]: true }));
     setSkipped((p) => ({ ...p, [slotKey]: false }));
     const next = nextUntakenSlot(WALK_SLOTS, { ...taken, [slotKey]: true }, current + 1);
     if (next >= 0) setCurrent(next);
-    await uploadPhoto({ id, slotKey, dataUrl, prev });
+    await uploadPhoto({ key, id, slotKey, dataUrl, prev });
   };
 
   // Leaving with unsent shots would lose them — hold the door once.
