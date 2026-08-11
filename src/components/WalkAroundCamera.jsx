@@ -3,6 +3,10 @@ import { api } from '../lib/api';
 import { WALK_SLOTS, nextUntakenSlot, putSlotPhoto, walkProgress } from '../lib/walkSlots';
 
 const MAX = 1600;
+// iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
+const IS_IOS = typeof navigator !== 'undefined' &&
+  (/iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 function dataUrlImage(dataUrl, max = MAX, quality = 0.8, zoom = 1) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -123,8 +127,14 @@ export default function WalkAroundCamera({ quoteId, committed, initialMode = 'gu
     const gv = gravRef.current;
     const fresh = gv && (Date.now() - gv.t) < 1500;
     if (fresh && v.videoHeight > v.videoWidth) {
-      if (Math.abs(gv.x) > Math.abs(gv.y) && Math.abs(gv.x) > 4) rot = gv.x > 0 ? -90 : 90;
-      else if (Math.abs(gv.y) > Math.abs(gv.x) && gv.y < -4) rot = 180;
+      // iOS reports accelerationIncludingGravity with the opposite sign to
+      // Android: held upright, iOS gives y ≈ -9.8 while Android gives +9.8.
+      // Without this flip every upright portrait shot on iPhone matched the
+      // "upside down" branch and got rotated 180° — photos came out flipped.
+      const S = IS_IOS ? -1 : 1;
+      const gx = gv.x * S, gy = gv.y * S;
+      if (Math.abs(gx) > Math.abs(gy) && Math.abs(gx) > 4) rot = gx > 0 ? -90 : 90;
+      else if (Math.abs(gy) > Math.abs(gx) && gy < -4) rot = 180;
     }
     let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
     const ew = v.clientWidth, eh = v.clientHeight;

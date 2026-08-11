@@ -54,6 +54,7 @@ export const api = {
   // ---------- Body Quoter ----------
   quoterSync: () => request('GET', '/api/quoter/sync'),
   putQuote: (payload) => request('PUT', '/api/quoter/quotes', payload),
+  patchQuoteNotes: (payload) => request('PATCH', '/api/quoter/quotes/notes', payload),
   deleteQuote: (id) => request('DELETE', `/api/quoter/quotes?id=${encodeURIComponent(id)}`),
   putQuotePhoto: (payload) => request('POST', '/api/quoter/photos', payload),
   quotePhotos: (quoteId) => request('GET', `/api/quoter/photos?quote=${encodeURIComponent(quoteId)}`),

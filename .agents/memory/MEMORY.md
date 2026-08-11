@@ -6,5 +6,6 @@
 - [Quoter merge](quoter-merge.md) — merged-Quoter invariants: /api/quoter/* auth, verbatim pricing, PIN-at-commit immutability, frozen months, parallel run (never retire old app).
 - [Tracker snapshots](tracker-snapshots.md) — frozen months go to prod via the token-guarded sync endpoint's tracker_snapshot phase; re-running a month is the correction path.
 - [Intake completion](intake-completion.md) — checklists removed; PIN commit alone sets completed_at and must invalidate the dashboard cache.
+- [iOS gravity rotation](ios-gravity-rotation.md) — accelerationIncludingGravity sign is flipped on iOS vs Android; normalize before camera rotation logic. Notes edits outside QuoteScreen must use the notes-only PATCH.
 - [Hours-only display](hours-only-display.md) — quote UI shows hours only; usd stays in saved data for tracker sync; awaiting list dedupes per VIN with IN PROGRESS badge.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

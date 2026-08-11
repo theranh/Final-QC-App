@@ -80,6 +80,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [, setDecoding] = useState(false);
   const [estimators, setEstimators] = useState([]);
   const [quoteSummary, setQuoteSummary] = useState(null);
+  const [quoteNotes, setQuoteNotes] = useState('');
+  const quoteRowRef = useRef(null); // full quote entry backing the notes editor
+  const notesTimerRef = useRef(null);
   // Landing "QUOTE DETAILS" prefill + recent quotes (mirrors the old home)
   const [homeStock, setHomeStock] = useState('');
   const [homeMiles, setHomeMiles] = useState('');
@@ -113,7 +116,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       if (!live) return;
       const qs = (j?.quotes || []).filter((q) => q && (intakeQuoteId ? q.id === intakeQuoteId : String(q.vin || '').toUpperCase() === intakeVin));
       const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
-      if (!q) return setQuoteSummary(null);
+      if (!q) { quoteRowRef.current = null; setQuoteNotes(''); return setQuoteSummary(null); }
+      quoteRowRef.current = q;
+      setQuoteNotes(q.notes || '');
       // Backfill mileage from the linked quote when the intake has none, so
       // the miles field is always populated when the quote knows it.
       const cur = intakeRef.current;
@@ -125,6 +130,29 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     }).catch(() => {});
     return () => { live = false; };
   }, [intakeQuoteId, intakeVin]);
+
+  // Notes live on the linked quote so they show up everywhere the quote does.
+  // Saved via a notes-only PATCH (atomic on the server) so it can never
+  // clobber lines/totals the quote screen wrote in the meantime.
+  const saveQuoteNotes = useCallback((v) => {
+    const next = String(v || '').slice(0, 2000);
+    setQuoteNotes(next);
+    const cur = intakeRef.current;
+    const id = quoteRowRef.current?.id || cur?.quoteId;
+    if (!id) return;
+    if (quoteRowRef.current) quoteRowRef.current = { ...quoteRowRef.current, notes: next };
+    setQuoteSummary((s) => (s ? { ...s, notes: next } : s));
+    clearTimeout(notesTimerRef.current);
+    notesTimerRef.current = setTimeout(() => {
+      api.patchQuoteNotes({
+        id, notes: next,
+        meta: { vin: cur?.vin || '', stock: cur?.stock || '', miles: cur?.miles || '', vehicle: cur?.vehicle || '', estimator: cur?.estimator || '' },
+      }).catch((e) => {
+        if (e?.status === 409) showToast?.('This quote is committed — notes are locked.');
+      });
+    }, 600);
+  }, [showToast]);
+  useEffect(() => () => clearTimeout(notesTimerRef.current), []);
 
   // Adopt a server row for a VIN, honoring the old conflict rule.
   const refreshFromServer = useCallback(async (v) => {
@@ -583,6 +611,26 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </div>
               )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { await ensureIntakeQuote(); setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              <div style={{ marginTop: 10 }}>
+                <div className="field-label">NOTES</div>
+                {locked || quoteRowRef.current?.committedBy ? (
+                  (quoteNotes || '').trim()
+                    ? <div style={{ padding: '9px 11px', borderRadius: 9, background: 'var(--panel)', border: '1px solid var(--border)', fontSize: 12.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{quoteNotes.trim()}</div>
+                    : <div style={{ fontSize: 11, color: 'var(--muted)' }}>No notes.</div>
+                ) : (intake.quoteId || quoteRowRef.current) ? (
+                  <textarea
+                    className="input"
+                    rows={3}
+                    maxLength={2000}
+                    placeholder="Anything worth remembering about this truck…"
+                    value={quoteNotes}
+                    onChange={(e) => saveQuoteNotes(e.target.value)}
+                    style={{ resize: 'none', minHeight: 74, fontFamily: 'inherit', lineHeight: 1.4 }}
+                  />
+                ) : (
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>Take a walk-around photo or start the body quote first — notes save with the quote.</div>
+                )}
+              </div>
             </div>
             {/* Body Quoter */}
             <div className="card" style={quoteSummary ? { borderLeft: '4px solid var(--red)' } : undefined}>

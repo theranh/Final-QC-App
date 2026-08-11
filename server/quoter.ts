@@ -243,6 +243,44 @@ export function registerQuoterRoutes(app: Express) {
     }),
   );
 
+  // ----- PATCH /api/quoter/quotes/notes -----
+  // Notes-only update from the intake screen. An atomic jsonb_set on the
+  // notes key (never a full-document PUT) so it can't clobber lines/totals
+  // written by the quote screen's autosave; upserts a minimal row when only
+  // a photos-link exists. Committed quotes stay immutable.
+  app.patch(
+    "/api/quoter/quotes/notes",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const body = req.body || {};
+      const id = String(body.id || "");
+      const notes = String(body.notes ?? "").slice(0, 2000);
+      if (!id) return res.status(400).json({ error: "Missing id" });
+      const meta = body.meta && typeof body.meta === "object" ? body.meta : {};
+      const minimal = {
+        id, ts: Date.now(), dateISO: new Date().toISOString(),
+        vin: String(meta.vin || ""), stock: String(meta.stock || ""), miles: String(meta.miles || ""),
+        veh: null, vehicle: String(meta.vehicle || ""), estimator: String(meta.estimator || ""),
+        cover: "", lines: [], totals: { hrs: 0, usd: 0, B: 0, P: 0, RI: 0, usdPDR: 0 },
+        notes, flags: [], keep: {},
+      };
+      const [saved] = await db
+        .insert(quotes)
+        .values({ id, data: minimal, updatedAt: new Date() })
+        .onConflictDoUpdate({
+          target: quotes.id,
+          set: {
+            data: sql`jsonb_set(${quotes.data}, '{notes}', ${JSON.stringify(notes)}::jsonb, true)`,
+            updatedAt: new Date(),
+          },
+          setWhere: sql`${quotes.committedBy} IS NULL`,
+        })
+        .returning({ id: quotes.id });
+      if (!saved) return res.status(409).json({ error: "Quote is committed" });
+      res.json({ ok: true });
+    }),
+  );
+
   // ----- DELETE /api/quoter/quotes?id= -----
   app.delete(
     "/api/quoter/quotes",
