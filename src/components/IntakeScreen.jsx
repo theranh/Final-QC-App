@@ -383,7 +383,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         return next;
       });
       setPinOpen(false);
-      showToast && showToast('Intake committed ✓');
+      showToast && showToast('Intake saved ✓');
     });
 
   const cleanVin = vin.trim().toUpperCase();
@@ -392,6 +392,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   // Walk-around photos for the opened intake (thumbnails shown inline).
   // Refreshed when the camera closes so new shots appear immediately.
   const [intakePhotos, setIntakePhotos] = useState([]);
+  // Damage close-ups (slots starting with "dmg") are shown apart from the
+  // walk-around set so reviewers see truck condition vs. quoted damage.
+  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
+  const damagePhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('dmg'));
   const [lightbox, setLightbox] = useState(null); // enlarged photo URL
   const photoQuoteId = intake?.quoteId ?? null;
   useEffect(() => {
@@ -399,7 +403,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     let live = true;
     api.quotePhotos(photoQuoteId).then((j) => { if (live) setIntakePhotos(j?.photos || []); }).catch(() => {});
     return () => { live = false; };
-  }, [photoQuoteId, walkOpen]);
+  }, [photoQuoteId, walkOpen, quoting]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -642,11 +646,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               </div>
             </div>
             <div className="card">
-              <div className="card-title">WALK-AROUND PHOTOS · {intakePhotos.length} / 24</div>
+              <div className="card-title">WALK-AROUND PHOTOS · {walkPhotos.length} / 24</div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
-              {intakePhotos.length > 0 && (
+              {walkPhotos.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
-                  {intakePhotos.map((p) => (
+                  {walkPhotos.map((p) => (
                     <img
                       key={p.id}
                       src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
@@ -687,7 +691,24 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 <>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 12, fontWeight: 700 }}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr of work</span><span>{quoteSummary.photoCount} photos</span></div>
                   {(quoteSummary.notes || '').trim() && <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: 'var(--panel)', fontSize: 11.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}><b style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8 }}>NOTES</b><br />{quoteSummary.notes.trim()}</div>}
-                  <button className="btn btn-outline-red" style={{ marginTop: 9 }} onClick={() => { setQuoting(true); }}>REOPEN QUOTE</button>
+                  {damagePhotos.length > 0 && (
+                    <>
+                      <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 10 }}>DAMAGE PHOTOS · {damagePhotos.length}</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
+                        {damagePhotos.map((p) => (
+                          <img
+                            key={p.id}
+                            src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                            alt="damage photo"
+                            loading="lazy"
+                            onClick={() => setLightbox(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                            style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--red)', cursor: 'pointer' }}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <button className="btn btn-outline-red" style={{ marginTop: 9 }} onClick={() => { setQuoting(true); }}>{locked ? 'REVIEW QUOTE' : 'REOPEN QUOTE'}</button>
                 </>
               ) : (
                 <>
@@ -706,16 +727,16 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#e8f3ea', border: '1px solid var(--green)' }}>
                   <SignatureBadge committedBy={intake.committedBy} overriddenBy={intake.overriddenBy} />
                   <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 4 }}>
-                    Committed and locked{intake.completedAt ? ' · ' + new Date(intake.completedAt).toLocaleDateString() : ''}. A correction is a new record, not an edit.
+                    Saved and locked{intake.completedAt ? ' · ' + new Date(intake.completedAt).toLocaleDateString() : ''}. Photos, notes, and the quote below stay visible for review. A correction is a new record, not an edit.
                   </div>
                 </div>
               ) : (
                 <>
                   <button className="btn btn-green" style={{ height: 46 }} onClick={() => setPinOpen(true)}>
-                    ✍ Commit intake
+                    ✍ SAVE
                   </button>
                   <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6, textAlign: 'center' }}>
-                    Committing signs off the intake with your PIN and locks it.
+                    Saving signs off the intake with your PIN and locks it. Photos, notes, and the quote stay visible for review.
                   </div>
                 </>
               )}
@@ -726,7 +747,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
 
       {pinOpen && (
         <PinDialog
-          title="Commit intake"
+          title="Save intake"
           subtitle={intake ? `${intake.vin} · ${intake.vehicle || 'vehicle'}` : ''}
           onCommit={doCommit}
           onClose={() => setPinOpen(false)}
