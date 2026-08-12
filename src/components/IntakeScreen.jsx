@@ -775,15 +775,17 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
           <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox.url}")` }} />
-          {/* Photos stay editable until the body quote is signed off. */}
-          {lightbox.id && !quoteRowRef.current?.committedBy && (
+          {/* ROTATE is always available — straightening a sideways shot is
+              allowed even after sign-off. DELETE stays locked once committed. */}
+          {lightbox.id && (
             <button
               className="btn btn-outline-brown lightbox-action"
               onClick={async (e) => {
                 e.stopPropagation();
                 try {
                   // Rotate 90° clockwise client-side, then overwrite via the
-                  // photo upsert (allowed while the quote is uncommitted).
+                  // photo upsert (in-place overwrite is allowed even after
+                  // sign-off; only new photos/deletes are frozen).
                   const img = new Image();
                   await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = lightbox.url; });
                   // Cap the longest side (same 1600px cap as the camera) so the
@@ -806,7 +808,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                   setIntakePhotos((prev) => prev.map((p) => (p.id === lightbox.id ? { ...p, bust: Date.now() } : p)));
                   showToast?.('Photo rotated ✓');
                 } catch (err) {
-                  showToast?.(err?.status === 409 ? 'This quote has been signed off — its photos are locked.' : 'Couldn’t rotate the photo');
+                  showToast?.('Couldn’t rotate the photo — check your connection and try again.');
                 }
               }}
             >

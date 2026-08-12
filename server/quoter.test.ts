@@ -245,6 +245,32 @@ describe("photo mutations blocked once owning quote committed", () => {
     expect(r.body.error).toBe("Quote is committed");
   });
 
+  it("POST /api/quoter/photos allows in-place overwrite of an EXISTING photo on a committed quote (rotate)", async () => {
+    quoteRows.push({ id: "cqr", data: {}, committedBy: "Worker", overriddenBy: null });
+    photoRows.push({ id: "pr", quoteId: "cqr" });
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "pr",
+      quoteId: "cqr",
+      slot: "front",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+  });
+
+  it("POST /api/quoter/photos 409s when the photo id belongs to another quote", async () => {
+    quoteRows.push({ id: "qa", data: {}, committedBy: null, overriddenBy: null });
+    photoRows.push({ id: "ph-owned", quoteId: "some-other-quote" });
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "ph-owned",
+      quoteId: "qa",
+      slot: "front",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("Photo belongs to another quote");
+  });
+
   it("DELETE /api/quoter/photos by quoteId 409s when quote committed", async () => {
     quoteRows.push({ id: "cq2", data: {}, committedBy: "Worker", overriddenBy: null });
     photoRows.push({ id: "px", quoteId: "cq2" });

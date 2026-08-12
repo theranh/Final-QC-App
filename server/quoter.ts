@@ -330,14 +330,6 @@ export function registerQuoterRoutes(app: Express) {
       if (!id || !quoteId || !mDU) {
         return res.status(400).json({ error: "Missing id, quoteId, or image" });
       }
-      // Photos are part of a quote's signed content — frozen once committed.
-      const [ownerQuote] = await db
-        .select({ committedBy: quotes.committedBy })
-        .from(quotes)
-        .where(eq(quotes.id, quoteId));
-      if (ownerQuote && ownerQuote.committedBy) {
-        return res.status(409).json({ error: "Quote is committed" });
-      }
       // Ownership guard: an existing photo may only be overwritten by its own
       // quote — a photo id + an unrelated quoteId must never hijack the row.
       const [existing] = await db
@@ -346,6 +338,17 @@ export function registerQuoterRoutes(app: Express) {
         .where(eq(photos.id, id));
       if (existing && existing.quoteId !== quoteId) {
         return res.status(409).json({ error: "Photo belongs to another quote" });
+      }
+      // Photos are part of a quote's signed content — once committed, no NEW
+      // photos may be added and none deleted. Overwriting an existing photo
+      // in place (the lightbox ROTATE button) is allowed even after sign-off,
+      // per shop policy: straightening a sideways shot isn't a content change.
+      const [ownerQuote] = await db
+        .select({ committedBy: quotes.committedBy })
+        .from(quotes)
+        .where(eq(quotes.id, quoteId));
+      if (ownerQuote && ownerQuote.committedBy && !existing) {
+        return res.status(409).json({ error: "Quote is committed" });
       }
       const buf = Buffer.from(mDU[2], "base64");
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
