@@ -1,9 +1,17 @@
+import { useState } from 'react';
 import { chipStyle, catByKey } from '../lib/constants';
 import { fmtDT, fmtShort } from '../lib/format';
 import { statusMeta } from '../lib/records';
 
+const matches = (r, needle) => `${r.stock} ${r.vehicle} ${r.vin || ''} ${r.inspector || ''} ${r.id}`.toLowerCase().includes(needle);
+
 export default function HomeScreen({ recs, openRecs, onNewInspection, onOpenRecheck, onOpenRecord, onGoRecords }) {
-  const historyRows = recs.slice(0, 10);
+  const [q, setQ] = useState('');
+  const needle = q.trim().toLowerCase();
+  // With a search active, look through ALL records (done or awaiting
+  // re-check), not just the recent-history slice.
+  const shownOpen = needle ? openRecs.filter((r) => matches(r, needle)) : openRecs;
+  const historyRows = needle ? recs.filter((r) => matches(r, needle)).slice(0, 25) : recs.slice(0, 10);
 
   return (
     <div className="screen">
@@ -12,19 +20,30 @@ export default function HomeScreen({ recs, openRecs, onNewInspection, onOpenRech
           <span className="screen-title">Final QC</span>
           {openRecs.length > 0 && <span className="count-pill amber">{openRecs.length}</span>}
         </div>
+        <input
+          className="input"
+          style={{ marginTop: 8 }}
+          placeholder="Search stock #, VIN, or FQ number…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
       </div>
       <div className="screen-body">
         <div className="btn btn-red" style={{ flex: '0 0 auto', height: 56 }} onClick={onNewInspection}>
           + New Inspection
         </div>
 
-        {openRecs.length > 0 && (
+        {needle && shownOpen.length === 0 && historyRows.length === 0 && (
+          <div className="empty-note">No QC records match “{q.trim()}”.</div>
+        )}
+
+        {shownOpen.length > 0 && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 2px 0' }}>
               <span className="oswald" style={{ fontWeight: 600, fontSize: 15 }}>Re-checks</span>
               <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)' }}>OPEN — AWAITING RE-CHECK</span>
             </div>
-            {openRecs.map((r) => {
+            {shownOpen.map((r) => {
               const cats = [...new Set((r.openItems || []).map((x) => x.cat))];
               return (
                 <div key={r.id} style={{ background: '#fff', border: '1px solid var(--border)', borderLeft: '4px solid var(--amber)', borderRadius: 11, padding: '11px 12px' }}>
