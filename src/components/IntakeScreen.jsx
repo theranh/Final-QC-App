@@ -661,7 +661,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                   {walkPhotos.map((p) => (
                     <img
                       key={p.id}
-                      src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                      src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}${p.bust ? `&t=${p.bust}` : ''}`}
                       alt={p.slot || 'walk-around photo'}
                       loading="lazy"
                       onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
@@ -714,7 +714,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                         {damagePhotos.map((p) => (
                           <img
                             key={p.id}
-                            src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                            src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}${p.bust ? `&t=${p.bust}` : ''}`}
                             alt="damage photo"
                             loading="lazy"
                             onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
@@ -775,7 +775,44 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
           <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox.url}")` }} />
-          {/* Photos stay deletable until the body quote is signed off (PIN commit). */}
+          {/* Photos stay editable until the body quote is signed off. */}
+          {lightbox.id && !quoteRowRef.current?.committedBy && (
+            <button
+              className="btn btn-outline-brown lightbox-action"
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  // Rotate 90° clockwise client-side, then overwrite via the
+                  // photo upsert (allowed while the quote is uncommitted).
+                  const img = new Image();
+                  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = lightbox.url; });
+                  // Cap the longest side (same 1600px cap as the camera) so the
+                  // re-encoded JPEG always fits the server's size limit.
+                  const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+                  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+                  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+                  const c = document.createElement('canvas');
+                  c.width = h; c.height = w;
+                  const ctx = c.getContext('2d');
+                  ctx.translate(c.width / 2, c.height / 2);
+                  ctx.rotate(Math.PI / 2);
+                  ctx.drawImage(img, -w / 2, -h / 2, w, h);
+                  const dataUrl = c.toDataURL('image/jpeg', 0.8);
+                  const meta = intakePhotos.find((p) => p.id === lightbox.id);
+                  await api.putQuotePhoto({ id: lightbox.id, quoteId: photoQuoteId, slot: meta?.slot || '', dataUrl });
+                  // Cache-bust so the fresh rotation shows immediately.
+                  const bust = `/api/quoter/photo?id=${encodeURIComponent(lightbox.id)}&t=${Date.now()}`;
+                  setLightbox({ ...lightbox, url: bust });
+                  setIntakePhotos((prev) => prev.map((p) => (p.id === lightbox.id ? { ...p, bust: Date.now() } : p)));
+                  showToast?.('Photo rotated ✓');
+                } catch (err) {
+                  showToast?.(err?.status === 409 ? 'This quote has been signed off — its photos are locked.' : 'Couldn’t rotate the photo');
+                }
+              }}
+            >
+              ↻ ROTATE
+            </button>
+          )}
           {lightbox.id && !quoteRowRef.current?.committedBy && (
             <button
               className="btn btn-outline-red lightbox-action"

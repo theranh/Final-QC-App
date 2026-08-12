@@ -5,7 +5,7 @@ import { compressImageFile } from '../lib/photo';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
-import PinDialog, { SignatureBadge } from './PinDialog';
+import { SignatureBadge } from './PinDialog';
 import {
   PANELS, DAMAGE, SEVS, PARTS,
   defaultRates, defaultFlags, quoteTotals, lineHours, pdrEligible,
@@ -510,7 +510,6 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
 
   const [quoteId, setQuoteId] = useState(() => prefill?.quoteId || null);
   const [committed, setCommitted] = useState(null); // { committedBy, overriddenBy } once signed
-  const [pinOpen, setPinOpen] = useState(false);
   const [lines, setLines] = useState([]);
   // photos not yet analyzed: { id, thumb, base64, dataUrl }
   const [photos, setPhotos] = useState([]);
@@ -990,22 +989,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const doImage = () => exportImage(exportCtx(), showToast);
   const doPrint = () => { try { window.print(); } catch { /* no-op */ } };
 
-  // ---------- commit sign-off ----------
-  const doCommit = ({ signerId, pin, forEmployeeId }) => {
-    const id = ensureQuoteId();
-    // Flush any pending autosave so the committed row has the latest data.
-    clearTimeout(saveTimer.current);
-    const entry = buildEntry(linesRef.current);
-    return api
-      .putQuote({ id: entry.id, data: entry })
-      .catch(() => { /* commit still guards server-side; proceed */ })
-      .then(() => api.commitQuote({ id, signerId, pin, forEmployeeId }))
-      .then((r) => {
-        setCommitted({ committedBy: r.committedBy, overriddenBy: r.overriddenBy || null });
-        setPinOpen(false);
-        showToast && showToast('Quote committed ✓');
-      });
-  };
+  // Quote-level commit was removed from the UI — the intake SAVE (PIN
+  // sign-off) is the one commit button. Imported/legacy committed quotes
+  // still render locked via `committed`.
 
   // ---------- render ----------
   const totals = quoteTotals(lines, rates);
@@ -1136,7 +1122,6 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onDelete={deleteLine}
             onTogglePart={togglePart}
             onAddMore={() => setStep('photos')}
-            onCommit={() => setPinOpen(true)}
             flags={flags}
             keep={keep}
             notes={notes}
@@ -1176,14 +1161,6 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         </>}
       </div>
 
-      {pinOpen && (
-        <PinDialog
-          title="Commit quote"
-          subtitle={vin ? `${vin} · ${vehicleText || 'vehicle'}` : (vehicleText || '')}
-          onCommit={doCommit}
-          onClose={() => setPinOpen(false)}
-        />
-      )}
       {walkOpen && (
         <WalkAroundCamera
           quoteId={ensureQuoteId()}
@@ -1463,7 +1440,7 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge,
 }
 
 /* ---------- quote editor ---------- */
-function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onCommit,
+function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore,
   flags, keep, notes, notesOpen, flagPick, flagSearch,
   onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep, onCopy, onImage, onPrint }) {
   const locked = !!committed;
@@ -1538,16 +1515,7 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
           </div>
         </div>
       ) : (
-        <>
-          <button className="btn btn-outline-brown" onClick={onAddMore}>+ Add more damage photos</button>
-          <button
-            className={'btn btn-green' + (lines.length ? '' : ' disabled')}
-            style={{ height: 48, opacity: lines.length ? 1 : 0.6 }}
-            onClick={() => lines.length && onCommit()}
-          >
-            ✍ Commit quote
-          </button>
-        </>
+        <button className="btn btn-outline-brown" onClick={onAddMore}>+ Add more damage photos</button>
       )}
 
       {/* Export bar — COPY / IMAGE / PDF (dark, sticky) */}

@@ -338,6 +338,15 @@ export function registerQuoterRoutes(app: Express) {
       if (ownerQuote && ownerQuote.committedBy) {
         return res.status(409).json({ error: "Quote is committed" });
       }
+      // Ownership guard: an existing photo may only be overwritten by its own
+      // quote — a photo id + an unrelated quoteId must never hijack the row.
+      const [existing] = await db
+        .select({ quoteId: photos.quoteId })
+        .from(photos)
+        .where(eq(photos.id, id));
+      if (existing && existing.quoteId !== quoteId) {
+        return res.status(409).json({ error: "Photo belongs to another quote" });
+      }
       const buf = Buffer.from(mDU[2], "base64");
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
         return res.status(413).json({ error: "Photo too large" });
