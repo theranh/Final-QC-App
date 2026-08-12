@@ -132,6 +132,22 @@ const H = vi.hoisted(() => {
       if (/FROM photos WHERE quote_id/i.test(text)) {
         return { rows: [{ n: 0 }] };
       }
+      if (/FROM settings/i.test(text)) {
+        return { rows: [] };
+      }
+      if (/FROM quotes ORDER BY updated_at/i.test(text)) {
+        return {
+          rows: quoteRows.map((r) => ({
+            id: r.id,
+            data: r.data,
+            committed_by: r.committedBy,
+            overridden_by: r.overriddenBy,
+          })),
+        };
+      }
+      if (/FROM corrections ORDER BY/i.test(text)) {
+        return { rows: [] };
+      }
       if (/INSERT INTO intakes/i.test(text)) {
         const id = params[0];
         const existing = intakeRows.find((r) => r.id === id);
@@ -164,6 +180,9 @@ vi.mock("./access", () => ({
 }));
 vi.mock("./replit_integrations/auth", () => ({
   isAuthenticated: (_req: any, _res: any, next: any) => next(),
+}));
+vi.mock("./localQuote", () => ({
+  bestWalkPhotoIds: async () => new Map(),
 }));
 
 let server: Server;
@@ -343,5 +362,19 @@ describe("intake immutability once committed", () => {
     const b = await req("POST", "/api/quoter/intakes/cas/link-quote", { quoteId: "q-b" });
     expect(a.body.quoteId).toBe("q-a");
     expect(b.body.quoteId).toBe("q-a");
+  });
+});
+
+describe("GET /api/quoter/sync sign-off state", () => {
+  it("includes committedBy/overriddenBy from the DB columns, not the data blob", async () => {
+    quoteRows.push({ id: "s1", data: { id: "s1", vin: "V1" }, committedBy: "Signer", overriddenBy: "Boss" });
+    quoteRows.push({ id: "s2", data: { id: "s2", vin: "V2" }, committedBy: null, overriddenBy: null });
+    const r = await req("GET", "/api/quoter/sync");
+    expect(r.status).toBe(200);
+    const byId = Object.fromEntries(r.body.quotes.map((q: any) => [q.id, q]));
+    expect(byId.s1.committedBy).toBe("Signer");
+    expect(byId.s1.overriddenBy).toBe("Boss");
+    expect(byId.s2.committedBy).toBeNull();
+    expect(byId.s2.overriddenBy).toBeNull();
   });
 });

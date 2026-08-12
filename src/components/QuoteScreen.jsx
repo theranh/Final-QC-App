@@ -54,6 +54,30 @@ export function quoteExtras(snapshot) {
   };
 }
 
+// Autosave failure notifier: EVERY failed save produces a visible warning —
+// the first failure included, so a single edit made during an outage is never
+// lost silently. Repeat warnings are throttled (15s) so a burst of debounced
+// saves doesn't stack toasts; a 409 (committed/locked quote) always warns
+// immediately with its own message. Exported for unit tests.
+export function createSaveFailureNotifier(notify, nowFn = Date.now) {
+  let fails = 0;
+  let warnedAt = 0;
+  return {
+    failed(e) {
+      fails += 1;
+      const committed409 = !!(e && e.status === 409);
+      const now = nowFn();
+      if (!committed409 && fails > 1 && now - warnedAt < 15000) return; // throttle repeats
+      warnedAt = now;
+      notify(committed409
+        ? 'NOT SAVED — this quote is signed off and locked. Ask an admin to unlock it.'
+        : 'WARNING: quote changes are not saving (offline or server error). Keep this screen open and check your connection.');
+    },
+    succeeded() { fails = 0; warnedAt = 0; },
+    get failCount() { return fails; },
+  };
+}
+
 // ---------- flags (ported from the old quoter) ----------
 const FLAG_PALETTE = {
   teal: { bg: '#e2f4f7', bd: '#8ecbd6', fg: '#1d6b78' },
@@ -687,6 +711,13 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     return id;
   }, [onQuoteId]);
 
+  // Every failed autosave produces a visible warning (never a silent loss);
+  // repeat warnings are throttled to one per 15s so a burst of debounced
+  // saves doesn't stack toasts. A success resets the notifier.
+  const saveNotifierRef = useRef(null);
+  if (!saveNotifierRef.current) saveNotifierRef.current = createSaveFailureNotifier((msg) => showToast && showToast(msg));
+  const warnSaveFailed = useCallback((e) => saveNotifierRef.current.failed(e), []);
+
   const autosave = useCallback((ls, overrides) => {
     if (!hydratedRef.current) return;
     const s = { ...stateRef.current, ...(overrides || {}) };
@@ -700,9 +731,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (!entry.id) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      api.putQuote({ id: entry.id, data: entry }).catch(() => { /* offline — retries on next save */ });
+      api.putQuote({ id: entry.id, data: entry })
+        .then(() => { saveNotifierRef.current.succeeded(); })
+        .catch(warnSaveFailed);
     }, 600);
-  }, [buildEntry, ensureQuoteId]);
+  }, [buildEntry, ensureQuoteId, warnSaveFailed]);
 
   useEffect(() => () => clearTimeout(saveTimer.current), []);
 
