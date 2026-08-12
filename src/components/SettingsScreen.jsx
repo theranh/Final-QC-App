@@ -117,6 +117,17 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       .finally(() => setRepairBusy(false));
   };
 
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const runUnlockQuotes = () => {
+    if (unlockBusy) return;
+    setUnlockBusy(true);
+    api
+      .unlockQuotes()
+      .then((r) => showToast(r.unlocked === 0 ? 'All quotes are already unlocked ✓' : `Unlocked ${r.unlocked} quote${r.unlocked === 1 ? '' : 's'} for editing ✓`))
+      .catch((err) => showToast('Unlock failed: ' + err.message))
+      .finally(() => setUnlockBusy(false));
+  };
+
   const addEmployee = () => {
     const email = newEmail.trim().toLowerCase();
     if (!email.endsWith('@truckranch.com')) {
@@ -446,6 +457,22 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                   </span>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">UNLOCK BODY QUOTES</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Quotes signed off with the old “Commit quote” button are still locked, so adjustments silently don’t save. The intake SAVE is the only sign-off now — this unlocks all quotes so adjustments and photos can be edited again. Safe to run more than once.
+            </div>
+            <div
+              className={'btn btn-brown' + (unlockBusy ? ' disabled' : '')}
+              style={{ marginTop: 9, height: 44, fontSize: 12, opacity: unlockBusy ? 0.6 : 1 }}
+              onClick={runUnlockQuotes}
+            >
+              {unlockBusy ? 'Unlocking…' : '🔓 Unlock body quotes'}
             </div>
           </div>
         )}

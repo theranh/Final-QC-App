@@ -966,6 +966,31 @@ export function registerAppRoutes(app: Express) {
     }
   });
 
+  // ---------- admin: unlock body quotes for editing ----------
+  // Legacy quote-level sign-offs (the old "Commit quote" button, since
+  // removed) left quotes.committed_by set, which silently blocks every
+  // adjustment save. The intake SAVE is the one sign-off now, so quote-level
+  // locks are vestigial — clear them all. Idempotent: already-unlocked rows
+  // are untouched.
+  app.post("/api/admin/unlock-quotes", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const updated = await db
+        .update(quotes)
+        .set({ committedBy: null, overriddenBy: null })
+        .where(sql`${quotes.committedBy} IS NOT NULL`)
+        .returning({ id: quotes.id });
+      if (updated.length) {
+        await audit(db, emp, "quotes_unlocked", {
+          details: { unlocked: updated.length },
+        });
+      }
+      res.json({ unlocked: updated.length });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ---------- admin: repair migrated re-checks ----------
   // Imported "open" inspections from the old app arrived without data.openItems,
   // so the re-check screen has nothing to work against. Rebuild that list from

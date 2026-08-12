@@ -48,6 +48,7 @@ export const api = {
   backupStatus: () => request('GET', '/api/backup-status'),
   employees: () => request('GET', '/api/employees'),
   repairImportedRechecks: () => request('POST', '/api/admin/repair-imported-rechecks'),
+  unlockQuotes: () => request('POST', '/api/admin/unlock-quotes'),
   addEmployee: (payload) => request('POST', '/api/employees', payload),
   updateEmployee: (id, patch) => request('PATCH', `/api/employees/${id}`, patch),
   setEmployeePin: (id, pin) => request('POST', `/api/employees/${id}/pin`, { pin }),

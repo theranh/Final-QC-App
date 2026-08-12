@@ -120,7 +120,7 @@ export function registerQuoterRoutes(app: Express) {
     guard(async (_req, res) => {
       const [st, qs, cs] = await Promise.all([
         db.execute(sql`SELECT key, value FROM settings`),
-        db.execute(sql`SELECT id, data FROM quotes ORDER BY updated_at DESC LIMIT 300`),
+        db.execute(sql`SELECT id, data, committed_by, overridden_by FROM quotes ORDER BY updated_at DESC LIMIT 300`),
         db.execute(sql`SELECT ts, diffs FROM corrections ORDER BY id DESC LIMIT 200`),
       ]);
       const settingsMap: Record<string, unknown> = {};
@@ -140,7 +140,15 @@ export function registerQuoterRoutes(app: Express) {
           : null,
         quotes: (qs.rows as any[]).map((r) => {
           const walk = walkCovers.get(String(r.id));
-          return walk ? { ...r.data, cover: `/api/quoter/photo?id=${encodeURIComponent(walk.id)}` } : r.data;
+          // Sign-off state lives in the DB COLUMNS, not the data blob — the
+          // client must see it or it lets you edit a locked quote while the
+          // server silently rejects every save.
+          const base = {
+            ...r.data,
+            committedBy: r.committed_by || null,
+            overriddenBy: r.overridden_by || null,
+          };
+          return walk ? { ...base, cover: `/api/quoter/photo?id=${encodeURIComponent(walk.id)}` } : base;
         }),
         corrections: cs.rows,
       });
