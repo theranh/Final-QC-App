@@ -381,7 +381,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const photosCardRef = useRef(null);
   const notesCardRef = useRef(null);
   const quoteCardRef = useRef(null);
-  const scrollToCard = (ref) => ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const doCommit = ({ signerId, pin, forEmployeeId }) =>
     api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId }).then((r) => {
@@ -602,40 +601,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
 
         {started && (
           <>
-            {/* "What's left" progress strip — tap a step to jump to its card. */}
-            {(() => {
-              const truckDone = !!(intake.stock.trim() && String(intake.miles).trim() && intake.estimator.trim() && intake.mddTags);
-              const photosDone = slotPhotos.length >= 24;
-              const quoteDone = !!quoteSummary;
-              const notesDone = !!(quoteNotes || '').trim();
-              if (locked) {
-                return (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: '#e8f3ea', border: '1px solid var(--green)', color: 'var(--green)', fontSize: 12, fontWeight: 700, letterSpacing: 0.5 }}>
-                    ✓ SAVED — intake complete
-                  </div>
-                );
-              }
-              const steps = [
-                { label: 'Truck info', done: truckDone, state: truckDone ? '✓' : '—', ref: truckCardRef },
-                { label: 'Photos', done: photosDone, state: `${slotPhotos.length}/24`, ref: photosCardRef },
-                { label: 'Damage quote', done: quoteDone, state: quoteDone ? '✓' : '—', ref: quoteCardRef },
-                { label: 'Notes', done: notesDone, state: notesDone ? '✓' : '—', ref: notesCardRef },
-              ];
-              return (
-                <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, padding: '7px 8px', borderRadius: 10, background: 'var(--panel, #fff)', border: '1px solid var(--border)', boxShadow: '0 2px 6px rgba(0,0,0,.06)' }}>
-                  {steps.map((s) => (
-                    <button
-                      key={s.label}
-                      onClick={() => scrollToCard(s.ref)}
-                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, padding: '7px 6px', minHeight: 34, borderRadius: 8, border: '1px solid ' + (s.done ? 'var(--green)' : 'var(--border)'), background: s.done ? '#e8f3ea' : '#fff', color: s.done ? 'var(--green)' : 'var(--muted)', fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden' }}
-                    >
-                      <span>{s.label}</span>
-                      <span className="mono" style={{ fontWeight: 700 }}>{s.state}</span>
-                    </button>
-                  ))}
-                </div>
-              );
-            })()}
+            {/* Saved banner — the step-by-step progress strip was removed (too busy). */}
+            {locked && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: '#e8f3ea', border: '1px solid var(--green)', color: 'var(--green)', fontSize: 12, fontWeight: 700, letterSpacing: 0.5 }}>
+                ✓ SAVED — intake complete
+              </div>
+            )}
             {/* vehicle detail fields */}
             <div className="card" ref={truckCardRef}>
               <div className="card-title">TRUCK</div>
