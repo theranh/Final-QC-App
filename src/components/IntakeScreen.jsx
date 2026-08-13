@@ -402,11 +402,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [intakePhotos, setIntakePhotos] = useState([]);
   // Damage close-ups (slots starting with "dmg") are shown apart from the
   // walk-around set so reviewers see truck condition vs. quoted damage.
-  // Everything else — guided slots AND after-the-fact extras — is one
-  // walk-around set; only the 24 guided slots count toward the checklist.
+  // Everything else is ONE walk-around set — guided-slot shots and any
+  // additional pictures are all just photos; no separation shown anywhere.
   const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
   const damagePhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('dmg'));
-  const slotPhotos = walkPhotos.filter((p) => !String(p.slot || '').startsWith('xtra'));
   const [lightbox, setLightbox] = useState(null); // { url, id } of enlarged photo
   const photoQuoteId = intake?.quoteId ?? null;
   // Photos can still be uploading in the background (weak signal) when the
@@ -665,7 +664,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
             </div>
             <div className="card" ref={photosCardRef}>
               <div className="card-title">
-                WALK-AROUND PHOTOS · {slotPhotos.length} / 24{walkPhotos.length > slotPhotos.length ? ` (+${walkPhotos.length - slotPhotos.length})` : ''}
+                WALK-AROUND PHOTOS · {walkPhotos.length}
                 {pendingUploads > 0 && <span style={{ marginLeft: 8, color: 'var(--amber)', fontWeight: 700 }}>· sending {pendingUploads}…</span>}
               </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>

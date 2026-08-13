@@ -277,7 +277,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       // (also in add-only: extras are additive and never touch saved photos)
       // so the crew can take as many additional shots as they want.
       setMode('extra');
-      showToast?.('All 24 walk-around shots done — keep shooting, every extra photo is saved too. Tap ✕ when finished.');
+      showToast?.('All 24 angles captured — keep taking as many photos as you need. Tap ✕ when finished.');
     }
     await uploadPhoto({ key, id, slotKey, dataUrl, prev });
   };
@@ -380,7 +380,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const lastExtra = extraShots.length ? photos[extraShots[extraShots.length - 1]]?.thumb : null;
   const extraThumb = (
     <div aria-label="Extra photos taken" style={{ position: 'relative', flex: 'none', width: 64, height: 64, border: '2px solid #fff', borderRadius: 12, background: '#000', overflow: 'visible' }}>
-      {lastExtra ? <img src={lastExtra} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 9 }} /> : <span style={{ color: '#aaa092', fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>EXTRAS</span>}
+      {lastExtra ? <img src={lastExtra} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 9 }} /> : <span style={{ color: '#aaa092', fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>PHOTOS</span>}
       {extraShots.length > 0 && <span style={{ position: 'absolute', right: -6, top: -6, background: '#b0322a', color: '#fff', fontWeight: 700, fontSize: 12, minWidth: 20, height: 20, lineHeight: '20px', borderRadius: 10, padding: '0 4px' }}>{extraShots.length}</span>}
     </div>
   );
@@ -420,10 +420,9 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
         <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>×</button>
-        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : mode === 'extra' ? 'EXTRA PHOTOS' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${extraShots.length} added${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : 'Close-ups go to the AI for the body quote.'}</div></div>
+        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : 'Close-ups go to the AI for the body quote.'}</div></div>
         {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
-      {mode === 'extra' && !landscape && <div style={{ padding: '6px 14px', background: '#000', flex: 'none', textAlign: 'center', fontSize: 11, color: '#aaa092' }}>Every shot is added as a new photo — nothing already saved is touched.</div>}
       {mode === 'review' ? (
         <div style={{ padding: 16, overflow: 'auto' }}>
           <div className="card-title" style={{ color: '#d9d2c4', marginBottom: 12 }}>SHOT LIST · {progress.captured} TAKEN · {progress.skipped} SKIPPED</div>
