@@ -9,3 +9,6 @@ Walk-around photos persist to IndexedDB before upload and flush on next app laun
 **How to apply:** any change to photo upload/queueing must keep per-capture keys, treat 401 as transient (photo survives sign-out), and drop only 413/409/403 as permanent.
 
 **No "extras" concept in the UI (user policy, Aug 2026):** all walk-around photos are one set with no visible cap or separation — the 24 guided slots are just the shooting guide; after the 24th shot the camera stays open and every further shot saves as a new photo (internally `xtra_*` slot keys, a storage detail only). Never show "extra photos" labels, "(+N)" splits, or a /24 cap in photo counts.
+
+## Damage close-ups
+Damage close-ups now go through the same durable queue (persist before upload). Rule: any durable-queue capture path must also purge queued/in-flight copies on delete, or the launch flusher resurrects a photo the inspector removed — use an isDeleted check so an in-flight send that lands after a delete gets deleted server-side too.

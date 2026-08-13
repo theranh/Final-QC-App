@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile } from '../lib/photo';
+import { persistJob, removeJob, removeJobsForPhoto, newJobKey } from '../lib/photoQueue';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
@@ -59,6 +60,46 @@ export function quoteExtras(snapshot) {
 // lost silently. Repeat warnings are throttled (15s) so a burst of debounced
 // saves doesn't stack toasts; a 409 (committed/locked quote) always warns
 // immediately with its own message. Exported for unit tests.
+// Durable damage-photo upload — same offline safety net as walk-around shots:
+// the close-up is persisted to the on-device queue BEFORE the upload attempt,
+// so weak signal, closing the camera, or force-closing the app can't lose it;
+// leftovers are flushed by the app-level queue on the next launch. Permanent
+// rejections (413 too large / 409 committed / 403) can never succeed later,
+// so those are dropped from the queue and surfaced instead. `isDeleted(id)`
+// lets the caller cancel a capture the inspector deleted while it was still
+// queued or in flight — a deleted photo must never be (re)sent later.
+// Exported for tests.
+export async function uploadDamagePhotoDurably({ id, quoteId, slot, dataUrl }, showToast, isDeleted) {
+  const key = newJobKey(id);
+  await persistJob({ key, id, quoteId, slotKey: slot, dataUrl });
+  if (isDeleted && isDeleted(id)) { removeJob(key); return; }
+  try {
+    await api.putQuotePhoto({ id, quoteId, slot, dataUrl });
+    removeJob(key);
+    // Deleted while the upload was in flight: the server copy that just landed
+    // must go away too — the inspector's delete wins.
+    if (isDeleted && isDeleted(id)) api.deleteQuotePhoto({ id }).catch(() => {});
+  } catch (e) {
+    if (isDeleted && isDeleted(id)) { removeJob(key); return; }
+    if (e.status === 413 || e.status === 409 || e.status === 403) {
+      removeJob(key); // retrying can never succeed — don't leave it queued
+      showToast && showToast(e.status === 413 ? 'Photo is too large.' : e.status === 409 ? 'This quote is committed.' : 'Photo could not be saved.');
+    } else {
+      // Transient (offline / server blip / signed out): the persisted copy is
+      // retried automatically, even after an app close.
+      showToast && showToast('Weak signal — damage photo saved, it will send in the background.');
+    }
+  }
+}
+
+// Deleting a damage photo must erase EVERY copy: the on-device queued upload
+// (or the launch-time flusher would resurrect the deleted image later) and the
+// server copy. Exported for tests.
+export async function purgeDeletedDamagePhoto(id) {
+  await removeJobsForPhoto(id, '__none__'); // no surviving capture — drop all queued records
+  api.deleteQuotePhoto({ id }).catch(() => { /* offline — nothing on the server yet */ });
+}
+
 export function createSaveFailureNotifier(notify, nowFn = Date.now) {
   let fails = 0;
   let warnedAt = 0;
@@ -745,6 +786,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   };
 
   // ---------- damage photo capture ----------
+  const deletedPhotoIdsRef = useRef(new Set()); // captures the inspector deleted — never upload these
+  const uploadDamagePhoto = (job) => uploadDamagePhotoDurably(job, showToast, (id) => deletedPhotoIdsRef.current.has(id));
+
   const addDamageFiles = async (ev) => {
     if (committed) return;
     const list = ev.target.files ? [...ev.target.files] : [];
@@ -758,8 +802,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         const id = newId('p');
         setPhotos((prev) => [...prev, { id, thumb, base64: big.split(',')[1], dataUrl: big }]);
         // Each damage photo becomes a quote line — upload it tied to the quote.
-        api.putQuotePhoto({ id, quoteId: qid, slot: 'dmg' + Date.now(), dataUrl: big })
-          .catch(() => { /* retried implicitly by re-save; non-fatal */ });
+        uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg' + Date.now(), dataUrl: big });
       } catch {
         showToast && showToast('Could not read that image');
       }
@@ -776,7 +819,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     }
     setArmedDelete(null);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
-    api.deleteQuotePhoto({ id }).catch(() => {});
+    deletedPhotoIdsRef.current.add(id); // cancels any in-flight/queued upload of this capture
+    purgeDeletedDamagePhoto(id);
   };
 
   const addDamageDataUrl = async (dataUrl) => {
@@ -785,9 +829,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const id = newId('w');
     const thumb = await thumbFromDataUrl(dataUrl);
     setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl }]);
-    api.putQuotePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl }).catch((e) => {
-      showToast && showToast(e.status === 413 ? 'Photo is too large.' : e.status === 409 ? 'This quote is committed.' : 'Photo could not be saved.');
-    });
+    await uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl });
   };
 
   // ---------- analyze pipeline ----------
