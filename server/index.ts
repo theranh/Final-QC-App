@@ -15,10 +15,26 @@ app.set("trust proxy", 1);
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "40mb" }));
 
-async function main() {
-  // Ensure the QC-number counter row exists (first number handed out: FQ-1001).
-  await db.execute(sql`INSERT INTO qc_counter (id, value) VALUES (1, 1000) ON CONFLICT (id) DO NOTHING`);
+// Ensure the QC-number counter row exists (first number handed out: FQ-1001).
+// Runs AFTER the server starts listening: a slow database connection during a
+// publish must never keep the health check from getting a response, or the
+// whole publish times out with no logs. Retries a few times, then gives up
+// loudly (the counter row already exists on any environment that has run once).
+async function seedQcCounter() {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await db.execute(sql`INSERT INTO qc_counter (id, value) VALUES (1, 1000) ON CONFLICT (id) DO NOTHING`);
+      return;
+    } catch (err) {
+      console.error(`qc_counter seed attempt ${attempt} failed:`, err);
+      await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
+  }
+  console.error("qc_counter seed gave up — counter must already exist for FQ numbers to work.");
+}
 
+async function main() {
+  console.log("Startup: configuring auth…");
   await setupAuth(app);
   registerAuthRoutes(app);
   registerAppRoutes(app);
@@ -70,6 +86,8 @@ self.addEventListener('activate', (e) => {
   const port = Number(process.env.PORT) || 5000;
   server.listen(port, "0.0.0.0", () => {
     console.log(`Final QC server listening on 0.0.0.0:${port} (${process.env.NODE_ENV || "development"})`);
+    // Background DB seed — never blocks the health check.
+    void seedQcCounter();
   });
 }
 
