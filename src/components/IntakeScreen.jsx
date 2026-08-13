@@ -6,6 +6,7 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
+import { subscribePending } from '../lib/photoQueue';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -408,12 +409,21 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const slotPhotos = walkPhotos.filter((p) => !String(p.slot || '').startsWith('xtra'));
   const [lightbox, setLightbox] = useState(null); // { url, id } of enlarged photo
   const photoQuoteId = intake?.quoteId ?? null;
+  // Photos can still be uploading in the background (weak signal) when the
+  // grid first loads — track the retry queue and refresh the list as shots
+  // land, so a saved intake never looks like photos went missing.
+  const [pendingUploads, setPendingUploads] = useState(0);
+  useEffect(() => subscribePending(setPendingUploads), []);
   useEffect(() => {
     if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
     let live = true;
-    api.quotePhotos(photoQuoteId).then((j) => { if (live) setIntakePhotos(j?.photos || []); }).catch(() => {});
-    return () => { live = false; };
-  }, [photoQuoteId, walkOpen, quoting]);
+    const load = () => api.quotePhotos(photoQuoteId).then((j) => { if (live) setIntakePhotos(j?.photos || []); }).catch(() => {});
+    load();
+    // While uploads are draining, poll so each arriving shot appears; the
+    // pendingUploads dependency triggers a final refresh when it hits zero.
+    const t = pendingUploads > 0 ? setInterval(load, 4000) : null;
+    return () => { live = false; if (t) clearInterval(t); };
+  }, [photoQuoteId, walkOpen, quoting, pendingUploads]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -654,7 +664,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               </div>
             </div>
             <div className="card" ref={photosCardRef}>
-              <div className="card-title">WALK-AROUND PHOTOS · {slotPhotos.length} / 24{walkPhotos.length > slotPhotos.length ? ` (+${walkPhotos.length - slotPhotos.length})` : ''}</div>
+              <div className="card-title">
+                WALK-AROUND PHOTOS · {slotPhotos.length} / 24{walkPhotos.length > slotPhotos.length ? ` (+${walkPhotos.length - slotPhotos.length})` : ''}
+                {pendingUploads > 0 && <span style={{ marginLeft: 8, color: 'var(--amber)', fontWeight: 700 }}>· sending {pendingUploads}…</span>}
+              </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
               {walkPhotos.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
