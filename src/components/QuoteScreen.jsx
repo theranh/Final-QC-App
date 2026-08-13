@@ -63,7 +63,8 @@ export function quoteExtras(snapshot) {
 // Durable damage-photo upload — same offline safety net as walk-around shots:
 // the close-up is persisted to the on-device queue BEFORE the upload attempt,
 // so weak signal, closing the camera, or force-closing the app can't lose it;
-// leftovers are flushed by the app-level queue on the next launch. Permanent
+// leftovers are flushed by the app-level queue — which keeps retrying damage
+// close-ups even while the walk-around camera is open — and on launch. Permanent
 // rejections (413 too large / 409 committed / 403) can never succeed later,
 // so those are dropped from the queue and surfaced instead. `isDeleted(id)`
 // lets the caller cancel a capture the inspector deleted while it was still

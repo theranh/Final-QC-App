@@ -67,7 +67,7 @@ describe('photoQueue', () => {
     }
   });
 
-  it('pauses while the camera is open, resumes on close', async () => {
+  it('leaves camera slots alone while the camera is open, resumes on close', async () => {
     api.putQuotePhoto.mockResolvedValue({});
     setCameraOpen(true);
     const a = job('a');
@@ -78,6 +78,22 @@ describe('photoQueue', () => {
     setCameraOpen(false); // triggers a flush
     await vi.waitFor(async () => expect(await pendingJobs()).toEqual([]));
     expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+  });
+
+  it('still sends damage close-ups (dmg… slots) while the camera is open', async () => {
+    api.putQuotePhoto.mockResolvedValue({});
+    setCameraOpen(true);
+    const walk = job('walkshot');
+    const dmg = { ...job('closeup'), slotKey: 'dmg1712' };
+    await persistJob(walk);
+    await persistJob(dmg);
+    await flushQueue();
+    // Only the damage close-up went out; the walk slot stays for the camera.
+    expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'closeup', quoteId: 'Q1', slot: 'dmg1712', dataUrl: 'data:image/jpeg;base64,AAA' });
+    expect((await pendingJobs()).map((j) => j.id)).toEqual(['walkshot']);
+    setCameraOpen(false);
+    await vi.waitFor(async () => expect(await pendingJobs()).toEqual([]));
   });
 
   it('notifies subscribers with the pending count, including at flush start', async () => {

@@ -40,9 +40,11 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   useEffect(() => { takenRef.current = taken; }, [taken]);
   const interactedRef = useRef(false); // user captured/picked a slot already
 
-  // While the camera is open it owns the retry loop, so the app-level flusher
-  // pauses. Any photos persisted for this quote in an earlier force-closed
-  // session are picked back up into the in-memory queue here.
+  // While the camera is open it owns the retry loop for camera slots, so the
+  // app-level flusher leaves those alone (it keeps sending damage close-ups,
+  // which the camera never retries). Any photos persisted for this quote in
+  // an earlier force-closed session are picked back up into the in-memory
+  // queue here.
   useEffect(() => {
     setCameraOpen(true);
     let live = true;

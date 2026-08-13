@@ -118,22 +118,36 @@ export async function pendingJobs(quoteId) {
 }
 
 // ---------- background flush ----------
-// The camera pauses the global flusher while it's open (it runs its own retry
-// loop against the same persisted jobs), so the two never race.
+// While the camera is open it runs its own retry loop for walk-around and
+// extra shots (the persisted jobs it also holds in memory), so the global
+// flusher must not touch THOSE — the two would race. Damage close-ups are
+// different: they are queued by the quote screen, the camera never retries
+// them, so the global flusher keeps sending them even while the camera stays
+// open (its interval + the window 'online' listener pick them up as soon as
+// the signal returns).
 let cameraOpen = false;
 export function setCameraOpen(open) { cameraOpen = open; if (!open) flushQueue(); }
 
+// Damage close-ups get 'dmg…' slot keys; everything else is a camera slot.
+const isDamageJob = (job) => String(job.slotKey || '').startsWith('dmg');
+
 let flushing = false;
 export async function flushQueue() {
-  if (flushing || cameraOpen) return;
+  if (flushing) return;
   flushing = true;
   try {
-    const jobs = await pendingJobs(); // newest per server id
+    let jobs = await pendingJobs(); // newest per server id
+    // Camera open: only damage close-ups are ours to send — camera slots
+    // belong to the camera's own retry loop.
+    if (cameraOpen) jobs = jobs.filter(isDamageJob);
+    if (!jobs.length) return;
     // Show the "Sending N photos…" pill for the whole flush, including the
     // launch-time pass where nothing has notified listeners yet.
-    if (jobs.length) notify(jobs.length);
+    notify(jobs.length);
     for (const job of jobs) {
-      if (cameraOpen) break;
+      // The camera may have opened mid-flush — stop touching its slots, but
+      // damage close-ups are still safe to send.
+      if (cameraOpen && !isDamageJob(job)) continue;
       try {
          
         await api.putQuotePhoto({ id: job.id, quoteId: job.quoteId, slot: job.slotKey, dataUrl: job.dataUrl });
