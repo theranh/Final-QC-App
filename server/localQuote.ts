@@ -174,13 +174,14 @@ export type CompletedIntake = {
   estimator: string | null;
   completedAt: number | null;
   inProgress: boolean;
+  quoteId: string | null;
 };
 
 /** All intakes for the In-Take Quotes bucket — committed (completed) ones plus
  *  in-progress ones still being worked, newest activity first, VIN normalized. */
 export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
   const r = await db.execute(sql`
-    SELECT vin, stock, vehicle, estimator,
+    SELECT vin, stock, vehicle, estimator, quote_id,
            EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms,
            EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
     FROM intakes
@@ -196,6 +197,7 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
         ? Math.round(Number(row.completed_ms))
         : row.updated_ms != null ? Math.round(Number(row.updated_ms)) : null,
       inProgress: row.completed_ms == null,
+      quoteId: row.quote_id != null ? String(row.quote_id).trim() || null : null,
     }))
     .filter((row) => row.vin.length >= 6);
 }
@@ -238,9 +240,17 @@ export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, 
 /** Latest quote per VIN → its cover thumbnail (first damage-line thumb stored
  *  as `data.cover`) plus hrs/usd/lineCount. Used to enrich the awaiting-QC
  *  cards with a photo, mirroring the old all-quotes list. Read-only. */
-export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, QuoteCover>> {
+export async function fetchQuoteCovers(entries: Array<{ vin: string; quoteId?: string | null }>): Promise<Map<string, QuoteCover>> {
   const out = new Map<string, QuoteCover>();
-  const unique = [...new Set(vins.map((v) => String(v || "").trim().toUpperCase()).filter((v) => v.length >= 6))];
+  // Intake-linked quote ids: the photos live under the intake's own quote id,
+  // which may have no quotes row at all (photos-only truck). Those ids must
+  // be part of the walk-photo lookup or such trucks get no cover thumbnail.
+  const intakeQuoteByVin = new Map<string, string>();
+  for (const e of entries) {
+    const vin = String(e.vin || "").trim().toUpperCase();
+    if (vin.length >= 6 && e.quoteId) intakeQuoteByVin.set(vin, String(e.quoteId));
+  }
+  const unique = [...new Set(entries.map((e) => String(e.vin || "").trim().toUpperCase()).filter((v) => v.length >= 6))];
   if (!unique.length) return out;
   const res = await db.execute(sql`
     SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, id, data
@@ -250,11 +260,20 @@ export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, Quot
   `);
   const rows = rowsOf(res);
   // Use the DB row id (authoritative), not data->>'id' which can be absent.
-  const bestWalk = await bestWalkPhotoIds(rows.map((r) => String(r.id || "")).filter(Boolean));
-  for (const r of rows) {
+  // Include the intake-linked quote ids too — a truck's photos can sit under
+  // a quote id that never got a quotes row (walk-around done, no quote yet).
+  const quoteRowIds = rows.map((r) => String(r.id || "")).filter(Boolean);
+  const bestWalk = await bestWalkPhotoIds([...quoteRowIds, ...intakeQuoteByVin.values()]);
+  const rowByVin = new Map(rows.map((r) => [String(r.vin), r]));
+  for (const vin of unique) {
+    const r = rowByVin.get(vin) ?? { id: "", data: {} };
     const q = (r.data as any) || {};
     const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
-    const walkId = bestWalk.get(String(r.id || ""))?.id;
+    const intakeQid = intakeQuoteByVin.get(vin);
+    // Prefer the intake's own quote id (that's where the walk-around photos
+    // were uploaded), then the latest quote row for the VIN.
+    const walkId = (intakeQid ? bestWalk.get(intakeQid)?.id : undefined)
+      ?? bestWalk.get(String(r.id || ""))?.id;
     // Prefer the earliest walk-around shot; only a truck with NO walk photos
     // at all falls back to the stored cover / first damage-line thumb.
     const cover = walkId
@@ -264,7 +283,7 @@ export async function fetchQuoteCovers(vins: string[]): Promise<Map<string, Quot
         : Array.isArray(q.lines)
         ? (q.lines.find((l: any) => l && typeof l.thumb === "string" && l.thumb)?.thumb ?? null)
         : null;
-    out.set(String(r.vin), {
+    out.set(vin, {
       cover: cover || null,
       hrs: q.totals?.hrs ?? null,
       usd: q.totals?.usd ?? null,

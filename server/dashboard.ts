@@ -477,7 +477,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
   // Enrich each In-Take Quotes card with its quote's cover thumb + figures so
   // the Vehicles bucket mirrors the intake app's all-quotes list.
-  const awaitingCovers = await fetchQuoteCovers(awaitingBase.map((i) => i.vin));
+  const awaitingCovers = await fetchQuoteCovers(awaitingBase.map((i) => ({ vin: i.vin, quoteId: i.quoteId })));
   const awaiting = awaitingBase.map((i) => {
     const c = awaitingCovers.get(i.vin);
     return {

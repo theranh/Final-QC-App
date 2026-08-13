@@ -230,8 +230,12 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const tag = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     const slotKey = `xtra_${tag}`;
     const id = `${quoteId}_x${tag}`.slice(0, 60);
+    // Same durable path as guided shots: persist to disk before the upload
+    // attempt so a force-close or dead battery can't lose an extra photo.
+    const key = newJobKey(id);
+    await persistJob({ key, id, quoteId, slotKey, dataUrl });
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
-    await uploadPhoto({ id, slotKey, dataUrl });
+    await uploadPhoto({ key, id, slotKey, dataUrl });
   };
   const extraShots = Object.keys(photos).filter((k) => k.startsWith('xtra_') && photos[k]);
 
@@ -268,6 +272,13 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     setSkipped((p) => ({ ...p, [slotKey]: false }));
     const next = nextUntakenSlot(WALK_SLOTS, { ...taken, [slotKey]: true }, current + 1);
     if (next >= 0) setCurrent(next);
+    else {
+      // All 24 guided spots are done — keep the camera rolling in extra mode
+      // (also in add-only: extras are additive and never touch saved photos)
+      // so the crew can take as many additional shots as they want.
+      setMode('extra');
+      showToast?.('All 24 walk-around shots done — keep shooting, every extra photo is saved too. Tap ✕ when finished.');
+    }
     await uploadPhoto({ key, id, slotKey, dataUrl, prev });
   };
 
