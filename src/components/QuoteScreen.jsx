@@ -590,6 +590,54 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     api.quotePhotos(quoteId).then((j) => { if (live) setServerPhotos(j?.photos || []); }).catch(() => {});
     return () => { live = false; };
   }, [quoteId, walkOpen, photos.length]);
+  // Recover orphaned damage close-ups: a photo can reach the server and then
+  // vanish from local state (screen reload, PWA restart) before it was ever
+  // analyzed. Any server 'dmg…' photo that has no quote line and no local
+  // pending copy is pulled back down so it shows up and gets analyzed like the
+  // rest — otherwise "3 photos taken" silently becomes "2 reviewable".
+  const recoveredIdsRef = useRef(new Set()); // ids successfully restored this session
+  const recoveryInflightRef = useRef(new Set()); // ids currently downloading
+  useEffect(() => {
+    if (committed || walkOpen || !hydratedRef.current) return;
+    const orphans = serverPhotos.filter((p) =>
+      String(p.slot || '').startsWith('dmg') &&
+      !linesRef.current.some((l) => l.id === p.id) &&
+      !photos.some((lp) => lp.id === p.id) &&
+      !deletedPhotoIdsRef.current.has(p.id) &&
+      !recoveredIdsRef.current.has(p.id) &&
+      !recoveryInflightRef.current.has(p.id));
+    if (!orphans.length) return;
+    // No cancellation on cleanup: each download marks itself recovered only
+    // after it lands in state, so an interrupted batch is simply retried by
+    // the next serverPhotos refresh without ever skipping a photo.
+    orphans.forEach((p) => recoveryInflightRef.current.add(p.id));
+    (async () => {
+      for (const p of orphans) {
+        try {
+          const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`, { credentials: 'include' });
+          if (!resp.ok) throw new Error('fetch failed');
+          const blob = await resp.blob();
+          const dataUrl = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = reject;
+            r.readAsDataURL(blob);
+          });
+          const thumb = await thumbFromDataUrl(dataUrl);
+          // The inspector may have deleted it while the download was running.
+          if (!deletedPhotoIdsRef.current.has(p.id)) {
+            setPhotos((prev) => (prev.some((lp) => lp.id === p.id) ? prev : [...prev, { id: p.id, thumb, base64: String(dataUrl).split(',')[1], dataUrl }]));
+            recoveredIdsRef.current.add(p.id);
+          }
+        } catch {
+          /* left un-recovered — retried on the next photo-list refresh */
+        } finally {
+          recoveryInflightRef.current.delete(p.id);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverPhotos, committed, walkOpen]);
   const [walkInitialMode, setWalkInitialMode] = useState('guided');
   // Flags / keep / notes (ported from the old app — persisted with the quote)
   const [flags, setFlags] = useState(() => (Array.isArray(prefill?.flags) ? prefill.flags.map((f) => ({ id: f.id, done: !!f.done })) : []));
@@ -928,7 +976,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       autosave(next);
       return next;
     });
-    api.deleteQuotePhoto({ id }).catch(() => {});
+    // Same deletion authority as removePhoto: block any queued/in-flight
+    // upload of this capture and never let recovery resurrect it.
+    deletedPhotoIdsRef.current.add(id);
+    recoveredIdsRef.current.add(id);
+    purgeDeletedDamagePhoto(id);
   };
 
   // ---------- line editor ----------
