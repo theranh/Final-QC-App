@@ -14,7 +14,7 @@ import {
 } from '../lib/quoterPricing';
 import {
   panelLabel, sysPrompt, parseCls, correctionDiffs,
-  CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, SECOND_LOOK_ADDENDUM,
+  CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, CLASSIFY_PROMPT_PAIR, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
 
 /*
@@ -876,12 +876,13 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     purgeDeletedDamagePhoto(id);
   };
 
-  const addDamageDataUrl = async (dataUrl) => {
+  const addDamageDataUrl = async (dataUrl, wideDataUrl) => {
     if (committed) return;
     const qid = ensureQuoteId();
     const id = newId('w');
     const thumb = await thumbFromDataUrl(dataUrl);
-    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl }]);
+    const wideBase64 = wideDataUrl ? wideDataUrl.split(',')[1] : undefined;
+    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64 }]);
     await uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl });
   };
 
@@ -893,7 +894,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     });
   }, []);
 
-  const classifyLine = useCallback(async (id, base64) => {
+  const classifyLine = useCallback(async (id, base64, wideBase64) => {
     setLine(id, { status: 'running', errMsg: '' });
     if (!base64) {
       setLine(id, { status: 'error', errMsg: 'Photo is no longer in memory — delete this line and retake it.' });
@@ -903,8 +904,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       const system = sysPrompt(corrCacheRef.current, vehRef.current);
       const callClassify = (sys) => api.classify({
         image: base64,
+        ...(wideBase64 ? { image2: wideBase64 } : {}),
         system: sys,
-        prompt: CLASSIFY_PROMPT,
+        prompt: wideBase64 ? CLASSIFY_PROMPT_PAIR : CLASSIFY_PROMPT,
         model: CLASSIFY_MODEL,
         max_tokens: CLASSIFY_MAX_TOKENS,
       });
@@ -952,7 +954,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     // Snapshot the queued ids together with their image bytes.
     const queued = linesRef.current.filter((l) => l.status === 'queued');
     for (const l of queued) {
-      await classifyLine(l.id, l.base64);
+      await classifyLine(l.id, l.base64, l.wideBase64);
       await new Promise((r) => setTimeout(r, 350));
     }
     busyRef.current = false;
@@ -965,7 +967,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (!photos.length) return;
     ensureQuoteId();
     const newLines = photos.map((p) => ({
-      id: p.id, thumb: p.thumb, base64: p.base64,
+      id: p.id, thumb: p.thumb, base64: p.base64, wideBase64: p.wideBase64,
       status: 'queued', cls: null, review: false, manual: false, open: false, editing: false, errMsg: '',
     }));
     setLines((prev) => [...prev, ...newLines]);
@@ -983,7 +985,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
 
   const rerunLine = (id) => {
     const l = linesRef.current.find((x) => x.id === id);
-    if (l) classifyLine(id, l.base64);
+    if (l) classifyLine(id, l.base64, l.wideBase64);
   };
 
   const deleteLine = (id) => {

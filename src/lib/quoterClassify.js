@@ -26,7 +26,7 @@ export const CLASSIFY_MODEL = 'claude-sonnet-4-6';
 export const CLASSIFY_MAX_TOKENS = 700;
 export const CLASSIFY_PROMPT = 'Classify the damage in this photo. JSON only.';
 
-// ---------- system prompt (copied verbatim from index.html sysPrompt) ----------
+export const CLASSIFY_PROMPT_PAIR = 'The first image is a close-up of the damage area; the second is a wide shot of the same area showing its panel location on the vehicle. Use both to classify the damage. JSON only.';
 const BASE_SYS_PROMPT = `You are the damage classifier for Truck Ranch, a used truck dealership. You will be shown ONE photo of a possibly damaged area on a pickup truck or SUV.
 
 Return ONLY a single JSON object. No markdown, no code fences, no preamble, no explanation.

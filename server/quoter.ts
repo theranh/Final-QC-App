@@ -602,7 +602,7 @@ export function registerQuoterRoutes(app: Express) {
         }
         return res.status(400).json({ error: "Invalid JSON body" });
       }
-      const { image, system, prompt, model, max_tokens } = req.body || {};
+      const { image, image2, system, prompt, model, max_tokens } = req.body || {};
       if (
         !image ||
         typeof image !== "string" ||
@@ -610,27 +610,24 @@ export function registerQuoterRoutes(app: Express) {
       ) {
         return res.status(400).json({ error: "Missing or invalid image" });
       }
+      const hasWide = image2 && typeof image2 === "string" && /^[A-Za-z0-9+/=\s]+$/.test(image2.slice(0, 100));
       try {
         const anthropic = new Anthropic({ apiKey, baseURL });
+        // Build the user message content: close-up always first; wide shot
+        // appended second when provided so the model can use both for panel
+        // identification and severity sizing.
+        const userContent: any[] = [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image } },
+        ];
+        if (hasWide) {
+          userContent.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: image2 } });
+        }
+        userContent.push({ type: "text", text: String(prompt || "Classify the damage in this photo. JSON only.").slice(0, 2000) });
         const msg = await anthropic.messages.create({
           model: ALLOWED_MODELS.includes(model) ? model : "claude-haiku-4-5",
           max_tokens: Math.min(Number(max_tokens) || 2048, 8192),
           system: String(system || "").slice(0, 8000),
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "image",
-                  source: { type: "base64", media_type: "image/jpeg", data: image },
-                },
-                {
-                  type: "text",
-                  text: String(prompt || "Classify the damage in this photo. JSON only.").slice(0, 2000),
-                },
-              ],
-            },
-          ],
+          messages: [{ role: "user", content: userContent }],
         });
         const text = (msg.content || [])
           .filter((c: any) => c.type === "text")

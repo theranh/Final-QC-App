@@ -346,8 +346,16 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     else ctx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
     ctx.restore();
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-    if (mode === 'damage') { if (!committed) onDamageCapture?.(dataUrl); }
-    else if (mode === 'extra') await saveExtra(dataUrl);
+    if (mode === 'damage') {
+      if (!committed) { damageCloseUpRef.current = dataUrl; setMode('damage_wide'); }
+    } else if (mode === 'damage_wide') {
+      if (!committed) {
+        const closeUp = damageCloseUpRef.current;
+        damageCloseUpRef.current = null;
+        setMode('guided');
+        onDamageCapture?.(closeUp, dataUrl);
+      }
+    } else if (mode === 'extra') await saveExtra(dataUrl);
     else await saveGuided(dataUrl);
   };
   const onFile = async (event) => {
@@ -355,16 +363,36 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const reader = new FileReader(); reader.onload = async () => {
       if (committed) return;
       const normalized = await dataUrlImage(reader.result, MAX, 0.8, zoomRef.current);
-      if (mode === 'damage') onDamageCapture?.(normalized); else if (mode === 'extra') await saveExtra(normalized); else await saveGuided(normalized);
+      if (mode === 'damage') {
+        damageCloseUpRef.current = normalized; setMode('damage_wide');
+      } else if (mode === 'damage_wide') {
+        const closeUp = damageCloseUpRef.current; damageCloseUpRef.current = null;
+        setMode('guided'); onDamageCapture?.(closeUp, normalized);
+      } else if (mode === 'extra') await saveExtra(normalized); else await saveGuided(normalized);
     }; reader.readAsDataURL(file);
   };
+  // Holds the close-up dataUrl while the camera waits for the matching wide shot.
+  const damageCloseUpRef = useRef(null);
   const damage = () => { if (!committed && !addOnly) setMode('damage'); };
   const selectSlot = (i) => {
     if (addOnly && taken[WALK_SLOTS[i].key]) { showToast?.('That spot already has a photo — saved photos can’t be replaced.'); return; }
     interactedRef.current = true;
     setMode('guided'); setCurrent(i);
   };
-  const skipOrCancel = () => (mode === 'damage' ? setMode('guided') : (setSkipped((p) => ({ ...p, [slot.key]: true })), setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current)));
+  const skipOrCancel = () => {
+    if (mode === 'damage_wide') {
+      // Skip the wide shot — send just the close-up that was already captured.
+      const closeUp = damageCloseUpRef.current;
+      damageCloseUpRef.current = null;
+      setMode('guided');
+      if (closeUp) onDamageCapture?.(closeUp);
+    } else if (mode === 'damage') {
+      setMode('guided');
+    } else {
+      setSkipped((p) => ({ ...p, [slot.key]: true }));
+      setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current);
+    }
+  };
   // Translucent dark camera-chrome buttons (never the app's white .btn styles)
   const chromeBtn = { border: '1px solid rgba(255,255,255,.28)', borderRadius: 20, background: 'rgba(28,26,23,.65)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: 1, padding: '10px 14px' };
   const roundBtn = { ...chromeBtn, borderRadius: '50%', width: 42, height: 42, padding: 0, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(35,32,26,.72)', border: '2px solid rgba(255,255,255,.5)' };
@@ -404,7 +432,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const frame = (
     <div style={{ position: 'relative', flex: 'none', width: '100%', maxWidth: landscape ? 'calc((100dvh) * 4 / 3)' : '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807', alignSelf: 'center' }}>
       <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
-      {mode === 'damage' && <div style={{ position: 'absolute', top: 10, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)', pointerEvents: 'none', fontSize: 15, color: '#f0e6d5' }}>DAMAGE CLOSE-UP</div>}
+      {(mode === 'damage' || mode === 'damage_wide') && <div style={{ position: 'absolute', top: 10, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)', pointerEvents: 'none', fontSize: 15, color: '#f0e6d5' }}>{mode === 'damage_wide' ? 'WIDE SHOT — STEP BACK' : 'DAMAGE CLOSE-UP'}</div>}
       {error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
       {!landscape && !error && <div style={{ position: 'absolute', bottom: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ pointerEvents: 'auto' }}>{zoomDial(false)}</div></div>}
     </div>
@@ -422,7 +450,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
         <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>×</button>
-        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : 'Close-ups go to the AI for the body quote.'}</div></div>
+        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : mode === 'damage_wide' ? 'WIDE SHOT' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'damage_wide' ? 'Step back — frame the whole panel.' : 'Close-ups go to the AI for the body quote.'}</div></div>
         {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
       {mode === 'review' ? (
@@ -441,7 +469,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
             <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>✕</button>
             {zoomDial(true)}
             {shutterBtn}
-            {mode === 'damage' ? <button style={chromeBtn} onClick={skipOrCancel}>CANCEL</button> : mode === 'extra' ? extraThumb : galleryBtn}
+            {(mode === 'damage' || mode === 'damage_wide') ? <button style={chromeBtn} onClick={skipOrCancel}>{mode === 'damage_wide' ? 'SKIP' : 'CANCEL'}</button> : mode === 'extra' ? extraThumb : galleryBtn}
           </div>
           {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}
         </div>
@@ -451,11 +479,11 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
           <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
           <div style={{ flex: 'none', padding: '12px 18px calc(16px + env(safe-area-inset-bottom))', background: '#000' }}>
             <div style={{ display: 'flex', alignItems: 'center' }}>
-              {mode === 'damage' ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>CANCEL</button> : mode === 'extra' ? extraThumb : galleryBtn}
+              {(mode === 'damage' || mode === 'damage_wide') ? <button style={{ ...chromeBtn, width: 84 }} onClick={skipOrCancel}>{mode === 'damage_wide' ? 'SKIP' : 'CANCEL'}</button> : mode === 'extra' ? extraThumb : galleryBtn}
               <span style={{ flex: 1 }} />
               {shutterBtn}
               <span style={{ flex: 1 }} />
-              <span style={{ flex: 'none', width: mode === 'damage' ? 84 : 64 }} />
+              <span style={{ flex: 'none', width: (mode === 'damage' || mode === 'damage_wide') ? 84 : 64 }} />
             </div>
           </div>
           {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: .9, pointerEvents: 'none' }} />}
