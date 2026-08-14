@@ -118,9 +118,18 @@ export function parseCls(text) {
   }
 }
 
-// ---------- correction diffs (copied verbatim from logCorrection) ----------
-// Returns the diff strings the old app posted to /api/corrections; empty when
-// the estimator didn't change any AI-classified field.
+const CONF_RANK = { high: 2, medium: 1, low: 0 };
+export function pickBetterCls(cls, cls2) {
+  if (!cls2) return cls;
+  if (!cls) return cls2;
+  const cls2Named = cls2.panel !== 'unknown';
+  const clsNamed  = cls.panel  !== 'unknown';
+  if (cls2Named && !clsNamed) return cls2;   // retry names the panel; first didn't
+  if (clsNamed  && !cls2Named) return cls;   // first named the panel; retry didn't
+  // Same panel-named status: promote retry only when confidence is strictly higher.
+  if ((CONF_RANK[cls2.confidence] ?? 0) > (CONF_RANK[cls.confidence] ?? 0)) return cls2;
+  return cls;
+}
 export function correctionDiffs(ai, est) {
   if (!ai) return [];
   const diffs = [];

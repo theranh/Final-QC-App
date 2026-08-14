@@ -13,7 +13,7 @@ import {
   billingMap, bodyAlloc, billingCls, rn,
 } from '../lib/quoterPricing';
 import {
-  panelLabel, sysPrompt, parseCls, correctionDiffs,
+  panelLabel, sysPrompt, parseCls, correctionDiffs, pickBetterCls,
   CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, CLASSIFY_PROMPT_PAIR, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
 
@@ -920,7 +920,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         try {
           const out2 = await callClassify(system + SECOND_LOOK_ADDENDUM);
           const cls2 = parseCls(out2 && typeof out2.text === 'string' ? out2.text : '');
-          if (cls2 && (!cls || (cls2.panel !== 'unknown' && cls2.confidence !== 'low') || cls.panel === 'unknown')) cls = cls2;
+          cls = pickBetterCls(cls, cls2);
         } catch { /* second look is best-effort — keep the first answer */ }
       }
       if (!cls) {
