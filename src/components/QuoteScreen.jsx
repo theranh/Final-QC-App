@@ -1835,7 +1835,20 @@ function LineCard({ line: l, rates, locked, onStartEdit, onCancelEdit, onApplyEd
     <div className="card" style={{ borderColor: l.review ? 'var(--amber)' : isErr ? 'var(--red)' : 'var(--border)' }}>
       <div style={{ display: 'flex', gap: 10 }}>
         {l.thumb && (
-          <img src={l.thumb} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', flex: '0 0 auto' }} />
+          <div style={{ display: 'flex', gap: 4, flex: '0 0 auto' }}>
+            <div style={{ position: 'relative' }}>
+              <img src={l.thumb} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
+              {l.wideBase64 && (
+                <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>CLOSE</span>
+              )}
+            </div>
+            {l.wideBase64 && (
+              <div style={{ position: 'relative' }}>
+                <img src={`data:image/jpeg;base64,${l.wideBase64}`} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
+                <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>WIDE</span>
+              </div>
+            )}
+          </div>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
