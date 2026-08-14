@@ -14,7 +14,7 @@ import {
 } from '../lib/quoterPricing';
 import {
   panelLabel, sysPrompt, parseCls, correctionDiffs,
-  CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT,
+  CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
 
 /*
@@ -566,6 +566,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [vin, setVin] = useState(() => String(prefill?.vin || '').toUpperCase());
   const [vinOverridden, setVinOverridden] = useState(false);
   const [veh, setVeh] = useState({ year: '', make: '', model: '', trim: '', body: '' });
+  const vehRef = useRef(veh);
+  vehRef.current = veh;
   const [vehicleText, setVehicleText] = useState(() => prefill?.vehicle || '');
   const [decoding, setDecoding] = useState(false);
   const [decodeFailed, setDecodeFailed] = useState(false);
@@ -846,7 +848,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const qid = ensureQuoteId();
     for (const f of list) {
       try {
-        const big = await scaleImage(f, 1100, 0.82);
+        // 1568px is the sweet spot for Claude vision — small dents get ~2×
+        // the pixels they had at 1100px without tripping the upload size cap.
+        const big = await scaleImage(f, 1568, 0.85);
         const thumb = await compressImageFile(f);
         const id = newId('p');
         setPhotos((prev) => [...prev, { id, thumb, base64: big.split(',')[1], dataUrl: big }]);
@@ -896,15 +900,27 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       return;
     }
     try {
-      const out = await api.classify({
+      const system = sysPrompt(corrCacheRef.current, vehRef.current);
+      const callClassify = (sys) => api.classify({
         image: base64,
-        system: sysPrompt(corrCacheRef.current),
+        system: sys,
         prompt: CLASSIFY_PROMPT,
         model: CLASSIFY_MODEL,
         max_tokens: CLASSIFY_MAX_TOKENS,
       });
+      const out = await callClassify(system);
       const text = out && typeof out.text === 'string' ? out.text : '';
-      const cls = parseCls(text);
+      let cls = parseCls(text);
+      // Second look: if the quick pass was uncertain (or unparseable), re-run
+      // once with a deliberate step-by-step examination before flagging a
+      // human. Keep the better of the two answers.
+      if (!cls || cls.confidence === 'low' || cls.panel === 'unknown') {
+        try {
+          const out2 = await callClassify(system + SECOND_LOOK_ADDENDUM);
+          const cls2 = parseCls(out2 && typeof out2.text === 'string' ? out2.text : '');
+          if (cls2 && (!cls || (cls2.panel !== 'unknown' && cls2.confidence !== 'low') || cls.panel === 'unknown')) cls = cls2;
+        } catch { /* second look is best-effort — keep the first answer */ }
+      }
       if (!cls) {
         setLine(id, { status: 'done', cls: null, review: true, open: true, editing: false });
         autosave();

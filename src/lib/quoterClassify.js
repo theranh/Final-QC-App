@@ -73,9 +73,30 @@ export function corrHints(corrCache) {
   }
 }
 
-export function sysPrompt(corrCache) {
-  return BASE_SYS_PROMPT + corrHints(corrCache);
+// vehicleHint(): tell the model what truck it is looking at. Knowing the body
+// style (crew cab vs regular, truck vs SUV) sharply improves panel naming —
+// bedside vs quarter, rear door existence, flare shapes.
+export function vehicleHint(veh) {
+  if (!veh) return '';
+  const parts = [veh.year, veh.make, veh.model, veh.trim].map((v) => String(v || '').trim()).filter(Boolean);
+  const body = String(veh.body || '').trim();
+  if (!parts.length && !body) return '';
+  return '\n\nVEHICLE CONTEXT — this photo is from a ' + (parts.join(' ') || 'vehicle') + (body ? ' (' + body + ')' : '') + '. Use this to identify panels correctly (e.g. whether it has rear doors, a bed, or a liftgate).';
 }
+
+export function sysPrompt(corrCache, veh) {
+  return BASE_SYS_PROMPT + vehicleHint(veh) + corrHints(corrCache);
+}
+
+// Second-look addendum used when the first pass came back low-confidence or
+// unknown: same schema, but pushes a slower, more deliberate examination.
+export const SECOND_LOOK_ADDENDUM = `
+
+SECOND LOOK — a previous quick classification of this exact photo was uncertain. Examine it again carefully before answering:
+1. Orient yourself first: find wheels, door handles, glass, and body lines to determine which panel fills the frame and which side of the vehicle it is.
+2. Then judge the damage: trace its outline, compare its size to reference objects (door handle ~6in, emblem ~3in), and check whether paint is broken.
+3. Only use panel "unknown" or confidence "low" if the photo is genuinely unusable (not a vehicle, extreme blur/glare) — a plainly visible panel deserves a real answer at "medium" or better.
+Return ONLY the JSON object, same schema as before.`;
 
 // ---------- parse + sanitize (copied verbatim from parseCls) ----------
 export function parseCls(text) {
