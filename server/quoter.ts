@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireEmployee } from "./access";
-import { corrections, intakes, photos, quotes, settings } from "@shared/schema";
+import { aiAnalyses, corrections, intakes, photos, quotes, settings } from "@shared/schema";
 import { bestWalkPhotoIds } from "./localQuote";
 
 // ---------------------------------------------------------------------------
@@ -461,11 +461,20 @@ export function registerQuoterRoutes(app: Express) {
         : [];
       if (!diffs.length) return res.status(400).json({ error: "Missing diffs" });
       const ts = Number(body.ts) || Date.now();
-      await db.insert(corrections).values({ ts, diffs });
-      // Keep only the newest 500 corrections.
+      const analysisId = typeof body.analysis_id === "string" ? body.analysis_id.slice(0, 100) : null;
+      await db.insert(corrections).values({ ts, diffs, analysisId });
+      // Keep only the newest 500 corrections (shop-calibration learning cache).
       await db.execute(
         sql`DELETE FROM corrections WHERE id NOT IN (SELECT id FROM corrections ORDER BY id DESC LIMIT 500)`,
       );
+      // Persist the correction flag on the analysis row so the accuracy trend
+      // survives the 500-row cleanup above.  Fire-and-forget: a failure here
+      // only affects the dashboard stat, not the correction record itself.
+      if (analysisId) {
+        db.execute(sql`UPDATE ai_analyses SET corrected = TRUE WHERE analysis_id = ${analysisId}`).catch(
+          (e: any) => console.error("ai_analyses corrected flag update error:", e?.message ?? e),
+        );
+      }
       res.json({ ok: true });
     }),
   );
@@ -634,6 +643,14 @@ export function registerQuoterRoutes(app: Express) {
           .map((c: any) => c.text)
           .join("");
         res.json({ text });
+        // Track this analysis for accuracy trending — fire-and-forget.
+        // analysis_id is client-generated; ON CONFLICT DO NOTHING ensures the
+        // second-look call (same id) does not add a second row to the denominator.
+        const analysisId =
+          typeof req.body?.analysis_id === "string" ? (req.body.analysis_id as string).slice(0, 100) : null;
+        db.execute(
+          sql`INSERT INTO ai_analyses (ts, analysis_id) VALUES (${Date.now()}, ${analysisId}) ON CONFLICT (analysis_id) DO NOTHING`,
+        ).catch((e: any) => console.error("ai_analyses insert error:", e?.message ?? e));
       } catch (e: any) {
         console.error("classify error:", e && e.message ? e.message : e);
         const status = e && e.status === 429 ? 429 : 502;

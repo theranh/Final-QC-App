@@ -110,6 +110,9 @@ function parseISODay(s: unknown): string | null {
   return m ? m[0] : null;
 }
 
+/** @internal exported for tests */
+export { last8WeekMondays };
+
 /** Enumerate YYYY-MM-DD days from..to inclusive (bounded). */
 function eachDay(from: string, to: string): string[] {
   const out: string[] = [];
@@ -120,6 +123,28 @@ function eachDay(from: string, to: string): string[] {
     cur = new Date(cur.getTime() + 86_400_000);
   }
   return out;
+}
+
+/**
+ * Return YYYY-MM-DD labels for the 8 most recent Monday-start weeks in tz,
+ * oldest first.  Always produces exactly 8 entries so the dashboard chart has
+ * a consistent x-axis regardless of data density.
+ */
+function last8WeekMondays(tz: string): string[] {
+  const now = new Date();
+  const tzDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(now);
+  const base = new Date(`${tzDay}T12:00:00Z`);
+  const dow = base.getUTCDay(); // 0 = Sun, 1 = Mon, …
+  const daysToMon = dow === 0 ? 6 : dow - 1;
+  base.setUTCDate(base.getUTCDate() - daysToMon); // roll back to this Monday
+  const weeks: string[] = [];
+  for (let i = 7; i >= 0; i--) {
+    const d = new Date(base.getTime() - i * 7 * 86_400_000);
+    weeks.push(d.toISOString().slice(0, 10));
+  }
+  return weeks;
 }
 
 // ---------- Body Quoter (local: quotes / intakes tables) ----------
@@ -583,6 +608,45 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     finalQcs: Number(r.n) || 0,
   }));
 
+  // ----- AI accuracy trend (last 8 weeks, linked by analysis_id) -----
+  // Only analyses with a tracked analysis_id are counted; rows without one
+  // pre-date this feature and are excluded so the denominator is always
+  // reliable (no second-look inflation — the client reuses the same UUID for
+  // both the initial call and the second look; ON CONFLICT DO NOTHING on the
+  // server keeps only one row per UUID).
+  // Corrections are counted in the ANALYSIS week (not the correction week) so
+  // cross-week corrections are attributed to the right period.
+  // If the ai_analyses table doesn't exist yet (first boot before
+  // ensureAccuracySchema runs) the query returns empty rows — no crash.
+  // Query ai_analyses only — correction state is stored in the corrected column
+  // so accuracy data survives the 500-row learning-cache cleanup on corrections.
+  const accuracyRes = await db
+    .execute(sql`
+      SELECT
+        to_char(date_trunc('week', to_timestamp(ts / 1000.0) AT TIME ZONE ${TZ}), 'YYYY-MM-DD') AS week,
+        COUNT(*)::int AS analyses,
+        COUNT(*) FILTER (WHERE corrected)::int AS corrected
+      FROM ai_analyses
+      WHERE ts > extract(epoch from now() - interval '8 weeks') * 1000
+        AND analysis_id IS NOT NULL
+      GROUP BY 1
+      ORDER BY 1
+    `)
+    .catch(() => ({ rows: [] } as any));
+  const accuracyByWk = new Map<string, { analyses: number; corrections: number }>();
+  for (const r of ((accuracyRes as any).rows ?? []) as any[]) {
+    accuracyByWk.set(String(r.week), {
+      analyses: Number(r.analyses) || 0,
+      corrections: Number(r.corrected) || 0,
+    });
+  }
+  // Always emit exactly 8 buckets so the client gets a consistent x-axis.
+  const aiAccuracy = last8WeekMondays(TZ).map((week) => ({
+    week,
+    analyses: accuracyByWk.get(week)?.analyses ?? 0,
+    corrections: accuracyByWk.get(week)?.corrections ?? 0,
+  }));
+
   // ----- THIS WEEK strip (Monday-start week in TZ, additive/read-only) -----
   // intakes completed, QCs passed/failed (first inspection result this week),
   // and average quoted hours across quotes created this week.
@@ -641,6 +705,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     activity,
     weekly,
     thisWeek,
+    aiAccuracy,
     vehicles,
     monthSummary: sheet?.summary ?? null,
   };

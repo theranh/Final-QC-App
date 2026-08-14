@@ -15,6 +15,44 @@ app.set("trust proxy", 1);
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "40mb" }));
 
+// Ensure the AI accuracy schema is in place.  Runs after listen for the same
+// reason as seedQcCounter (health-check must not block).  Handles both a fresh
+// environment (CREATE TABLE IF NOT EXISTS) and an existing install that already
+// has ai_analyses without the analysis_id column (ALTER TABLE … IF NOT EXISTS).
+async function ensureAccuracySchema() {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      // Create table; column list matches the full schema so new envs are complete.
+      await db.execute(sql`
+        CREATE TABLE IF NOT EXISTS ai_analyses (
+          id bigserial PRIMARY KEY,
+          ts bigint NOT NULL,
+          analysis_id text
+        )
+      `);
+      // For existing installs that pre-date analysis_id / corrected columns.
+      await db.execute(sql`ALTER TABLE ai_analyses ADD COLUMN IF NOT EXISTS analysis_id text`);
+      await db.execute(sql`ALTER TABLE ai_analyses ADD COLUMN IF NOT EXISTS corrected boolean NOT NULL DEFAULT false`);
+      // Regular (non-partial) unique index: PostgreSQL treats every NULL as
+      // distinct from every other NULL, so multiple rows with analysis_id IS NULL
+      // are allowed.  A non-partial index is required for ON CONFLICT
+      // (analysis_id) DO NOTHING — PostgreSQL cannot infer the conflict target
+      // from a partial WHERE index.
+      await db.execute(sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_analyses_analysis_id_key
+        ON ai_analyses (analysis_id)
+      `);
+      // Link corrections to the analysis that triggered them.
+      await db.execute(sql`ALTER TABLE corrections ADD COLUMN IF NOT EXISTS analysis_id text`);
+      return;
+    } catch (err) {
+      console.error(`accuracy schema attempt ${attempt} failed:`, err);
+      await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
+  }
+  console.error("accuracy schema setup gave up — AI accuracy tracking may not function correctly.");
+}
+
 // Ensure the QC-number counter row exists (first number handed out: FQ-1001).
 // Runs AFTER the server starts listening: a slow database connection during a
 // publish must never keep the health check from getting a response, or the
@@ -88,6 +126,7 @@ self.addEventListener('activate', (e) => {
     console.log(`Final QC server listening on 0.0.0.0:${port} (${process.env.NODE_ENV || "development"})`);
     // Background DB seed — never blocks the health check.
     void seedQcCounter();
+    void ensureAccuracySchema();
   });
 }
 

@@ -105,6 +105,27 @@ export const corrections = pgTable("corrections", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
   ts: bigint("ts", { mode: "number" }).notNull(),
   diffs: jsonb("diffs").notNull(),
+  // Nullable: rows created before analysis tracking was added will have NULL.
+  // When set, joins to ai_analyses.analysis_id to link this correction to the
+  // specific AI call it corrected (enabling accurate per-analysis correction rates).
+  analysisId: text("analysis_id"),
+});
+
+// One row per successful AI classify call — lightweight accuracy telemetry.
+// ts is a JS Date.now() millisecond timestamp (matches corrections.ts convention).
+// analysis_id is a client-generated UUID shared across the initial and any
+// second-look call for the same photo line; ON CONFLICT DO NOTHING on the
+// server ensures only one row is kept per unique analysis, so second-look
+// calls do not inflate the denominator.
+// corrected is flipped to TRUE by the corrections endpoint when the estimator
+// overrides the AI result.  Storing it here — rather than deriving it via a
+// JOIN to the corrections table — means the flag survives the 500-row cleanup
+// that prunes the corrections learning-cache.
+export const aiAnalyses = pgTable("ai_analyses", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  analysisId: text("analysis_id").unique(),
+  corrected: boolean("corrected").notNull().default(false),
 });
 
 export const photos = pgTable(

@@ -17,6 +17,19 @@ import {
   CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, CLASSIFY_PROMPT_PAIR, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
 
+// Stable UUID generator for analysis tracking.  Uses the Web Crypto API when
+// available (all modern browsers / React Native); falls back to Math.random()
+// for environments that lack it.
+const mkUuid = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+};
+
 /*
  * Body Quoter — ported from the single-file quoter app into the Final QC app.
  * Flow: VIN entry → vehicle confirm → stock#/estimator → damage photos →
@@ -937,6 +950,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       setLine(id, { status: 'error', errMsg: 'Photo is no longer in memory — delete this line and retake it.' });
       return;
     }
+    // One UUID for this photo's entire classify session (initial + any second-look
+    // call). The server uses ON CONFLICT (analysis_id) DO NOTHING so both calls
+    // only ever create one row in ai_analyses — the second look is not counted
+    // twice in the denominator.
+    const analysisId = mkUuid();
     try {
       const system = sysPrompt(corrCacheRef.current, vehRef.current);
       const callClassify = (sys) => api.classify({
@@ -946,6 +964,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         prompt: wideBase64 ? CLASSIFY_PROMPT_PAIR : CLASSIFY_PROMPT,
         model: CLASSIFY_MODEL,
         max_tokens: CLASSIFY_MAX_TOKENS,
+        analysis_id: analysisId,
       });
       const out = await callClassify(system);
       const text = out && typeof out.text === 'string' ? out.text : '';
@@ -970,7 +989,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       if (cls.panel !== 'unknown' && linesRef.current.some((x) => x.id !== id && x.status === 'done' && x.cls && x.cls.panel === cls.panel)) {
         cls.extra_area = true;
       }
-      setLine(id, { status: 'done', cls, review, open: review, editing: false, aiCls: JSON.parse(JSON.stringify(cls)), corrLogged: false });
+      setLine(id, { status: 'done', cls, review, open: review, editing: false, aiCls: JSON.parse(JSON.stringify(cls)), corrLogged: false, analysisId });
       autosave();
     } catch (e) {
       // 503 = AI not configured: send the line to manual classification
@@ -1079,7 +1098,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       diffs = correctionDiffs(cur.aiCls, { panel: e0.panel, damage_type: e0.damage, severity: e0.sev, paint_damaged: !!e0.paint, blend_adjacent_recommended: !!e0.blend });
     }
     if (diffs.length) {
-      api.postCorrection({ ts: Date.now(), diffs }).catch(() => {});
+      api.postCorrection({ ts: Date.now(), diffs, analysis_id: cur.analysisId || null }).catch(() => {});
       corrCacheRef.current = [{ ts: Date.now(), diffs }, ...corrCacheRef.current].slice(0, 200);
     }
     setLines((prev) => {

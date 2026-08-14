@@ -56,7 +56,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
     );
   }
 
-  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, thisWeek } = dash;
+  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, thisWeek, aiAccuracy } = dash;
   const maxWeek = Math.max(1, ...(weekly || []).map((w) => w.finalQcs));
 
   return (
@@ -207,6 +207,41 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
             </div>
           ))}
         </div>
+
+        {/* 8 — AI accuracy trend (only shown once at least one photo has been analyzed) */}
+        {aiAccuracy && aiAccuracy.some((w) => w.analyses > 0) && (
+          <div className="card">
+            <div className="card-title">AI DAMAGE CALL ACCURACY</div>
+            <div style={{ fontSize: 9.5, color: 'var(--muted)', marginBottom: 8 }}>
+              Photos AI analyzed vs. estimator corrections per week — lower correction rate = better AI accuracy.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '74px 1fr 1fr 56px', gap: 0 }}>
+              <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4 }}>WEEK OF</span>
+              <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4, textAlign: 'right', paddingRight: 8 }}>ANALYZED</span>
+              <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4, textAlign: 'right', paddingRight: 8 }}>CORRECTED</span>
+              <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4, textAlign: 'right' }}>CORR RATE</span>
+            </div>
+            {aiAccuracy.slice(-8).map((w) => {
+              const rate = w.analyses > 0 ? w.corrections / w.analyses : null;
+              const rateColor = rate == null ? 'var(--muted)' : rate > 0.7 ? 'var(--red)' : rate > 0.4 ? 'var(--amber)' : 'var(--green)';
+              return (
+                <div key={w.week} style={{ display: 'grid', gridTemplateColumns: '74px 1fr 1fr 56px', gap: 0, padding: '4px 0', borderTop: '1px solid #F5F1EC', alignItems: 'center' }}>
+                  <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>wk {w.week.slice(5)}</span>
+                  <span className="mono" style={{ fontSize: 11, fontWeight: 600, textAlign: 'right', paddingRight: 8 }}>{w.analyses}</span>
+                  <span className="mono" style={{ fontSize: 11, fontWeight: 600, textAlign: 'right', paddingRight: 8 }}>{w.corrections}</span>
+                  <span className="mono oswald" style={{ fontSize: 11, fontWeight: 700, textAlign: 'right', color: rateColor }}>
+                    {rate == null ? '—' : Math.round(rate * 100) + '%'}
+                  </span>
+                </div>
+              );
+            })}
+            <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 8, color: 'var(--muted)', fontWeight: 600 }}>
+              <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--green)', borderRadius: 2, marginRight: 4 }} />≤40% good</span>
+              <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--amber)', borderRadius: 2, marginRight: 4 }} />41–70% ok</span>
+              <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--red)', borderRadius: 2, marginRight: 4 }} />&gt;70% high</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

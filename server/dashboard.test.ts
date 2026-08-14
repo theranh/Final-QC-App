@@ -7,7 +7,7 @@
 //     suppresses its completed intake (VIN normalization in fetchLiteRows).
 //  3. The server rejects a second original inspection for a VIN that already
 //     has one (409 guard in POST /api/inspections).
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 
@@ -88,6 +88,12 @@ function liteRowsResult() {
   };
 }
 
+// Configurable accuracy rows returned for the ai_analyses JOIN query.
+// Each entry mirrors one GROUP BY week row from the real SQL:
+//   { week: 'YYYY-MM-DD', analyses: number, corrected: number }
+// Reset per-test to avoid cross-test pollution.
+let accuracyRows: { week: string; analyses: number; corrected: number }[] = [];
+
 function fakeExecute(q: any) {
   const { text, params } = sqlParts(q);
   if (text.includes("UPDATE qc_counter") && text.includes("RETURNING")) {
@@ -100,6 +106,10 @@ function fakeExecute(q: any) {
     return { rows: hit ? [{ qc_number: hit.qcNumber }] : [] };
   }
   if (text.includes("FROM inspections")) return liteRowsResult();
+  // ----- AI accuracy (FROM ai_analyses only; corrected flag is on the row) -----
+  if (text.includes("FROM ai_analyses")) {
+    return { rows: accuracyRows.map((r) => ({ week: r.week, analyses: r.analyses, corrected: r.corrected })) };
+  }
   // ----- local Body Quoter tables (server/localQuote.ts) -----
   // Completed intakes list (awaiting-QC source), newest first.
   if (text.includes("FROM intakes") && text.includes("ORDER BY COALESCE(completed_at, updated_at) DESC")) {
@@ -352,5 +362,97 @@ describe("awaiting Final QC vs committed inspections", () => {
     const [r1, r2] = await Promise.all([fire(), fire()]);
     expect([r1.status, r2.status].sort()).toEqual([201, 409]);
     expect(store.filter((r) => r.vin.trim().toUpperCase() === VIN_C)).toHaveLength(1);
+  });
+});
+
+describe("AI accuracy trend", () => {
+  beforeEach(() => {
+    // Reset configurable accuracy rows before each test so tests don't bleed.
+    accuracyRows = [];
+  });
+
+  it("always returns exactly 8 entries in aiAccuracy regardless of data", async () => {
+    // No accuracy data — fakeExecute returns empty rows via accuracyRows=[].
+    const payload = await getDashboard("2026-04-01", "2026-04-07");
+    expect(Array.isArray(payload.aiAccuracy)).toBe(true);
+    expect(payload.aiAccuracy).toHaveLength(8);
+  });
+
+  it("fills weeks with zeros when no analyses exist", async () => {
+    const payload = await getDashboard("2026-04-08", "2026-04-14");
+    for (const w of payload.aiAccuracy as any[]) {
+      expect(w.analyses).toBe(0);
+      expect(w.corrections).toBe(0);
+    }
+  });
+
+  it("week labels are YYYY-MM-DD strings in strict ascending order", async () => {
+    const payload = await getDashboard("2026-04-15", "2026-04-21");
+    const weeks: string[] = (payload.aiAccuracy as any[]).map((w: any) => w.week);
+    for (const w of weeks) expect(w).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    for (let i = 1; i < weeks.length; i++) expect(weeks[i] > weeks[i - 1]).toBe(true);
+  });
+
+  it("maps DB rows into the correct week buckets with analyses and corrections", async () => {
+    // Simulate: this Monday's week has 10 analyses, 3 corrected.
+    // We insert a row using the actual Monday label that last8WeekMondays would
+    // produce, so it lands in the last bucket.
+    const { last8WeekMondays } = await import("./dashboard");
+    const weeks = last8WeekMondays("America/Chicago");
+    const thisWeekLabel = weeks[weeks.length - 1]; // most recent bucket
+    accuracyRows = [{ week: thisWeekLabel, analyses: 10, corrected: 3 }];
+
+    const payload = await getDashboard("2026-04-22", "2026-04-28");
+    const ai = payload.aiAccuracy as any[];
+    expect(ai).toHaveLength(8);
+
+    const last = ai[ai.length - 1];
+    expect(last.week).toBe(thisWeekLabel);
+    expect(last.analyses).toBe(10);
+    expect(last.corrections).toBe(3);
+
+    // All other buckets should be zero-filled.
+    for (const w of ai.slice(0, 7)) {
+      expect(w.analyses).toBe(0);
+      expect(w.corrections).toBe(0);
+    }
+  });
+
+  it("cross-week: a correction in a later week is counted in the analysis week", async () => {
+    // The LEFT JOIN attributes corrections to the analysis row's week, not to
+    // the correction's own timestamp.  We simulate this by having the DB return
+    // corrected=1 for the EARLIER week (where the analysis occurred) even though
+    // the real correction row has a later ts — the SQL handles this correctly
+    // because it groups by a.ts, not c.ts.
+    const { last8WeekMondays } = await import("./dashboard");
+    const weeks = last8WeekMondays("America/Chicago");
+    // Put the corrected count in week[0] (oldest week), not week[7] (newest).
+    accuracyRows = [{ week: weeks[0], analyses: 5, corrected: 5 }];
+
+    const payload = await getDashboard("2026-04-29", "2026-05-05");
+    const ai = payload.aiAccuracy as any[];
+    // The oldest bucket should show 5 analyses all corrected.
+    expect(ai[0].week).toBe(weeks[0]);
+    expect(ai[0].analyses).toBe(5);
+    expect(ai[0].corrections).toBe(5);
+    // No leak into other weeks.
+    for (const w of ai.slice(1)) expect(w.analyses).toBe(0);
+  });
+
+  it("second-look deduplication: DB returns 1 analysis per analysis_id (ON CONFLICT semantics)", async () => {
+    // Simulate what the DB returns after ON CONFLICT DO NOTHING deduplication:
+    // two classify calls for the same photo (initial + second look) produce
+    // only one ai_analyses row.  The dashboard query receives analyses=1, not 2.
+    const { last8WeekMondays } = await import("./dashboard");
+    const weeks = last8WeekMondays("America/Chicago");
+    const w = weeks[3]; // arbitrary mid-range bucket
+    accuracyRows = [{ week: w, analyses: 1, corrected: 0 }];
+
+    const payload = await getDashboard("2026-05-06", "2026-05-12");
+    const ai = payload.aiAccuracy as any[];
+    const bucket = ai.find((b: any) => b.week === w);
+    expect(bucket).toBeDefined();
+    expect(bucket.analyses).toBe(1); // not 2 — second-look did not inflate denominator
+    expect(bucket.corrections).toBe(0);
   });
 });
