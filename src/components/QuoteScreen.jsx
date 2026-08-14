@@ -603,6 +603,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (committed || walkOpen || !hydratedRef.current) return;
     const orphans = serverPhotos.filter((p) =>
       String(p.slot || '').startsWith('dmg') &&
+      !String(p.slot || '').startsWith('dmg_wide') && // wide shots belong to a line, not a pending photo
       !linesRef.current.some((l) => l.id === p.id) &&
       !photos.some((lp) => lp.id === p.id) &&
       !deletedPhotoIdsRef.current.has(p.id) &&
@@ -686,6 +687,28 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       setLines(restored);
       setStep(restored.length ? 'quote' : (!q.committedBy && p.startAtPhotos && (q.stock || p.stock || '').trim() && (q.estimator || p.estimator || '').trim() ? 'photos' : 'confirm'));
       hydratedRef.current = true; setHydrating(false);
+      // Re-attach wide-shot base64 for any line that has a server-side wide photo.
+      // Without this, RE-RUN after a page reload falls back to single-image mode.
+      const linesWithWide = restored.filter((l) => l.widePhotoId);
+      if (linesWithWide.length) {
+        (async () => {
+          for (const l of linesWithWide) {
+            try {
+              const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(l.widePhotoId)}`, { credentials: 'include' });
+              if (!resp.ok) continue;
+              const blob = await resp.blob();
+              const wideDataUrl = await new Promise((resolve, reject) => {
+                const rd = new FileReader();
+                rd.onload = () => resolve(rd.result);
+                rd.onerror = reject;
+                rd.readAsDataURL(blob);
+              });
+              const wideBase64 = wideDataUrl.split(',')[1];
+              if (live) setLines((prev) => prev.map((ln) => ln.id === l.id ? { ...ln, wideBase64 } : ln));
+            } catch { /* wide shot unavailable — classify will fall back to single-image */ }
+          }
+        })();
+      }
     }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
     return () => { live = false; };
   }, [prefill?.quoteId]);
@@ -787,6 +810,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         id: l.id, thumb: l.thumb,
         status: l.status === 'running' || l.status === 'queued' ? 'done' : l.status,
         cls: l.cls, review: l.review, manual: l.manual, errMsg: l.errMsg || '',
+        widePhotoId: l.widePhotoId || null,
       })),
       totals: { hrs: t.hrs, usd: t.usd, B: t.B, P: t.P, RI: t.RI, usdPDR: t.usdPDR },
       // Old-app compatible extras — kept so imported quotes round-trip.
@@ -871,9 +895,15 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       return;
     }
     setArmedDelete(null);
+    const deletedPhoto = photos.find((p) => p.id === id);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
     deletedPhotoIdsRef.current.add(id); // cancels any in-flight/queued upload of this capture
     purgeDeletedDamagePhoto(id);
+    // Also purge the wide shot that was uploaded alongside this close-up.
+    if (deletedPhoto?.widePhotoId) {
+      deletedPhotoIdsRef.current.add(deletedPhoto.widePhotoId);
+      purgeDeletedDamagePhoto(deletedPhoto.widePhotoId);
+    }
   };
 
   const addDamageDataUrl = async (dataUrl, wideDataUrl) => {
@@ -882,8 +912,15 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const id = newId('w');
     const thumb = await thumbFromDataUrl(dataUrl);
     const wideBase64 = wideDataUrl ? wideDataUrl.split(',')[1] : undefined;
-    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64 }]);
-    await uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl });
+    // Wide shot gets its own server record so it survives a page reload.
+    const widePhotoId = wideDataUrl ? id + '_w' : undefined;
+    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64, widePhotoId }]);
+    const uploads = [uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl })];
+    if (wideDataUrl && widePhotoId) {
+      // Slot name encodes the owning close-up id so recovery can re-link them.
+      uploads.push(uploadDamagePhoto({ id: widePhotoId, quoteId: qid, slot: 'dmg_wide_' + id, dataUrl: wideDataUrl }));
+    }
+    await Promise.all(uploads);
   };
 
   // ---------- analyze pipeline ----------
@@ -967,7 +1004,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (!photos.length) return;
     ensureQuoteId();
     const newLines = photos.map((p) => ({
-      id: p.id, thumb: p.thumb, base64: p.base64, wideBase64: p.wideBase64,
+      id: p.id, thumb: p.thumb, base64: p.base64, wideBase64: p.wideBase64, widePhotoId: p.widePhotoId,
       status: 'queued', cls: null, review: false, manual: false, open: false, editing: false, errMsg: '',
     }));
     setLines((prev) => [...prev, ...newLines]);
@@ -989,6 +1026,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   };
 
   const deleteLine = (id) => {
+    const deletedLine = linesRef.current.find((l) => l.id === id);
     setLines((prev) => {
       const next = prev.filter((l) => l.id !== id);
       autosave(next);
@@ -999,6 +1037,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     deletedPhotoIdsRef.current.add(id);
     recoveredIdsRef.current.add(id);
     purgeDeletedDamagePhoto(id);
+    // Also purge the wide shot tied to this line, if one was uploaded.
+    if (deletedLine?.widePhotoId) {
+      deletedPhotoIdsRef.current.add(deletedLine.widePhotoId);
+      purgeDeletedDamagePhoto(deletedLine.widePhotoId);
+    }
   };
 
   // ---------- line editor ----------
