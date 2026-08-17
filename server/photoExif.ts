@@ -21,6 +21,7 @@ export function readJpegExifOrientation(buf: Buffer): number | null {
         const r16 = (o: number) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
         const r32 = (o: number) => (le ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
         if (t + 8 >= buf.length) break;
+        if (r16(t + 2) !== 42) break; // TIFF magic must be 42; reject corrupt headers
         const ifd0 = t + r32(t + 4);
         if (ifd0 + 2 >= buf.length) break;
         const count = r16(ifd0);
