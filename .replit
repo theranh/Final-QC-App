@@ -58,7 +58,6 @@ GOOGLE_SHEETS_SPREADSHEET_ID = "1_rosqSejIr6vT-LaupD20X24xDa-NpfSbGdX4DwfhMM"
 [userenv.development]
 
 [userenv.production]
-QUOTER_SYNC_TOKEN = "e44f7aa4f09526c1094cee062092e383e97a681fe2b057d5"
 
 [postMerge]
 path = "scripts/post-merge.sh"
