@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile, orientedJpegDataUrl } from '../lib/photo';
-import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone } from '../lib/photoQueue';
+import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone, markPhotoDeleted } from '../lib/photoQueue';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
@@ -111,6 +111,10 @@ export async function uploadDamagePhotoDurably({ id, quoteId, slot, dataUrl }, s
 // server copy. Used for both close-up and wide-shot ids — the caller is
 // responsible for calling once per id. Exported for tests.
 export async function purgeDeletedDamagePhoto(id) {
+  // Register the deletion BEFORE removing the queue record so that flushQueue,
+  // if it is mid-PUT for this photo, sees the flag when the PUT returns and
+  // issues a corrective server delete (the delete-during-flush race).
+  markPhotoDeleted(id);
   await removeJobsForPhoto(id, '__none__'); // no surviving capture — drop all queued records
   api.deleteQuotePhoto({ id }).catch(() => { /* offline — server copy will remain but
     cannot re-attach: hydration only runs for lines still in q.lines, and orphan

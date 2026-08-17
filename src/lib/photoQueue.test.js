@@ -3,9 +3,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import 'fake-indexeddb/auto';
 
-vi.mock('./api', () => ({ api: { putQuotePhoto: vi.fn() } }));
+vi.mock('./api', () => ({ api: { putQuotePhoto: vi.fn(), deleteQuotePhoto: vi.fn() } }));
 import { api } from './api';
-import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, flushQueue, subscribePending, setCameraOpen } from './photoQueue';
+import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, flushQueue, subscribePending, setCameraOpen, markPhotoDeleted } from './photoQueue';
 
 let seq = 0;
 const job = (id, quoteId = 'Q1', dataUrl = 'data:image/jpeg;base64,AAA') =>
@@ -108,10 +108,43 @@ describe('photoQueue', () => {
     unsub();
   });
 
+  it('issues a server delete when the photo is deleted while a flush PUT is in flight (delete-during-flush race)', async () => {
+    api.deleteQuotePhoto.mockResolvedValue({});
+
+    // Queue a damage close-up (slotKey starts with 'dmg').
+    const dmgJob = { ...job('dmg_closeup_1'), slotKey: 'dmg_panel_a' };
+    await persistJob(dmgJob);
+
+    let resolvePut;
+    api.putQuotePhoto.mockImplementationOnce(() => new Promise((r) => { resolvePut = r; }));
+
+    const flushPromise = flushQueue(); // starts PUT, hangs in flight
+    await vi.waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
+
+    // Inspector deletes the photo while the PUT is still in flight.
+    // Simulate what purgeDeletedDamagePhoto does: mark then remove the record.
+    markPhotoDeleted(dmgJob.id);
+    await removeJobsForPhoto(dmgJob.id, '__none__');
+
+    // Confirm the queue record is gone (delete arrived first).
+    expect(await pendingJobs()).toEqual([]);
+
+    resolvePut({}); // PUT response arrives — photo now on server
+    await flushPromise;
+
+    // flushQueue must consult deletedPhotoIds and issue a server delete so
+    // the inspector's delete wins over the in-flight upload.
+    expect(api.deleteQuotePhoto).toHaveBeenCalledWith({ id: dmgJob.id });
+    // Queue remains empty.
+    expect(await pendingJobs()).toEqual([]);
+  });
+
   it('a completed older upload cannot delete a same-slot retake (regression)', async () => {
     // Slot photo A is uploading slowly; the tech retakes the slot (B) while
     // A is still in flight; A then succeeds and cleans up after itself.
-    // B's durable record must survive a simulated restart.
+    // B's durable record must survive a simulated restart, and the retake
+    // supersession must NEVER trigger a server delete (only explicit inspector
+    // deletions registered via markPhotoDeleted may do so).
     const A = job('Q1_front', 'Q1', 'data:A');
     await persistJob(A);
 
@@ -121,6 +154,7 @@ describe('photoQueue', () => {
     await vi.waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
 
     // Retake: persist B (unique key), purge records superseded by B.
+    // Note: markPhotoDeleted is NOT called — this is a retake, not a deletion.
     const B = { key: newJobKey('Q1_front'), id: 'Q1_front', quoteId: 'Q1', slotKey: 'front', dataUrl: 'data:B' };
     await sleep(2); // ensure B's addedAt is strictly newer than A's
     await persistJob(B);
@@ -128,6 +162,9 @@ describe('photoQueue', () => {
 
     resolveA({}); // A finally reaches the server and removes its own record
     await flushPromise;
+
+    // A retake must never issue a server delete — only explicit deletions do.
+    expect(api.deleteQuotePhoto).not.toHaveBeenCalled();
 
     // Simulated restart: B is still queued and is what gets sent next.
     const left = await pendingJobs();

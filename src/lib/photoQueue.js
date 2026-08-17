@@ -65,6 +65,17 @@ function getAllRecords() {
   }));
 }
 
+// Session-scoped registry of photo IDs that were explicitly deleted by the
+// inspector. Populated ONLY by markPhotoDeleted (called from
+// purgeDeletedDamagePhoto). flushQueue checks this after a PUT lands to
+// detect the delete-during-upload race and issue a corrective server delete.
+//
+// In-memory is sufficient: the race can only occur within the same session.
+// On a restart, purgeDeletedDamagePhoto will have already removed the queue
+// record, so flushQueue never picks the photo up again.
+const deletedPhotoIds = new Set();
+export function markPhotoDeleted(id) { deletedPhotoIds.add(id); }
+
 // ---------- pending-count subscription (drives the "sending…" indicator) ----------
 const listeners = new Set();
 let lastCount = 0;
@@ -189,13 +200,21 @@ export async function flushQueue() {
       try {
          
         await api.putQuotePhoto({ id: job.id, quoteId: job.quoteId, slot: job.slotKey, dataUrl: job.dataUrl });
-        // This capture reached the server: clear it AND any OLDER superseded
-        // records for the same slot — but never a newer retake persisted
-        // while this upload was in flight (that one must still be sent).
-         
-        await removeJob(job.key);
-         
-        await removeJobsForPhoto(job.id, job.key, job.addedAt);
+        // Check whether the inspector deleted this photo while the PUT was
+        // in flight. We consult the explicit deletedPhotoIds registry rather
+        // than the queue — the registry is only set by purgeDeletedDamagePhoto,
+        // so a retake supersession (which also removes a queue record) is never
+        // mistaken for a deletion and never triggers an erroneous server DELETE.
+        if (deletedPhotoIds.has(job.id)) {
+          // Inspector deleted this photo while the PUT was in flight.
+          // Remove the server copy that just landed so the delete wins.
+          api.deleteQuotePhoto({ id: job.id }).catch(() => {});
+        } else {
+          // Normal path: clear this capture and any older superseded records
+          // for the same slot — but never a newer retake added mid-flight.
+          await removeJob(job.key);
+          await removeJobsForPhoto(job.id, job.key, job.addedAt);
+        }
       } catch (e) {
         // Permanent rejections can never succeed later — drop them so the
         // queue doesn't retry forever (401 is transient: same job works
