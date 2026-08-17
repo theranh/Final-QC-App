@@ -713,6 +713,107 @@ describe("readJpegExifOrientation — corrupt TIFF magic and out-of-bounds IFD0 
 });
 
 // ---------------------------------------------------------------------------
+// Suite 1e: Near-max IFD0 entry count (count = 0xFFFF = 65535) safety.
+//
+// The IFD0 entry count is a 16-bit unsigned integer, so an adversarial or
+// corrupt buffer can set it to 65535 entries.  The per-iteration guard
+//   if (e + 10 >= buf.length) break;
+// must fire before any out-of-bounds read occurs.  These tests verify that
+// readJpegExifOrientation returns null without throwing for both LE ('II')
+// and BE ('MM') TIFF variants when count = 0xFFFF.
+//
+// Two sub-cases per byte-order:
+//
+//   (a) Short buffer — buffer is truncated so that the very first entry
+//       (i=0) fails the bounds check immediately.
+//       Buffer layout (40 bytes normally, trimmed to 28):
+//         ifd0 = 20, e[0] = 22, e[0]+10 = 32 >= 28 → guard fires on i=0.
+//
+//   (b) One non-Orientation entry, full buffer — count = 0xFFFF but the
+//       single entry present in the buffer has tag ≠ 0x0112 (we flip it to
+//       0x010F = Make).  The loop reads entry 0 (no match), then on i=1:
+//         e[1] = 34, e[1]+10 = 44 >= 40 → guard fires → returns null.
+//
+// Buffer layout (40 bytes, absolute offsets, same for LE and BE):
+//   0–1   SOI
+//   2–3   APP1 marker
+//   4–5   APP1 length (= 34)
+//   6–11  "Exif\0\0"
+//   12–13 TIFF byte-order mark ('I','I' or 'M','M')  ← t = 12
+//   14–15 TIFF magic = 42
+//   16–19 IFD0 offset = 8 → ifd0 = t + 8 = 20
+//   20–21 IFD0 entry count  ← overwritten with 0xFFFF
+//   22–33 12-byte IFD0 entry                          ← e[0] = 22
+//   34–37 next-IFD pointer = 0
+//   38–39 EOI
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal LE-TIFF JPEG, overwrite the IFD0 entry count with 0xFFFF,
+ * then truncate the buffer to `keepBytes`.
+ */
+function buildJpegWithMaxEntryCountLE(keepBytes: number): Buffer {
+  const buf = buildJpegWithOrientation(6).slice(); // mutable copy
+  // ifd0 = 20; entry count field is at ifd0 = 20 (little-endian)
+  buf.writeUInt16LE(0xffff, 20);
+  return buf.subarray(0, keepBytes);
+}
+
+/**
+ * Build a minimal BE-TIFF JPEG, overwrite the IFD0 entry count with 0xFFFF,
+ * then truncate the buffer to `keepBytes`.
+ */
+function buildJpegWithMaxEntryCountBE(keepBytes: number): Buffer {
+  const buf = buildJpegWithOrientationBE(6).slice(); // mutable copy
+  // ifd0 = 20; entry count field is at ifd0 = 20 (big-endian)
+  buf.writeUInt16BE(0xffff, 20);
+  return buf.subarray(0, keepBytes);
+}
+
+describe("readJpegExifOrientation — near-max IFD0 entry count (0xFFFF) safety", () => {
+  // ---- (a) LE TIFF, count = 0xFFFF, buffer truncated so guard fires on i=0 ----
+  //
+  // keepBytes = 28 → buf.length = 28.
+  // i=0: e = ifd0 + 2 + 0*12 = 22; e + 10 = 32; 32 >= 28 → break.
+  // No entry is read; Orientation tag is never found → null.
+  it("LE TIFF, count=0xFFFF, buffer truncated to 28 bytes: guard fires on first iteration, returns null without throwing", () => {
+    const buf = buildJpegWithMaxEntryCountLE(28);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (a) BE TIFF, count = 0xFFFF, buffer truncated so guard fires on i=0 ----
+  //
+  // Identical logic with big-endian byte order.
+  it("BE TIFF, count=0xFFFF, buffer truncated to 28 bytes: guard fires on first iteration, returns null without throwing", () => {
+    const buf = buildJpegWithMaxEntryCountBE(28);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (b) LE TIFF, count = 0xFFFF, one non-Orientation entry, full buffer ----
+  //
+  // Full 40-byte buffer; count patched to 0xFFFF; entry tag changed from
+  // 0x0112 (Orientation) to 0x010F (Make) so the loop skips it.
+  // i=0: e = 22; e+10 = 32 < 40 → reads entry, tag ≠ 0x0112 → skip.
+  // i=1: e = 34; e+10 = 44 >= 40 → break → null.
+  it("LE TIFF, count=0xFFFF, non-Orientation tag, full 40-byte buffer: guard fires on second iteration, returns null without throwing", () => {
+    const buf = buildJpegWithOrientation(6).slice();
+    buf.writeUInt16LE(0xffff, 20); // patch count to 65535
+    buf.writeUInt16LE(0x010f, 22); // patch tag: 0x0112 → 0x010F (Make)
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (b) BE TIFF, count = 0xFFFF, one non-Orientation entry, full buffer ----
+  //
+  // Same scenario with big-endian byte order.
+  it("BE TIFF, count=0xFFFF, non-Orientation tag, full 40-byte buffer: guard fires on second iteration, returns null without throwing", () => {
+    const buf = buildJpegWithOrientationBE(6).slice();
+    buf.writeUInt16BE(0xffff, 20); // patch count to 65535
+    buf.writeUInt16BE(0x010f, 22); // patch tag: 0x0112 → 0x010F (Make)
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 2: Synthetic multi-entry EXIF fixtures.
 //
 // Generated by server/__fixtures__/generate-fixtures.cjs — realistic EXIF
