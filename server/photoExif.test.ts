@@ -160,6 +160,23 @@ describe("readJpegExifOrientation — synthetic single-entry buffers", () => {
     expect(readJpegExifOrientation(buf)).toBeNull();
   });
 
+  // Reload-safety invariant: canvas.toDataURL('image/jpeg') produces a JPEG
+  // with no EXIF APP1 segment. After runFleetFix / runPhotoFix re-uploads a
+  // photo via the canvas path, the stored bytes look like buildJpegNoExif().
+  // The scan filter is `orientation !== null && orientation !== 1`. Because
+  // null is excluded by that test, fixed photos never reappear as candidates
+  // in a fresh scan after a page reload — no client-side "fixed IDs" set is
+  // needed to prevent double-fixing.
+  it("canvas-fixed photo (no EXIF) is excluded from scan candidates on reload", () => {
+    // Simulate the bytes stored after orientedJpegDataUrl() re-upload:
+    // a plain JPEG with no APP1/EXIF block.
+    const fixedBuf = buildJpegNoExif();
+    const orientation = readJpegExifOrientation(fixedBuf);
+    expect(orientation).toBeNull();
+    // Confirm the candidate-filter predicate is false for a fixed photo:
+    expect(orientation !== null && orientation !== 1).toBe(false);
+  });
+
   it("returns null for a non-JPEG buffer without throwing", () => {
     const buf = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG header
     expect(readJpegExifOrientation(buf)).toBeNull();

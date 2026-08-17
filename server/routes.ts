@@ -1074,6 +1074,13 @@ export function registerAppRoutes(app: Express) {
   // the sideways ones for this page. The client calls repeatedly with an
   // increasing offset until done:true, accumulating candidates across pages so
   // the whole table is checked without a single long-running query.
+  //
+  // PAGE-RELOAD SAFETY: Photos fixed by runFleetFix / runPhotoFix are
+  // re-uploaded as canvas.toDataURL() JPEGs, which carry no EXIF APP1
+  // segment. readJpegExifOrientation() returns null for those bytes; the
+  // filter below (orientation !== null && orientation !== 1) excludes null,
+  // so already-fixed photos never reappear as candidates in a fresh scan
+  // after a page reload — no client-side "fixed IDs" set is required.
   const SCAN_PAGE_SIZE = 100;
   app.get(
     "/api/admin/photo-orientation-scan-all",

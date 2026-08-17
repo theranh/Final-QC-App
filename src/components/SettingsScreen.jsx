@@ -328,6 +328,13 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       setFleetError('Fix failed: ' + err.message);
       setFleetScanState('error');
     }
+    // PAGE-RELOAD SAFETY: No sessionStorage "fixed IDs" set is needed here.
+    // orientedJpegDataUrl() produces a canvas.toDataURL() JPEG, which carries
+    // no EXIF APP1 segment. The server stores those raw bytes, so the next scan
+    // calls readJpegExifOrientation() on the new data and gets null (no tag).
+    // The scan filter is `orientation !== null && orientation !== 1`, so null
+    // is excluded — already-fixed photos never reappear as candidates after a
+    // page reload + re-scan, even if fleetCandidates was reset to [] by React.
   };
 
   const runFleetFixOne = async (quoteId) => {
