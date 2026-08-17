@@ -301,21 +301,29 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
 
   const runFleetFix = async () => {
     if (!fleetCandidates.length) return;
+    // Snapshot the list at start so we iterate a stable copy even as state updates.
+    const list = [...fleetCandidates];
+    const totalTrucks = new Set(list.map((c) => c.quoteId)).size;
     setFleetScanState('fixing');
-    setFleetFixProgress({ done: 0, total: fleetCandidates.length, currentQuoteId: fleetCandidates[0]?.quoteId || '' });
+    setFleetFixProgress({ done: 0, total: list.length, currentQuoteId: list[0]?.quoteId || '' });
     setFleetError('');
+    let fixed = 0;
     try {
-      for (let i = 0; i < fleetCandidates.length; i++) {
-        const ph = fleetCandidates[i];
+      for (let i = 0; i < list.length; i++) {
+        const ph = list[i];
         const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
         if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
         const blob = await resp.blob();
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
         await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
-        setFleetFixProgress({ done: i + 1, total: fleetCandidates.length, currentQuoteId: fleetCandidates[i + 1]?.quoteId || ph.quoteId });
+        // Remove this photo immediately after it's confirmed uploaded so an
+        // interruption leaves only unprocessed photos in fleetCandidates.
+        setFleetCandidates((prev) => prev.filter((c) => c.id !== ph.id));
+        fixed += 1;
+        setFleetFixProgress({ done: fixed, total: list.length, currentQuoteId: list[i + 1]?.quoteId || ph.quoteId });
       }
       setFleetScanState('fixed');
-      showToast(`Fixed ${fleetCandidates.length} photo${fleetCandidates.length === 1 ? '' : 's'} across ${fleetByTruck.length} truck${fleetByTruck.length === 1 ? '' : 's'} ✓`);
+      showToast(`Fixed ${fixed} photo${fixed === 1 ? '' : 's'} across ${totalTrucks} truck${totalTrucks === 1 ? '' : 's'} ✓`);
     } catch (err) {
       setFleetError('Fix failed: ' + err.message);
       setFleetScanState('error');
