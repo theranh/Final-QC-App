@@ -186,6 +186,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   const [fleetCandidates, setFleetCandidates] = useState([]); // [{id, slot, quoteId, orientation}]
   const [fleetFixProgress, setFleetFixProgress] = useState({ done: 0, total: 0, currentQuoteId: '' });
   const [fleetError, setFleetError] = useState('');
+  const [fleetTruckBusy, setFleetTruckBusy] = useState(new Set()); // quoteIds currently being fixed individually
 
   // Derived: group fleet candidates by quoteId for display
   const fleetByTruck = (() => {
@@ -244,6 +245,28 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     } catch (err) {
       setFleetError('Fix failed: ' + err.message);
       setFleetScanState('error');
+    }
+  };
+
+  const runFleetFixOne = async (quoteId) => {
+    const candidates = fleetCandidates.filter((c) => c.quoteId === quoteId);
+    if (!candidates.length) return;
+    setFleetTruckBusy((prev) => new Set([...prev, quoteId]));
+    setFleetError('');
+    try {
+      for (const ph of candidates) {
+        const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
+        if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
+        const blob = await resp.blob();
+        const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+      }
+      setFleetCandidates((prev) => prev.filter((c) => c.quoteId !== quoteId));
+      showToast(`Fixed ${candidates.length} photo${candidates.length === 1 ? '' : 's'} for ${quoteId} ✓`);
+    } catch (err) {
+      setFleetError(`Fix failed for ${quoteId}: ${err.message}`);
+    } finally {
+      setFleetTruckBusy((prev) => { const s = new Set(prev); s.delete(quoteId); return s; });
     }
   };
 
@@ -737,21 +760,40 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                           <div style={{ padding: '7px 11px', background: 'var(--panel)', fontSize: 9, fontWeight: 700, letterSpacing: 0.6, color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
                             {fleetByTruck.length} TRUCK{fleetByTruck.length === 1 ? '' : 'S'} AFFECTED · {fleetCandidates.length} PHOTO{fleetCandidates.length === 1 ? '' : 'S'}
                           </div>
-                          <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-                            {fleetByTruck.map(({ quoteId, count }) => (
-                              <div key={quoteId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', borderTop: '1px solid var(--border)', fontSize: 11 }}>
-                                <span style={{ fontFamily: 'monospace', fontWeight: 700, flex: 1 }}>{quoteId}</span>
-                                <span style={{ fontSize: 9.5, color: 'var(--brown)', fontWeight: 600 }}>{count} photo{count === 1 ? '' : 's'}</span>
-                              </div>
-                            ))}
+                          <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                            {fleetByTruck.map(({ quoteId, count }) => {
+                              const truckBusy = fleetTruckBusy.has(quoteId);
+                              const fixAllRunning = fleetScanState === 'fixing';
+                              return (
+                                <div key={quoteId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', borderTop: '1px solid var(--border)', fontSize: 11 }}>
+                                  <span style={{ fontFamily: 'monospace', fontWeight: 700, flex: 1 }}>{quoteId}</span>
+                                  <span style={{ fontSize: 9.5, color: 'var(--brown)', fontWeight: 600 }}>{count} photo{count === 1 ? '' : 's'}</span>
+                                  {fleetScanState === 'done' && (
+                                    <div
+                                      onClick={() => !truckBusy && !fixAllRunning && runFleetFixOne(quoteId)}
+                                      style={{
+                                        fontSize: 9.5, fontWeight: 700, color: '#fff',
+                                        background: truckBusy || fixAllRunning ? 'var(--muted)' : 'var(--brown)',
+                                        borderRadius: 6, padding: '4px 9px',
+                                        cursor: truckBusy || fixAllRunning ? 'wait' : 'pointer',
+                                        whiteSpace: 'nowrap', opacity: truckBusy || fixAllRunning ? 0.6 : 1,
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {truckBusy ? '…' : '↻ Fix'}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
 
                         {fleetScanState === 'done' && (
                           <div
-                            className="btn btn-brown"
-                            style={{ height: 44, fontSize: 12 }}
-                            onClick={runFleetFix}
+                            className={'btn btn-brown' + (fleetTruckBusy.size > 0 ? ' disabled' : '')}
+                            style={{ height: 44, fontSize: 12, opacity: fleetTruckBusy.size > 0 ? 0.6 : 1 }}
+                            onClick={() => fleetTruckBusy.size === 0 && runFleetFix()}
                           >
                             ↻ Fix all {fleetCandidates.length} photo{fleetCandidates.length === 1 ? '' : 's'} ({fleetByTruck.length} truck{fleetByTruck.length === 1 ? '' : 's'})
                           </div>
