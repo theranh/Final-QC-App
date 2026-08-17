@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
-import { compressImageFile } from '../lib/photo';
+import { compressImageFile, orientedJpegDataUrl } from '../lib/photo';
 import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone } from '../lib/photoQueue';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
@@ -529,45 +529,14 @@ function exportImage(ctx0, showToast) {
 }
 
 // Downscale a file to a base64 JPEG for classify (no data: prefix) and a
-// data-URL for photo upload / thumbnail — mirrors the old scaleImage().
+// data-URL for photo upload / thumbnail. EXIF orientation is applied by
+// orientedJpegDataUrl so portrait/landscape shots always come out upright.
 function scaleImage(file, max, q) {
-  return new Promise((resolve, reject) => {
-    const rd = new FileReader();
-    rd.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const r = Math.min(1, max / Math.max(img.width, img.height));
-          const c = document.createElement('canvas');
-          c.width = Math.max(1, Math.round(img.width * r));
-          c.height = Math.max(1, Math.round(img.height * r));
-          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-          resolve(c.toDataURL('image/jpeg', q));
-        } catch (e) {
-          reject(e);
-        }
-      };
-      img.onerror = () => reject(new Error('Could not read that image'));
-      img.src = rd.result;
-    };
-    rd.onerror = () => reject(new Error('Could not read that file'));
-    rd.readAsDataURL(file);
-  });
+  return orientedJpegDataUrl(file, max, q);
 }
 
 function thumbFromDataUrl(dataUrl) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const r = Math.min(1, 340 / Math.max(img.width, img.height));
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.width * r)); c.height = Math.max(1, Math.round(img.height * r));
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      resolve(c.toDataURL('image/jpeg', 0.7));
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-  });
+  return orientedJpegDataUrl(dataUrl, 340, 0.7).catch(() => dataUrl);
 }
 
 export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) {

@@ -111,10 +111,11 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         )}
         <input
           className="input"
-          style={{ marginTop: 8 }}
+          style={{ marginTop: 8, textTransform: 'uppercase' }}
           placeholder="Search stock # or VIN…"
+          autoCapitalize="characters"
           value={q}
-          onChange={(e) => onQ(e.target.value)}
+          onChange={(e) => onQ(e.target.value.toUpperCase())}
         />
       </div>
       <div className="screen-body">

@@ -2,26 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { WALK_SLOTS, nextUntakenSlot, putSlotPhoto, walkProgress } from '../lib/walkSlots';
 import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, setCameraOpen } from '../lib/photoQueue';
+import { orientedJpegDataUrl } from '../lib/photo';
 
 const MAX = 1600;
 // iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
 const IS_IOS = typeof navigator !== 'undefined' &&
   (/iP(hone|ad|od)/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+// EXIF-aware decode + downscale — portrait/landscape uploads come out upright.
 function dataUrlImage(dataUrl, max = MAX, quality = 0.8, zoom = 1) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => {
-      const scale = Math.min(1, max / Math.max(image.width, image.height));
-      const sw = image.width / zoom; const sh = image.height / zoom;
-      const sx = (image.width - sw) / 2; const sy = (image.height - sh) / 2;
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(sw * scale)); canvas.height = Math.max(1, Math.round(sh * scale));
-      canvas.getContext('2d').drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL('image/jpeg', quality));
-    };
-    image.onerror = reject; image.src = dataUrl;
-  });
+  return orientedJpegDataUrl(dataUrl, max, quality, zoom);
 }
 
 export default function WalkAroundCamera({ quoteId, committed, addOnly = false, initialMode = 'guided', onClose, onDamageCapture, showToast }) {
