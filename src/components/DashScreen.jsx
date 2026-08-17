@@ -24,6 +24,38 @@ function Tile({ label, value, accent }) {
   );
 }
 
+/**
+ * Sparkline bar chart for AI accuracy — one bar per week, height proportional
+ * to the correction rate, colour green/amber/red by threshold.
+ */
+function AccuracyBars({ weeks }) {
+  // weeks = aiAccuracy.slice(-8), same slice used by the table
+  const visibleWeeks = weeks.filter((w) => w.analyses > 0);
+  if (!visibleWeeks.length) return null;
+  return (
+    <div style={{ display: 'flex', gap: 5, alignItems: 'flex-end', height: 72, marginBottom: 10 }}>
+      {visibleWeeks.map((w) => {
+        const rate = w.analyses > 0 ? w.corrections / w.analyses : 0;
+        const barH = Math.max(4, Math.round(rate * 100)); // px, 4 = floor so 0% is still visible
+        const color = rate > 0.7 ? 'var(--red)' : rate > 0.4 ? 'var(--amber)' : 'var(--green)';
+        const label = w.week.slice(5); // MM-DD
+        const rateLabel = Math.round(rate * 100) + '%';
+        return (
+          <div key={w.week} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, height: '100%' }}>
+            <div style={{ flex: 1, width: '100%', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <div
+                title={`wk ${label}: ${rateLabel} correction rate (${w.corrections}/${w.analyses})`}
+                style={{ width: '70%', height: `${barH}%`, background: color, borderRadius: 3 }}
+              />
+            </div>
+            <span className="mono" style={{ fontSize: 7.5, color: 'var(--muted)', fontWeight: 600, letterSpacing: 0 }}>{label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function PairedBars({ days }) {
   const max = Math.max(1, ...days.map((d) => Math.max(d.intakes, d.finalQcs)));
   const todayIdx = days.length - 1;
@@ -215,6 +247,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
             <div style={{ fontSize: 9.5, color: 'var(--muted)', marginBottom: 8 }}>
               Photos AI analyzed vs. estimator corrections per week — lower correction rate = better AI accuracy.
             </div>
+            <AccuracyBars weeks={aiAccuracy.slice(-8)} />
             <div style={{ display: 'grid', gridTemplateColumns: '74px 1fr 1fr 56px', gap: 0 }}>
               <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4 }}>WEEK OF</span>
               <span className="mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', paddingBottom: 4, textAlign: 'right', paddingRight: 8 }}>ANALYZED</span>
