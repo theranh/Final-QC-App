@@ -68,6 +68,8 @@ export const api = {
   postCorrection: (payload) => request('POST', '/api/quoter/corrections', payload),
   classify: (payload) => request('POST', '/api/quoter/classify', payload),
 
+  photoOrientationCandidates: (quoteId) => request('GET', `/api/admin/photo-orientation-candidates?quoteId=${encodeURIComponent(quoteId)}`),
+
   // ---------- PIN sign-off ----------
   signers: () => request('GET', '/api/quoter/signers'),
   commitIntake: (payload) => request('POST', '/api/quoter/commit-intake', payload),

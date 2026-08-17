@@ -991,6 +991,81 @@ export function registerAppRoutes(app: Express) {
     }
   });
 
+  // ---------- admin: scan photos for EXIF orientation issues ----------
+  // Returns photo IDs whose JPEG EXIF Orientation tag is anything other than 1
+  // (upright). The admin UI fetches these, applies the client-side EXIF-aware
+  // canvas path (orientedJpegDataUrl), and re-uploads each one so it is stored
+  // upright with the orientation tag stripped. quoteId is required; call once
+  // per truck to avoid holding large blobs in memory server-side.
+  app.get(
+    "/api/admin/photo-orientation-candidates",
+    requireAdmin,
+    async (req: any, res, next) => {
+      try {
+        const quoteId = String(req.query.quoteId || "").slice(0, 60);
+        if (!quoteId) {
+          return res.status(400).json({ error: "quoteId is required" });
+        }
+        const rows = await db
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data })
+          .from(photos)
+          .where(eq(photos.quoteId, quoteId));
+
+        /** Read the EXIF Orientation tag from a raw JPEG buffer.
+         *  Returns 1–8 per the EXIF spec, or null if absent/unreadable.
+         *  1 = upright; 3 = 180°; 6 = 90° CW (phone portrait → sideways);
+         *  8 = 90° CCW (phone portrait → sideways other way). */
+        function readJpegExifOrientation(buf: Buffer): number | null {
+          if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+          let pos = 2;
+          while (pos < buf.length - 3) {
+            if (buf[pos] !== 0xff) break;
+            const marker = buf[pos + 1];
+            if (pos + 3 >= buf.length) break;
+            const segLen = buf.readUInt16BE(pos + 2); // includes 2-byte length field
+            if (marker === 0xe1 && pos + 10 < buf.length) { // APP1
+              if (buf.slice(pos + 4, pos + 10).toString("latin1") === "Exif\0\0") {
+                const t = pos + 10; // TIFF header start
+                const le = buf[t] === 0x49; // 'II' = little-endian; 'MM' = big-endian
+                const r16 = (o: number) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
+                const r32 = (o: number) => (le ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
+                if (t + 8 >= buf.length) break;
+                const ifd0 = t + r32(t + 4);
+                if (ifd0 + 2 >= buf.length) break;
+                const count = r16(ifd0);
+                for (let i = 0; i < count; i++) {
+                  const e = ifd0 + 2 + i * 12;
+                  if (e + 10 >= buf.length) break;
+                  if (r16(e) === 0x0112) return r16(e + 8); // Orientation tag
+                }
+              }
+            } else if (marker === 0xda) {
+              break; // Start of Scan — no more metadata segments
+            }
+            pos += 2 + segLen;
+          }
+          return null;
+        }
+
+        const candidates: { id: string; slot: string | null; quoteId: string; orientation: number }[] = [];
+        for (const row of rows) {
+          const buf = row.data as Buffer;
+          const orientation = readJpegExifOrientation(buf);
+          // orientation === null → no EXIF tag → image already stored upright (or isn't JPEG)
+          // orientation === 1   → explicitly upright
+          // anything else       → needs rotation
+          if (orientation !== null && orientation !== 1) {
+            candidates.push({ id: row.id, slot: row.slot, quoteId: row.quoteId, orientation });
+          }
+        }
+        res.set("Cache-Control", "no-store");
+        res.json({ scanned: rows.length, candidates });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // ---------- admin: repair migrated re-checks ----------
   // Imported "open" inspections from the old app arrived without data.openItems,
   // so the re-check screen has nothing to work against. Rebuild that list from

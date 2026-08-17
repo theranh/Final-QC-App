@@ -4,6 +4,7 @@ import { initials, fmtDT } from '../lib/format';
 import { loadLegacyData, hasLegacyData, markLegacyImported, legacyImportDone } from '../lib/storage';
 import { parseBackupFile, convertOldReconBackup } from '../lib/exports';
 import { api } from '../lib/api';
+import { orientedJpegDataUrl } from '../lib/photo';
 
 const STATUS_META = {
   pending: { label: 'PENDING', bg: 'var(--amber)' },
@@ -115,6 +116,55 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       .then((r) => showToast(r.scanned === 0 ? 'Nothing to repair — all re-checks are complete ✓' : `Repaired ${r.rebuilt} re-check${r.rebuilt === 1 ? '' : 's'}, cleared ${r.cleared} ✓`))
       .catch((err) => showToast('Repair failed: ' + err.message))
       .finally(() => setRepairBusy(false));
+  };
+
+  // ----- photo orientation repair -----
+  const [photoRepairQuoteId, setPhotoRepairQuoteId] = useState('');
+  const [photoRepairScanState, setPhotoRepairScanState] = useState('idle'); // idle | scanning | done | fixing | fixed | error
+  const [photoRepairCandidates, setPhotoRepairCandidates] = useState(null); // null | [{id, slot, quoteId, orientation}]
+  const [photoRepairProgress, setPhotoRepairProgress] = useState({ done: 0, total: 0 });
+  const [photoRepairError, setPhotoRepairError] = useState('');
+
+  const runPhotoScan = async () => {
+    const qid = photoRepairQuoteId.trim().toUpperCase();
+    if (!qid) { setPhotoRepairError('Enter a truck ID first'); return; }
+    setPhotoRepairScanState('scanning');
+    setPhotoRepairCandidates(null);
+    setPhotoRepairError('');
+    try {
+      const r = await api.photoOrientationCandidates(qid);
+      setPhotoRepairCandidates(r.candidates || []);
+      setPhotoRepairScanState('done');
+    } catch (err) {
+      setPhotoRepairError('Scan failed: ' + err.message);
+      setPhotoRepairScanState('error');
+    }
+  };
+
+  const runPhotoFix = async () => {
+    if (!photoRepairCandidates || !photoRepairCandidates.length) return;
+    setPhotoRepairScanState('fixing');
+    setPhotoRepairProgress({ done: 0, total: photoRepairCandidates.length });
+    setPhotoRepairError('');
+    try {
+      for (let i = 0; i < photoRepairCandidates.length; i++) {
+        const ph = photoRepairCandidates[i];
+        // Fetch the raw JPEG bytes from the server
+        const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
+        if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
+        const blob = await resp.blob();
+        // Re-encode upright: createImageBitmap with imageOrientation:'from-image' bakes
+        // the EXIF rotation into pixels, then the canvas produces an orientation-1 JPEG.
+        const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        setPhotoRepairProgress({ done: i + 1, total: photoRepairCandidates.length });
+      }
+      setPhotoRepairScanState('fixed');
+      showToast(`Fixed ${photoRepairCandidates.length} photo${photoRepairCandidates.length === 1 ? '' : 's'} ✓`);
+    } catch (err) {
+      setPhotoRepairError('Fix failed: ' + err.message);
+      setPhotoRepairScanState('error');
+    }
   };
 
   const [unlockBusy, setUnlockBusy] = useState(false);
@@ -474,6 +524,70 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
             >
               {unlockBusy ? 'Unlocking…' : '🔓 Unlock body quotes'}
             </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">REPAIR SIDEWAYS PHOTOS</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Phones embed an EXIF orientation tag instead of storing pixels upright. Photos taken before the orientation fix shipped may appear sideways. Enter a truck ID (e.g. BC23092) to scan and straighten its photos without retaking them.
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 9, alignItems: 'center' }}>
+              <input
+                value={photoRepairQuoteId}
+                onChange={(e) => {
+                  setPhotoRepairQuoteId(e.target.value.toUpperCase());
+                  setPhotoRepairScanState('idle');
+                  setPhotoRepairCandidates(null);
+                  setPhotoRepairError('');
+                }}
+                placeholder="Truck ID"
+                style={{ flex: 1, height: 36, padding: '0 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', textTransform: 'uppercase' }}
+                maxLength={30}
+                disabled={photoRepairScanState === 'scanning' || photoRepairScanState === 'fixing'}
+              />
+              <div
+                className={'btn btn-brown' + (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim() ? ' disabled' : '')}
+                style={{ height: 36, fontSize: 12, paddingInline: 14, opacity: (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim()) ? 0.6 : 1, whiteSpace: 'nowrap' }}
+                onClick={photoRepairScanState !== 'scanning' ? runPhotoScan : undefined}
+              >
+                {photoRepairScanState === 'scanning' ? 'Scanning…' : '🔍 Scan'}
+              </div>
+            </div>
+            {photoRepairScanState === 'done' && photoRepairCandidates !== null && (
+              <div style={{ marginTop: 10 }}>
+                {photoRepairCandidates.length === 0 ? (
+                  <div style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>All photos are already upright ✓</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 10.5, color: 'var(--brown)', marginBottom: 7 }}>
+                      {photoRepairCandidates.length} sideways photo{photoRepairCandidates.length === 1 ? '' : 's'} found — fix will re-encode each one upright.
+                    </div>
+                    <div
+                      className="btn btn-brown"
+                      style={{ height: 40, fontSize: 12 }}
+                      onClick={runPhotoFix}
+                    >
+                      ↻ Fix {photoRepairCandidates.length} photo{photoRepairCandidates.length === 1 ? '' : 's'}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            {photoRepairScanState === 'fixing' && (
+              <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--brown)' }}>
+                Fixing {photoRepairProgress.done} / {photoRepairProgress.total}…
+              </div>
+            )}
+            {photoRepairScanState === 'fixed' && (
+              <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>
+                Done — {photoRepairProgress.total} photo{photoRepairProgress.total === 1 ? '' : 's'} corrected ✓
+              </div>
+            )}
+            {photoRepairError && (
+              <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{photoRepairError}</div>
+            )}
           </div>
         )}
 
