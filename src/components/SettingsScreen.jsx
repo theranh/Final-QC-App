@@ -12,16 +12,16 @@ import { orientedJpegDataUrl } from '../lib/photo';
 export const FLEET_SCAN_KEY = 'fleetScanProgress_v1';
 
 export const saveFleetProgress = (offset, accumulated, totalScanned) => {
-  try { sessionStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
+  try { localStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
 };
 export const loadFleetProgress = () => {
   try {
-    const raw = sessionStorage.getItem(FLEET_SCAN_KEY);
+    const raw = localStorage.getItem(FLEET_SCAN_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 };
 export const removeFleetProgress = () => {
-  try { sessionStorage.removeItem(FLEET_SCAN_KEY); } catch {}
+  try { localStorage.removeItem(FLEET_SCAN_KEY); } catch {}
 };
 
 /**

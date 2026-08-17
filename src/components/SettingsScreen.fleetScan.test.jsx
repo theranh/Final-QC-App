@@ -19,16 +19,16 @@ import {
   FLEET_SCAN_KEY,
 } from './SettingsScreen';
 
-// ── sessionStorage stub ───────────────────────────────────────────────────────
+// ── localStorage stub ─────────────────────────────────────────────────────────
 const store = {};
-const ssStub = {
+const lsStub = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
   removeItem: (k) => { delete store[k]; },
 };
 beforeEach(() => {
   Object.keys(store).forEach((k) => delete store[k]);
-  vi.stubGlobal('sessionStorage', ssStub);
+  vi.stubGlobal('localStorage', lsStub);
 });
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -266,6 +266,6 @@ describe('saveFleetProgress / loadFleetProgress / removeFleetProgress', () => {
     saveFleetProgress(50, [], 50);
     removeFleetProgress();
     expect(loadFleetProgress()).toBeNull();
-    expect(sessionStorage.getItem(FLEET_SCAN_KEY)).toBeNull();
+    expect(localStorage.getItem(FLEET_SCAN_KEY)).toBeNull();
   });
 });
