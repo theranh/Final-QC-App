@@ -814,6 +814,153 @@ describe("readJpegExifOrientation — near-max IFD0 entry count (0xFFFF) safety"
 });
 
 // ---------------------------------------------------------------------------
+// Suite 1f: Corrupt APP1 segment length (0xFFFF) safety.
+//
+// The segment walker advances `pos` by `2 + segLen` after each segment.  A
+// corrupt or adversarially large segLen (0xFFFF = 65535, the maximum 16-bit
+// value) causes the computed next-pos to leap far past buf.length.  The outer
+// while condition
+//   while (pos < buf.length - 3)
+// must catch this without throwing a RangeError or reading undefined.
+//
+// Two sub-cases per TIFF byte-order variant (LE and BE):
+//
+//   (a) APP1 segment itself has segLen = 0xFFFF and the buffer is short
+//       (10 bytes total).  `pos + 10 < buf.length` (2+10=12 < 10) is false
+//       → the APP1 payload block is skipped entirely.  The walker then runs:
+//         pos += 2 + 65535 = 65537
+//       and the while guard `65537 < 10 − 3` fires → exits → null.
+//
+//   (b) A preceding dummy APP0 segment (FF E0) has segLen = 0xFFFF, followed
+//       in the buffer by a valid APP1/EXIF segment that is never reached.
+//       After the corrupt APP0 header at pos=2:
+//         pos += 2 + 65535 = 65539  (buffer is ~42 bytes)
+//       while guard fires → exits → null.
+//
+// Buffer layouts:
+//
+//   Case (a) — 10-byte truncated buffer:
+//     0–1   SOI
+//     2–3   APP1 marker (FF E1)
+//     4–5   APP1 length = 0xFFFF  ← corrupt
+//     6–9   partial payload (4 bytes, < the 6 bytes of "Exif\0\0")
+//
+//   Case (b) — valid LE/BE JPEG prepended with 4-byte corrupt APP0 header:
+//     0–1   SOI
+//     2–3   APP0 marker (FF E0)
+//     4–5   APP0 length = 0xFFFF  ← corrupt
+//     6–7   APP1 marker of the valid JPEG (= FF E1, never reached)
+//     8+    valid APP1/EXIF payload
+// ---------------------------------------------------------------------------
+
+/**
+ * Take a valid LE-TIFF minimal JPEG, corrupt its APP1 length field to 0xFFFF,
+ * then slice to `keepBytes`.  With keepBytes=10 the `pos+10 < buf.length`
+ * guard prevents entering the APP1 payload so the walker falls through to
+ * `pos += 2 + 0xFFFF = 65537`, which the while condition catches.
+ */
+function buildJpegWithCorruptApp1SegLenLE(keepBytes: number): Buffer {
+  const buf = buildJpegWithOrientation(6).slice(); // mutable copy
+  // APP1 length field is at absolute offset 4 (pos=2 for APP1 marker + 2 for length).
+  buf.writeUInt16BE(0xffff, 4);
+  return buf.subarray(0, keepBytes);
+}
+
+/**
+ * Big-endian counterpart of buildJpegWithCorruptApp1SegLenLE.
+ */
+function buildJpegWithCorruptApp1SegLenBE(keepBytes: number): Buffer {
+  const buf = buildJpegWithOrientationBE(6).slice();
+  buf.writeUInt16BE(0xffff, 4);
+  return buf.subarray(0, keepBytes);
+}
+
+/**
+ * Build a JPEG where a dummy APP0 segment preceding the valid APP1/EXIF block
+ * has a corrupt segLen = 0xFFFF (LE TIFF variant).
+ *
+ * Layout:
+ *   0–1   SOI
+ *   2–3   APP0 marker (FF E0)
+ *   4–5   APP0 length = 0xFFFF  ← corrupt
+ *   6+    valid LE-TIFF APP1/EXIF + EOI (copied from buildJpegWithOrientation)
+ *
+ * After the walker reads APP0 at pos=2 with segLen=0xFFFF it sets
+ * pos = 2 + 2 + 65535 = 65539, which is far past buf.length (~42 bytes).
+ */
+function buildJpegWithCorruptPrecedingSegLenLE(): Buffer {
+  const validBuf = buildJpegWithOrientation(6); // 40-byte valid LE JPEG
+  // SOI(2) + APP0 header(4) + rest of validBuf without its SOI(38) = 44 bytes
+  const totalSize = 2 + 4 + (validBuf.length - 2);
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+  buf[pos++] = 0xff; buf[pos++] = 0xd8; // SOI
+  buf[pos++] = 0xff; buf[pos++] = 0xe0; // APP0 marker
+  buf.writeUInt16BE(0xffff, pos); pos += 2; // corrupt APP0 length
+  validBuf.copy(buf, pos, 2); // paste APP1/EXIF + EOI (skip the original SOI)
+  return buf;
+}
+
+/**
+ * Big-endian counterpart of buildJpegWithCorruptPrecedingSegLenLE.
+ * Uses a BE-TIFF APP1/EXIF block after the corrupt APP0 header.
+ */
+function buildJpegWithCorruptPrecedingSegLenBE(): Buffer {
+  const validBuf = buildJpegWithOrientationBE(6); // 40-byte valid BE JPEG
+  const totalSize = 2 + 4 + (validBuf.length - 2);
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+  buf[pos++] = 0xff; buf[pos++] = 0xd8; // SOI
+  buf[pos++] = 0xff; buf[pos++] = 0xe0; // APP0 marker
+  buf.writeUInt16BE(0xffff, pos); pos += 2; // corrupt APP0 length
+  validBuf.copy(buf, pos, 2);
+  return buf;
+}
+
+describe("readJpegExifOrientation — corrupt APP1 segment length (0xFFFF) safety", () => {
+  // ---- (a) LE TIFF: APP1 itself has segLen = 0xFFFF, short 10-byte buffer -----
+  //
+  // buf.length = 10.
+  // pos=2: while guard 2 < 10−3=7 → OK.
+  // marker = 0xE1 (APP1); segLen = 0xFFFF.
+  // `pos + 10 < buf.length` → 12 < 10 → false → skip APP1 payload block.
+  // Not SOS; fall through to: pos += 2 + 65535 = 65537.
+  // Next while: 65537 < 7 → false → exit → null.
+  it("LE TIFF: APP1 segLen=0xFFFF, 10-byte buffer — walker overrun caught by while guard, returns null without throwing", () => {
+    const buf = buildJpegWithCorruptApp1SegLenLE(10);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (a) BE TIFF: APP1 itself has segLen = 0xFFFF, short 10-byte buffer -----
+  //
+  // Identical logic with big-endian TIFF byte order in the (unreachable) payload.
+  it("BE TIFF: APP1 segLen=0xFFFF, 10-byte buffer — walker overrun caught by while guard, returns null without throwing", () => {
+    const buf = buildJpegWithCorruptApp1SegLenBE(10);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (b) LE TIFF: preceding APP0 has segLen = 0xFFFF -------------------
+  //
+  // buf.length ≈ 44 bytes (SOI + APP0 header + valid LE APP1/EXIF + EOI).
+  // pos=2: marker=0xE0 (APP0, not APP1, not SOS); segLen=0xFFFF.
+  // pos += 2 + 65535 = 65539; next while: 65539 < 41 → false → null.
+  // The valid APP1/EXIF segment is never reached.
+  it("LE TIFF: preceding APP0 segLen=0xFFFF — walker skips valid APP1/EXIF, returns null without throwing", () => {
+    const buf = buildJpegWithCorruptPrecedingSegLenLE();
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- (b) BE TIFF: preceding APP0 has segLen = 0xFFFF -------------------
+  //
+  // Same as the LE variant above, with a BE-TIFF APP1/EXIF payload that is
+  // likewise never reached.
+  it("BE TIFF: preceding APP0 segLen=0xFFFF — walker skips valid APP1/EXIF, returns null without throwing", () => {
+    const buf = buildJpegWithCorruptPrecedingSegLenBE();
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 2: Synthetic multi-entry EXIF fixtures.
 //
 // Generated by server/__fixtures__/generate-fixtures.cjs — realistic EXIF
