@@ -71,7 +71,40 @@ async function seedQcCounter() {
   console.error("qc_counter seed gave up — counter must already exist for FQ numbers to work.");
 }
 
+// Loud check for required production configuration. A missing secret must show
+// up as an explicit log line in deploy logs, never a silent hang.
+function checkRequiredEnv() {
+  const required = ["DATABASE_URL", "SESSION_SECRET", "REPL_ID"];
+  if (process.env.NODE_ENV === "production") required.push("QUOTER_SYNC_TOKEN");
+  const missing = required.filter((name) => !process.env[name]);
+  for (const name of missing) {
+    console.error(`STARTUP ERROR: required environment variable ${name} is not set — the app cannot run correctly without it.`);
+  }
+  return missing;
+}
+
 async function main() {
+  checkRequiredEnv();
+
+  const server = http.createServer(app);
+
+  // Open the port IMMEDIATELY. The deployment readiness check only needs the
+  // port to accept connections; auth setup (OIDC discovery + DB-backed session
+  // store) can be slow, so it runs after listen(). Requests that arrive before
+  // setup finishes wait on this gate instead of finding a closed port.
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  app.use((_req, _res, next) => {
+    void ready.then(() => next());
+  });
+
+  const port = Number(process.env.PORT) || 5000;
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`Final QC server listening on 0.0.0.0:${port} (${process.env.NODE_ENV || "development"})`);
+  });
+
   console.log("Startup: configuring auth…");
   await setupAuth(app);
   registerAuthRoutes(app);
@@ -89,8 +122,6 @@ async function main() {
 
   // The old standalone VPC dashboard page was replaced by the in-app Dash tab.
   app.get("/dashboard", (_req, res) => res.redirect("/"));
-
-  const server = http.createServer(app);
 
   if (process.env.NODE_ENV === "production") {
     const { serveStatic } = await import("./vite");
@@ -121,13 +152,13 @@ self.addEventListener('activate', (e) => {
     await setupVite(app, server);
   }
 
-  const port = Number(process.env.PORT) || 5000;
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Final QC server listening on 0.0.0.0:${port} (${process.env.NODE_ENV || "development"})`);
-    // Background DB seed — never blocks the health check.
-    void seedQcCounter();
-    void ensureAccuracySchema();
-  });
+  // Routes are all registered — release any requests that arrived early.
+  markReady();
+  console.log("Startup: auth + routes ready");
+
+  // Background DB seed — never blocks the health check.
+  void seedQcCounter();
+  void ensureAccuracySchema();
 }
 
 main().catch((err) => {
