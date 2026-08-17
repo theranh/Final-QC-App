@@ -288,10 +288,16 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   };
 
   const runFleetFixOne = async (quoteId) => {
+    // Take a snapshot of this truck's candidates at the start. The truck row
+    // is removed from fleetCandidates one photo at a time as each upload
+    // succeeds. If the fix is interrupted mid-way the unprocessed photos
+    // remain in fleetCandidates, keeping the truck row visible so the admin
+    // can retry without re-processing photos that already succeeded.
     const candidates = fleetCandidates.filter((c) => c.quoteId === quoteId);
     if (!candidates.length) return;
     setFleetTruckBusy((prev) => new Set([...prev, quoteId]));
     setFleetError('');
+    let fixed = 0;
     try {
       for (const ph of candidates) {
         const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
@@ -299,11 +305,18 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         const blob = await resp.blob();
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
         await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        // Remove this specific photo immediately after it's confirmed uploaded.
+        // On an interruption the remaining photos stay in fleetCandidates so
+        // the truck row persists and the admin can resume without redundant work.
+        setFleetCandidates((prev) => prev.filter((c) => c.id !== ph.id));
+        fixed += 1;
       }
-      setFleetCandidates((prev) => prev.filter((c) => c.quoteId !== quoteId));
       showToast(`Fixed ${candidates.length} photo${candidates.length === 1 ? '' : 's'} for ${quoteId} ✓`);
     } catch (err) {
-      setFleetError(`Fix failed for ${quoteId}: ${err.message}`);
+      // Some photos may have been fixed before the error; report how many
+      // remain so the admin knows the truck row is still there to retry.
+      const remaining = candidates.length - fixed;
+      setFleetError(`Fix failed for ${quoteId} after ${fixed}/${candidates.length} photos: ${err.message}. ${remaining} photo${remaining === 1 ? '' : 's'} still need fixing — tap Fix again to resume.`);
     } finally {
       setFleetTruckBusy((prev) => { const s = new Set(prev); s.delete(quoteId); return s; });
     }
