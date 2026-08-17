@@ -187,6 +187,30 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   const [fleetFixProgress, setFleetFixProgress] = useState({ done: 0, total: 0, currentQuoteId: '' });
   const [fleetError, setFleetError] = useState('');
   const [fleetTruckBusy, setFleetTruckBusy] = useState(new Set()); // quoteIds currently being fixed individually
+  const [fleetResumable, setFleetResumable] = useState(false);
+
+  // sessionStorage key for mid-scan resume checkpoints
+  const FLEET_SCAN_KEY = 'fleetScanProgress_v1';
+
+  const saveFleetProgress = (offset, accumulated, totalScanned) => {
+    try { sessionStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
+  };
+  const clearFleetProgress = () => {
+    try { sessionStorage.removeItem(FLEET_SCAN_KEY); setFleetResumable(false); } catch {}
+  };
+  const loadFleetProgress = () => {
+    try {
+      const raw = sessionStorage.getItem(FLEET_SCAN_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  };
+
+  // Check for a saved resume point whenever fleet mode becomes active
+  useEffect(() => {
+    if (photoRepairMode === 'fleet') {
+      setFleetResumable(!!loadFleetProgress());
+    }
+  }, [photoRepairMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Derived: group fleet candidates by quoteId for display
   const fleetByTruck = (() => {
@@ -198,29 +222,44 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     return Array.from(map.entries()).map(([quoteId, list]) => ({ quoteId, count: list.length }));
   })();
 
-  const runFleetScan = async () => {
+  // Runs (or resumes) the fleet scan. Pass a saved progress object to resume mid-scan.
+  const runFleetScan = async (resumeFrom = null) => {
     setFleetScanState('scanning');
-    setFleetScanned(0);
-    setFleetCandidates([]);
     setFleetError('');
+
+    let offset = resumeFrom?.offset ?? 0;
+    let totalScanned = resumeFrom?.totalScanned ?? 0;
+    const accumulated = resumeFrom?.accumulated ? [...resumeFrom.accumulated] : [];
+
+    // Restore visible state when resuming
+    setFleetScanned(totalScanned);
+    setFleetCandidates([...accumulated]);
+
+    if (!resumeFrom) {
+      // Fresh start — drop any stale checkpoint
+      clearFleetProgress();
+    }
+
     try {
-      let offset = 0;
-      let totalScanned = 0;
-      const accumulated = [];
       while (true) {
         const r = await api.photoOrientationScanAll(offset);
         totalScanned += r.scanned;
+        offset += r.scanned;
         setFleetScanned(totalScanned);
         if (r.candidates && r.candidates.length) {
           accumulated.push(...r.candidates);
           setFleetCandidates([...accumulated]);
         }
+        // Checkpoint after every page so the browser can resume if the tab sleeps
+        saveFleetProgress(offset, accumulated, totalScanned);
         if (r.done) break;
-        offset += r.scanned;
       }
+      clearFleetProgress();
       setFleetScanState('done');
     } catch (err) {
-      setFleetError('Scan failed: ' + err.message);
+      // Progress is already checkpointed up to the last successful page
+      setFleetResumable(true);
+      setFleetError('Scan interrupted: ' + err.message);
       setFleetScanState('error');
     }
   };
@@ -646,7 +685,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                 One truck
               </div>
               <div
-                onClick={() => { setPhotoRepairMode('fleet'); setFleetScanState('idle'); setFleetCandidates([]); setFleetScanned(0); setFleetError(''); }}
+                onClick={() => { setPhotoRepairMode('fleet'); setFleetScanState('idle'); setFleetCandidates([]); setFleetScanned(0); setFleetError(''); setFleetResumable(!!loadFleetProgress()); }}
                 style={{ flex: 1, textAlign: 'center', padding: '7px 0', borderRadius: 7, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', border: '1.5px solid var(--brown)', background: photoRepairMode === 'fleet' ? 'var(--brown)' : 'transparent', color: photoRepairMode === 'fleet' ? '#fff' : 'var(--brown)', transition: 'background 0.15s' }}
               >
                 Scan all trucks
@@ -721,16 +760,27 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
             {photoRepairMode === 'fleet' && (
               <>
                 <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 8, lineHeight: 1.5 }}>
-                  Pages through every photo in the database to find sideways ones. Large photo libraries may take a minute to scan.
+                  Pages through every photo in the database to find sideways ones. Large photo libraries may take a minute to scan. For best results, run from a desktop browser — mobile browsers may suspend the tab mid-scan. If the scan is interrupted, use the Resume button to pick up where it left off.
                 </div>
 
                 {fleetScanState === 'idle' && (
-                  <div
-                    className="btn btn-brown"
-                    style={{ marginTop: 10, height: 40, fontSize: 12 }}
-                    onClick={runFleetScan}
-                  >
-                    🔍 Scan all trucks
+                  <div style={{ display: 'flex', gap: 7, marginTop: 10 }}>
+                    <div
+                      className="btn btn-brown"
+                      style={{ flex: 1, height: 40, fontSize: 12 }}
+                      onClick={() => runFleetScan(null)}
+                    >
+                      🔍 Scan all trucks
+                    </div>
+                    {fleetResumable && (
+                      <div
+                        className="btn btn-brown"
+                        style={{ flex: 1, height: 40, fontSize: 12 }}
+                        onClick={() => runFleetScan(loadFleetProgress())}
+                      >
+                        ↩ Resume scan
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -828,7 +878,29 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                 {fleetScanState === 'error' && (
                   <>
                     <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{fleetError}</div>
-                    <div className="btn btn-brown" style={{ marginTop: 8, height: 36, fontSize: 11 }} onClick={runFleetScan}>Retry scan</div>
+                    {fleetResumable && fleetScanned > 0 && (
+                      <div style={{ marginTop: 4, fontSize: 9.5, color: 'var(--muted)' }}>
+                        Progress saved — {fleetScanned} photo{fleetScanned === 1 ? '' : 's'} already checked{fleetCandidates.length > 0 ? `, ${fleetCandidates.length} sideways found` : ''}.
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 7, marginTop: 8 }}>
+                      {fleetResumable && (
+                        <div
+                          className="btn btn-brown"
+                          style={{ flex: 1, height: 36, fontSize: 11 }}
+                          onClick={() => runFleetScan(loadFleetProgress())}
+                        >
+                          ↩ Resume scan
+                        </div>
+                      )}
+                      <div
+                        className="btn btn-outline"
+                        style={{ flex: 1, height: 36, fontSize: 11 }}
+                        onClick={() => { clearFleetProgress(); setFleetScanned(0); setFleetCandidates([]); runFleetScan(null); }}
+                      >
+                        ↺ Restart from beginning
+                      </div>
+                    </div>
                   </>
                 )}
 
