@@ -117,6 +117,30 @@ export async function purgeDeletedDamagePhoto(id) {
     recovery explicitly skips dmg_wide slots. */ });
 }
 
+// Exported for testing: fetches the wide-shot blob for each line that has a
+// widePhotoId, converts it to base64, and patches the line in state.
+// isLive() returns false if the component unmounted during the async fetch,
+// preventing stale state updates. fetchFn defaults to globalThis.fetch so
+// tests can supply a mock without patching the global.
+export async function rehydrateWideShots(lines, setLines, isLive, fetchFn = fetch) {
+  const linesWithWide = lines.filter((l) => l.widePhotoId);
+  for (const l of linesWithWide) {
+    try {
+      const resp = await fetchFn(`/api/quoter/photo?id=${encodeURIComponent(l.widePhotoId)}`, { credentials: 'include' });
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      const wideDataUrl = await new Promise((resolve, reject) => {
+        const rd = new FileReader();
+        rd.onload = () => resolve(rd.result);
+        rd.onerror = reject;
+        rd.readAsDataURL(blob);
+      });
+      const wideBase64 = wideDataUrl.split(',')[1];
+      if (isLive()) setLines((prev) => prev.map((ln) => ln.id === l.id ? { ...ln, wideBase64 } : ln));
+    } catch { /* wide shot unavailable — classify will fall back to single-image */ }
+  }
+}
+
 export function createSaveFailureNotifier(notify, nowFn = Date.now) {
   let fails = 0;
   let warnedAt = 0;
@@ -693,26 +717,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       // Only runs for lines that survived the tombstone filter above, so a deleted
       // line's wide photo can never be re-attached here even if the server still
       // has the photo (offline autosave failure dropped the line deletion).
-      const linesWithWide = restored.filter((l) => l.widePhotoId);
-      if (linesWithWide.length) {
-        (async () => {
-          for (const l of linesWithWide) {
-            try {
-              const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(l.widePhotoId)}`, { credentials: 'include' });
-              if (!resp.ok) continue;
-              const blob = await resp.blob();
-              const wideDataUrl = await new Promise((resolve, reject) => {
-                const rd = new FileReader();
-                rd.onload = () => resolve(rd.result);
-                rd.onerror = reject;
-                rd.readAsDataURL(blob);
-              });
-              const wideBase64 = wideDataUrl.split(',')[1];
-              if (live) setLines((prev) => prev.map((ln) => ln.id === l.id ? { ...ln, wideBase64 } : ln));
-            } catch { /* wide shot unavailable — classify will fall back to single-image */ }
-          }
-        })();
-      }
+      rehydrateWideShots(restored, setLines, () => live);
     }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
     return () => { live = false; };
   }, [prefill?.quoteId]);
