@@ -225,6 +225,14 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         setProgress(i + 1, list.length);
       }
       setDone();
+      // PAGE-RELOAD SAFETY: No "fixed IDs" set is needed here.
+      // orientedJpegDataUrl() produces a canvas.toDataURL() JPEG that carries
+      // no EXIF APP1 segment.  The server stores those raw bytes, so the next
+      // call to runPhotoScan hits readJpegExifOrientation() and gets null (no
+      // tag).  The candidate filter is `orientation !== null && orientation !== 1`,
+      // so null is excluded — already-fixed photos are never returned as
+      // candidates again after a page reload + re-scan, even though
+      // photoRepairCandidates is reset to null by React on remount.
     } catch (err) {
       setError('Fix failed: ' + err.message);
     }
