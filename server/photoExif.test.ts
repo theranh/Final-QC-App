@@ -1004,3 +1004,112 @@ describe("readJpegExifOrientation — real unmodified device JPEGs", () => {
     expect(readJpegExifOrientation(fixture("real/cam_Samsung_Digimax_i50_MP3.jpg"))).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Consolidated malformed-input suite: corrupt segment lengths, bad byte-order
+// marks, degenerate IFD entry counts, and exact buffer-boundary cases. Every
+// case must return null quickly (no throw, no hang, no out-of-bounds read).
+// ---------------------------------------------------------------------------
+describe("readJpegExifOrientation — malformed input hardening", () => {
+  /** Minimal valid JPEG (SOI + APP1 EXIF w/ orientation 6 + EOI) to mutate. */
+  function validJpeg(): Buffer {
+    const buf = Buffer.alloc(40, 0);
+    let p = 0;
+    buf[p++] = 0xff; buf[p++] = 0xd8;             // SOI
+    buf[p++] = 0xff; buf[p++] = 0xe1;             // APP1
+    buf.writeUInt16BE(34, p); p += 2;             // segLen = 2 + 32
+    buf.write("Exif\0\0", p, "latin1"); p += 6;
+    const t = p;                                   // TIFF header
+    buf.write("II", t, "latin1");
+    buf.writeUInt16LE(42, t + 2);
+    buf.writeUInt32LE(8, t + 4);                   // IFD0 offset
+    const ifd0 = t + 8;
+    buf.writeUInt16LE(1, ifd0);                    // 1 entry
+    const e = ifd0 + 2;
+    buf.writeUInt16LE(0x0112, e);                  // Orientation tag
+    buf.writeUInt16LE(3, e + 2);                   // type SHORT
+    buf.writeUInt32LE(1, e + 4);                   // count
+    buf.writeUInt16LE(6, e + 8);                   // value = 6
+    buf.writeUInt32LE(0, ifd0 + 2 + 12);           // next-IFD = none
+    buf[38] = 0xff; buf[39] = 0xd9;                // EOI
+    return buf;
+  }
+
+  it("sanity: the unmutated builder JPEG parses to orientation 6", () => {
+    expect(readJpegExifOrientation(validJpeg())).toBe(6);
+  });
+
+  // ---- segment length corruption ----
+  it("segment length 0: returns null without hanging", () => {
+    const buf = validJpeg();
+    buf.writeUInt16BE(0, 4); // APP1 length field
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("segment length 1 (below the 2-byte minimum): returns null without hanging", () => {
+    const buf = validJpeg();
+    buf.writeUInt16BE(1, 4);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("APP1 length claiming to extend past the end of the buffer: bounded parse, no out-of-bounds read", () => {
+    // Contract: the walker must never read beyond the buffer, but a truncated
+    // (or length-corrupted) APP1 whose TIFF header is still intact SHOULD
+    // yield its orientation — real camera files trimmed mid-segment depend on
+    // this. The oversized length only stops the walk after this segment.
+    const buf = validJpeg();
+    buf.writeUInt16BE(0xfff0, 4); // far beyond the 40-byte buffer
+    expect(readJpegExifOrientation(buf)).toBe(6);
+    // Same corruption with the TIFF header ALSO truncated: null, no throw.
+    const cut = buf.subarray(0, 16); // ends inside the TIFF header
+    expect(readJpegExifOrientation(cut)).toBeNull();
+  });
+
+  it("non-EXIF segment with length 0 before a valid APP1: stops instead of looping forever", () => {
+    // SOI + APP0 with segLen 0 (would never advance under naive parsing).
+    const head = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00]);
+    const buf = Buffer.concat([head, validJpeg().subarray(2)]);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- byte-order mark corruption ----
+  for (const [label, b0, b1] of [
+    ["mixed 'IM'", 0x49, 0x4d],
+    ["mixed 'MI'", 0x4d, 0x49],
+    ["zero-filled BOM", 0x00, 0x00],
+    ["'MM' first byte only ('M\\0')", 0x4d, 0x00],
+  ] as const) {
+    it(`mismatched byte-order mark (${label}): returns null, never garbage`, () => {
+      const buf = validJpeg();
+      buf[12] = b0; buf[13] = b1; // TIFF BOM (TIFF header starts at offset 12)
+      expect(readJpegExifOrientation(buf)).toBeNull();
+    });
+  }
+
+  // ---- degenerate IFD entry counts ----
+  it("zero IFD0 entry count: returns null without walking into garbage", () => {
+    const buf = validJpeg();
+    buf.writeUInt16LE(0, 20); // IFD0 count at TIFF(12)+8 = abs offset 20
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("IFD0 count of 1 with the buffer ending exactly at the last byte of the entry: still parses", () => {
+    // Truncate right after the single 12-byte entry (drop next-IFD ptr + EOI).
+    const buf = validJpeg().subarray(0, 34); // entry occupies 22..33
+    expect(readJpegExifOrientation(buf)).toBe(6);
+  });
+
+  it("IFD0 count of 1 with the buffer truncated one byte INTO the entry's value: returns null or a bounded read, never throws", () => {
+    const buf = validJpeg().subarray(0, 31); // cuts inside the entry's value field
+    expect(() => readJpegExifOrientation(buf)).not.toThrow();
+  });
+
+  it("huge IFD0 entry count with tiny buffer: bounded scan, returns null fast", () => {
+    const buf = validJpeg();
+    buf.writeUInt16LE(0xffff, 20);
+    buf.writeUInt16LE(0x9999, 22); // destroy the orientation tag id
+    const started = Date.now();
+    expect(readJpegExifOrientation(buf)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});

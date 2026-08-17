@@ -475,7 +475,18 @@ export function registerQuoterRoutes(app: Express) {
       if (!diffs.length) return res.status(400).json({ error: "Missing diffs" });
       const ts = Number(body.ts) || Date.now();
       const analysisId = typeof body.analysis_id === "string" ? body.analysis_id.slice(0, 100) : null;
-      await db.insert(corrections).values({ ts, diffs, analysisId });
+      // Idempotency: re-applying the same edit (reopened quote, retried
+      // request, repeated commit of the same line) must not double-record the
+      // correction — duplicates skew the shop-calibration corpus and can
+      // evict genuine corrections from the 500-row learning cache. Enforced
+      // ATOMICALLY by the corrections_analysis_diffs_key unique index (see
+      // ensureAccuracySchema): concurrent identical POSTs cannot both insert.
+      await db.execute(sql`
+        INSERT INTO corrections (ts, diffs, analysis_id)
+        VALUES (${ts}, ${JSON.stringify(diffs)}::jsonb, ${analysisId})
+        ON CONFLICT (analysis_id, md5(diffs::text)) WHERE analysis_id IS NOT NULL
+        DO NOTHING
+      `);
       // Keep only the newest 500 corrections (shop-calibration learning cache).
       await db.execute(
         sql`DELETE FROM corrections WHERE id NOT IN (SELECT id FROM corrections ORDER BY id DESC LIMIT 500)`,

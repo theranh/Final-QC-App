@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile, orientedJpegDataUrl } from '../lib/photo';
-import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone, markPhotoDeleted } from '../lib/photoQueue';
+import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone, markPhotoDeleted, queueServerDelete, removeServerDelete } from '../lib/photoQueue';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
@@ -116,9 +116,16 @@ export async function purgeDeletedDamagePhoto(id) {
   // issues a corrective server delete (the delete-during-flush race).
   markPhotoDeleted(id);
   await removeJobsForPhoto(id, '__none__'); // no surviving capture — drop all queued records
-  api.deleteQuotePhoto({ id }).catch(() => { /* offline — server copy will remain but
-    cannot re-attach: hydration only runs for lines still in q.lines, and orphan
-    recovery explicitly skips dmg_wide slots. */ });
+  // Persist the owed server delete FIRST, then attempt it. If the DELETE
+  // succeeds (or the photo is already gone / the quote is committed) the
+  // record is cleared; otherwise (offline, 5xx, signed out) it survives the
+  // app restart and flushQueue retries it — a deleted photo must never
+  // linger on the server just because the inspector was offline.
+  await queueServerDelete(id);
+  api.deleteQuotePhoto({ id }).then(
+    () => removeServerDelete(id),
+    (e) => { if (e && (e.status === 404 || e.status === 409 || e.status === 403)) removeServerDelete(id); },
+  );
 }
 
 // Exported for testing: fetches the wide-shot blob for each line that has a

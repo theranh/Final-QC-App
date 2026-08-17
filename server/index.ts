@@ -44,6 +44,22 @@ async function ensureAccuracySchema() {
       `);
       // Link corrections to the analysis that triggered them.
       await db.execute(sql`ALTER TABLE corrections ADD COLUMN IF NOT EXISTS analysis_id text`);
+      // Idempotent corrections: the same (analysis, diffs) pair must exist at
+      // most once — concurrent retries of the same POST must not double-log a
+      // correction into the shop-calibration corpus. Clean up any duplicates
+      // that predate the constraint, then enforce it with an expression index
+      // (md5 of the canonical jsonb text keeps the index small).
+      await db.execute(sql`
+        DELETE FROM corrections a USING corrections b
+        WHERE a.id > b.id AND a.analysis_id IS NOT NULL
+          AND a.analysis_id = b.analysis_id
+          AND md5(a.diffs::text) = md5(b.diffs::text)
+      `);
+      await db.execute(sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS corrections_analysis_diffs_key
+        ON corrections (analysis_id, md5(diffs::text))
+        WHERE analysis_id IS NOT NULL
+      `);
       return;
     } catch (err) {
       console.error(`accuracy schema attempt ${attempt} failed:`, err);

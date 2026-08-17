@@ -21,13 +21,17 @@ const STORE = 'photos';
 // reached the server yet (offline autosave). Stored durably so hydration on
 // the next session can filter them out before they re-attach a wide shot.
 const TOMBSTONE_STORE = 'deletedLines';
+// Pending server deletes: photos the inspector deleted while offline (or whose
+// DELETE request failed). Persisted so the delete is retried on the next flush
+// or app launch instead of the server copy lingering forever.
+const DELETE_STORE = 'pendingDeletes';
 
 let dbPromise = null;
 function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(DB_NAME, 3);
+    const req = indexedDB.open(DB_NAME, 4);
     req.onupgradeneeded = (ev) => {
       const db = req.result;
       // v2 re-keys records per capture (`key`) instead of per slot (`id`).
@@ -38,6 +42,10 @@ function openDb() {
       // v3 adds the deletion-tombstone store.
       if (ev.oldVersion < 3) {
         db.createObjectStore(TOMBSTONE_STORE, { keyPath: 'lineId' });
+      }
+      // v4 adds the pending server-delete store (offline photo deletions).
+      if (ev.oldVersion < 4) {
+        db.createObjectStore(DELETE_STORE, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -75,6 +83,57 @@ function getAllRecords() {
 // record, so flushQueue never picks the photo up again.
 const deletedPhotoIds = new Set();
 export function markPhotoDeleted(id) { deletedPhotoIds.add(id); }
+
+// ---------- pending server deletes ----------
+// Durable counterpart to markPhotoDeleted: records that a server-side DELETE
+// for this photo is still owed. flushQueue retries it until the server
+// confirms (2xx) or reports a state where retrying is pointless (404 gone,
+// 409 committed, 403 forbidden). Survives app restarts, unlike the in-memory
+// registry above.
+export async function queueServerDelete(id) {
+  deletedPhotoIds.add(id);
+  try {
+    await tx('readwrite', (store) => store.put({ id, queuedAt: Date.now() }), DELETE_STORE);
+  } catch { /* private mode / quota — the immediate DELETE attempt still runs */ }
+}
+async function getPendingServerDeletes() {
+  try {
+    return await new Promise((resolve, reject) => {
+      openDb().then((db) => {
+        const r = db.transaction(DELETE_STORE, 'readonly').objectStore(DELETE_STORE).getAll();
+        r.onsuccess = () => resolve(r.result || []);
+        r.onerror = () => reject(r.error);
+      }).catch(reject);
+    });
+  } catch { return []; }
+}
+export async function removeServerDelete(id) {
+  try {
+    await tx('readwrite', (store) => store.delete(id), DELETE_STORE);
+  } catch { /* ignore */ }
+}
+// Attempt the owed server DELETE for one photo. The durable record is cleared
+// only on success or a permanent server verdict (404 gone, 409 committed,
+// 403 forbidden); any transient failure keeps it for the next flush pass.
+export async function attemptServerDelete(id) {
+  try {
+    await api.deleteQuotePhoto({ id });
+    await removeServerDelete(id);
+  } catch (e) {
+    if (e && (e.status === 404 || e.status === 409 || e.status === 403)) await removeServerDelete(id);
+    // Otherwise (offline / 5xx / 401): record stays queued — retried later.
+  }
+}
+async function flushServerDeletes() {
+  const pending = await getPendingServerDeletes();
+  for (const rec of pending) {
+    deletedPhotoIds.add(rec.id); // restart lost the in-memory registry — restore it
+    // Any queued upload for a deleted photo is stale by definition — drop it
+    // BEFORE the DELETE so this flush pass cannot re-upload it afterwards.
+    await removeJobsForPhoto(rec.id, '__none__');
+    await attemptServerDelete(rec.id);
+  }
+}
 
 // ---------- pending-count subscription (drives the "sending…" indicator) ----------
 const listeners = new Set();
@@ -185,6 +244,9 @@ export async function flushQueue() {
   if (flushing) return;
   flushing = true;
   try {
+    // Owed server deletes go first: a lingering server copy of a deleted
+    // photo must never outlive connectivity coming back.
+    await flushServerDeletes();
     let jobs = await pendingJobs(); // newest per server id
     // Camera open: only damage close-ups are ours to send — camera slots
     // belong to the camera's own retry loop.
@@ -206,9 +268,13 @@ export async function flushQueue() {
         // so a retake supersession (which also removes a queue record) is never
         // mistaken for a deletion and never triggers an erroneous server DELETE.
         if (deletedPhotoIds.has(job.id)) {
-          // Inspector deleted this photo while the PUT was in flight.
-          // Remove the server copy that just landed so the delete wins.
-          api.deleteQuotePhoto({ id: job.id }).catch(() => {});
+          // Inspector deleted this photo while the PUT was in flight. The
+          // corrective DELETE must be as durable as the deletion itself: if
+          // it fails transiently, the persisted record retries it next pass
+          // instead of leaving the just-landed copy on the server forever.
+          await removeJob(job.key);
+          await queueServerDelete(job.id);
+          await attemptServerDelete(job.id);
         } else {
           // Normal path: clear this capture and any older superseded records
           // for the same slot — but never a newer retake added mid-flight.
