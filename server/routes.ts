@@ -24,6 +24,7 @@ import { registerQuoterRoutes } from "./quoter";
 import { registerQuoterSyncAdminRoute } from "./quoterSyncAdmin";
 import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerTrackerRoutes } from "./tracker";
+import { readJpegExifOrientation } from "./photoExif";
 
 // ---------- helpers ----------
 import { registerTrackerSyncAdminRoute } from "./trackerSyncAdmin";
