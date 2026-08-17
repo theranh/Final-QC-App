@@ -61,7 +61,9 @@ export default defineConfig({
     strictPort: true,
     // Replit serves the dev server behind a proxy on a *.replit.dev host.
     allowedHosts: true,
-    hmr: { clientPort: 443 },
+    // Vite 8: HMR WebSocket config moved from server.hmr to server.ws.
+    // clientPort tells the browser to connect to the Replit proxy port (443).
+    ws: { port: 443 },
   },
   preview: {
     host: '0.0.0.0',

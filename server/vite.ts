@@ -10,7 +10,8 @@ export async function setupVite(app: Express, server: Server) {
     configFile: path.resolve(process.cwd(), "vite.config.js"),
     server: {
       middlewareMode: true,
-      hmr: { server, clientPort: 443 },
+      // Vite 8: server.hmr.* moved to server.ws.*
+      ws: { server, clientPort: 443 },
       allowedHosts: true as const,
     },
     appType: "custom",
