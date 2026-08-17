@@ -94,6 +94,10 @@ function liteRowsResult() {
 // Reset per-test to avoid cross-test pollution.
 let accuracyRows: { week: string; analyses: number; corrected: number }[] = [];
 
+// When true, the ai_analyses query throws (simulates table-not-yet-created on
+// first boot, before ensureAiAnalysesTable completes).
+let throwOnAiAnalyses = false;
+
 function fakeExecute(q: any) {
   const { text, params } = sqlParts(q);
   if (text.includes("UPDATE qc_counter") && text.includes("RETURNING")) {
@@ -108,6 +112,7 @@ function fakeExecute(q: any) {
   if (text.includes("FROM inspections")) return liteRowsResult();
   // ----- AI accuracy (FROM ai_analyses only; corrected flag is on the row) -----
   if (text.includes("FROM ai_analyses")) {
+    if (throwOnAiAnalyses) throw new Error('relation "ai_analyses" does not exist');
     return { rows: accuracyRows.map((r) => ({ week: r.week, analyses: r.analyses, corrected: r.corrected })) };
   }
   // ----- local Body Quoter tables (server/localQuote.ts) -----
@@ -367,8 +372,9 @@ describe("awaiting Final QC vs committed inspections", () => {
 
 describe("AI accuracy trend", () => {
   beforeEach(() => {
-    // Reset configurable accuracy rows before each test so tests don't bleed.
+    // Reset configurable accuracy rows and throw flag before each test.
     accuracyRows = [];
+    throwOnAiAnalyses = false;
   });
 
   it("always returns exactly 8 entries in aiAccuracy regardless of data", async () => {
@@ -454,5 +460,44 @@ describe("AI accuracy trend", () => {
     expect(bucket).toBeDefined();
     expect(bucket.analyses).toBe(1); // not 2 — second-look did not inflate denominator
     expect(bucket.corrections).toBe(0);
+  });
+
+  it("returns 200 with aiAccuracy present when ai_analyses table does not exist yet (first boot)", async () => {
+    // Simulate the table-not-yet-created case: the query throws a Postgres
+    // "relation does not exist" error.  The .catch() in buildPayload must absorb
+    // it so the dashboard endpoint still responds with HTTP 200.
+    throwOnAiAnalyses = true;
+
+    const r = await realFetch(`${base}/api/dashboard?from=2026-05-13&to=2026-05-19`);
+    expect(r.status).toBe(200);
+
+    const payload = await r.json();
+    // aiAccuracy key must be present and be an array (empty/zero-filled is fine).
+    expect(Object.prototype.hasOwnProperty.call(payload, "aiAccuracy")).toBe(true);
+    expect(Array.isArray(payload.aiAccuracy)).toBe(true);
+    // Always exactly 8 buckets regardless of the error.
+    expect(payload.aiAccuracy).toHaveLength(8);
+    for (const w of payload.aiAccuracy as any[]) {
+      expect(w.analyses).toBe(0);
+      expect(w.corrections).toBe(0);
+    }
+  });
+
+  it("returns 200 with aiAccuracy present when ai_analyses table is empty (no classify calls yet)", async () => {
+    // accuracyRows is already [] from beforeEach — this is the "fresh environment"
+    // case where the table exists but has never had a row inserted.
+    throwOnAiAnalyses = false;
+
+    const r = await realFetch(`${base}/api/dashboard?from=2026-05-20&to=2026-05-26`);
+    expect(r.status).toBe(200);
+
+    const payload = await r.json();
+    expect(Object.prototype.hasOwnProperty.call(payload, "aiAccuracy")).toBe(true);
+    expect(Array.isArray(payload.aiAccuracy)).toBe(true);
+    expect(payload.aiAccuracy).toHaveLength(8);
+    for (const w of payload.aiAccuracy as any[]) {
+      expect(w.analyses).toBe(0);
+      expect(w.corrections).toBe(0);
+    }
   });
 });
