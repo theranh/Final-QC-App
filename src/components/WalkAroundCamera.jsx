@@ -304,10 +304,15 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const gv = gravRef.current;
     const fresh = gv && (Date.now() - gv.t) < 1500;
     if (fresh && v.videoHeight > v.videoWidth) {
-      // iOS reports accelerationIncludingGravity with the opposite sign to
-      // Android: held upright, iOS gives y ≈ -9.8 while Android gives +9.8.
-      // Without this flip every upright portrait shot on iPhone matched the
-      // "upside down" branch and got rotated 180° — photos came out flipped.
+      // iOS and Android report accelerationIncludingGravity with opposite signs.
+      // Android convention (verified against W3C spec + empirical Chrome data):
+      //   portrait upright    → y ≈ +9.8            → no rotation (gy > 0)
+      //   landscape top→right → x ≈ -9.8            → rot = +90 (CW to correct)
+      //   landscape top→left  → x ≈ +9.8            → rot = -90 (CCW to correct)
+      //   upside-down         → y ≈ -9.8            → rot = 180
+      // iOS flips both axes vs Android (y ≈ -9.8 upright, x ≈ +9.8 landscape-right).
+      // S normalises both platforms to the Android sign convention so the
+      // same threshold/direction logic works for all devices.
       const S = IS_IOS ? -1 : 1;
       const gx = gv.x * S, gy = gv.y * S;
       if (Math.abs(gx) > Math.abs(gy) && Math.abs(gx) > 4) rot = gx > 0 ? -90 : 90;
