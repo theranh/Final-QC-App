@@ -17,17 +17,28 @@ import { api } from './api';
 
 const DB_NAME = 'fqPhotoQueue';
 const STORE = 'photos';
+// Deletion tombstones: lines the inspector deleted locally that may not have
+// reached the server yet (offline autosave). Stored durably so hydration on
+// the next session can filter them out before they re-attach a wide shot.
+const TOMBSTONE_STORE = 'deletedLines';
 
 let dbPromise = null;
 function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(DB_NAME, 2);
-    req.onupgradeneeded = () => {
+    const req = indexedDB.open(DB_NAME, 3);
+    req.onupgradeneeded = (ev) => {
+      const db = req.result;
       // v2 re-keys records per capture (`key`) instead of per slot (`id`).
-      if (req.result.objectStoreNames.contains(STORE)) req.result.deleteObjectStore(STORE);
-      req.result.createObjectStore(STORE, { keyPath: 'key' });
+      if (ev.oldVersion < 2) {
+        if (db.objectStoreNames.contains(STORE)) db.deleteObjectStore(STORE);
+        db.createObjectStore(STORE, { keyPath: 'key' });
+      }
+      // v3 adds the deletion-tombstone store.
+      if (ev.oldVersion < 3) {
+        db.createObjectStore(TOMBSTONE_STORE, { keyPath: 'lineId' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -37,10 +48,10 @@ function openDb() {
   return dbPromise;
 }
 
-function tx(mode, fn) {
+function tx(mode, fn, store = STORE) {
   return openDb().then((db) => new Promise((resolve, reject) => {
-    const t = db.transaction(STORE, mode);
-    fn(t.objectStore(STORE));
+    const t = db.transaction(store, mode);
+    fn(t.objectStore(store));
     t.oncomplete = () => resolve();
     t.onerror = () => reject(t.error);
     t.onabort = () => reject(t.error);
@@ -103,6 +114,33 @@ export async function removeJobsForPhoto(id, exceptKey, maxAddedAt) {
     await refreshCount();
   } catch { /* ignore */ }
 }
+// ---------- deletion tombstones ----------
+// A tombstone is written when a damage line is deleted locally. It survives
+// PWA restarts so hydration on the next session can filter the line out of
+// q.lines before it re-attaches its wide-shot photo. Tombstones are cleaned
+// up once the server no longer returns that line (autosave went through).
+export async function addDeletionTombstone(lineId, widePhotoId) {
+  try {
+    await tx('readwrite', (store) => store.put({ lineId, widePhotoId: widePhotoId || null, deletedAt: Date.now() }), TOMBSTONE_STORE);
+  } catch { /* private mode / quota — in-memory refs still guard the current session */ }
+}
+export async function getDeletionTombstones() {
+  try {
+    return await new Promise((resolve, reject) => {
+      openDb().then((db) => {
+        const r = db.transaction(TOMBSTONE_STORE, 'readonly').objectStore(TOMBSTONE_STORE).getAll();
+        r.onsuccess = () => resolve(r.result || []);
+        r.onerror = () => reject(r.error);
+      }).catch(reject);
+    });
+  } catch { return []; }
+}
+export async function removeDeletionTombstone(lineId) {
+  try {
+    await tx('readwrite', (store) => store.delete(lineId), TOMBSTONE_STORE);
+  } catch { /* ignore */ }
+}
+
 export async function pendingJobs(quoteId) {
   try {
     let all = await getAllRecords();

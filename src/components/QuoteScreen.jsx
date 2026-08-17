@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { vinValid, decodeVinInfo } from '../lib/vin';
 import { compressImageFile } from '../lib/photo';
-import { persistJob, removeJob, removeJobsForPhoto, newJobKey } from '../lib/photoQueue';
+import { persistJob, removeJob, removeJobsForPhoto, newJobKey, addDeletionTombstone, getDeletionTombstones, removeDeletionTombstone } from '../lib/photoQueue';
 import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
@@ -108,10 +108,13 @@ export async function uploadDamagePhotoDurably({ id, quoteId, slot, dataUrl }, s
 
 // Deleting a damage photo must erase EVERY copy: the on-device queued upload
 // (or the launch-time flusher would resurrect the deleted image later) and the
-// server copy. Exported for tests.
+// server copy. Used for both close-up and wide-shot ids — the caller is
+// responsible for calling once per id. Exported for tests.
 export async function purgeDeletedDamagePhoto(id) {
   await removeJobsForPhoto(id, '__none__'); // no surviving capture — drop all queued records
-  api.deleteQuotePhoto({ id }).catch(() => { /* offline — nothing on the server yet */ });
+  api.deleteQuotePhoto({ id }).catch(() => { /* offline — server copy will remain but
+    cannot re-attach: hydration only runs for lines still in q.lines, and orphan
+    recovery explicitly skips dmg_wide slots. */ });
 }
 
 export function createSaveFailureNotifier(notify, nowFn = Date.now) {
@@ -616,7 +619,13 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (committed || walkOpen || !hydratedRef.current) return;
     const orphans = serverPhotos.filter((p) =>
       String(p.slot || '').startsWith('dmg') &&
-      !String(p.slot || '').startsWith('dmg_wide') && // wide shots belong to a line, not a pending photo
+      // Wide shots are always owned by a specific line (slot = dmg_wide_<lineId>).
+      // Excluding them here means a server-side wide photo can NEVER be pulled
+      // back as a standalone damage photo — even if its companion line was deleted
+      // offline and purgeDeletedDamagePhoto couldn't reach the server. The only
+      // other re-attachment path (wide-shot hydration below) only runs for lines
+      // that still exist in q.lines, so a deleted line's wide photo is doubly safe.
+      !String(p.slot || '').startsWith('dmg_wide') &&
       !linesRef.current.some((l) => l.id === p.id) &&
       !photos.some((lp) => lp.id === p.id) &&
       !deletedPhotoIdsRef.current.has(p.id) &&
@@ -676,7 +685,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   useEffect(() => {
     if (!prefill?.quoteId) return;
     let live = true;
-    api.quoterSync().then((s) => {
+    api.quoterSync().then(async (s) => {
       const p = prefillRef.current || {};
       const q = (s?.quotes || []).find((x) => x && x.id === p.quoteId);
       if (!live) return;
@@ -695,13 +704,26 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       setFlags(Array.isArray(q.flags) ? q.flags.map((f) => ({ id: f.id, done: !!f.done })) : []);
       setKeep({ tires: !!(q.keep && q.keep.tires), wheels: !!(q.keep && q.keep.wheels), set: !!(q.keep && q.keep.set) });
       setNotes(q.notes || '');
-      const restored = Array.isArray(q.lines) ? q.lines.map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' })) : [];
+      // Apply deletion tombstones: filter out any line the inspector deleted
+      // locally that hasn't reached the server yet (offline autosave failure).
+      // This prevents a deleted line's wide shot from re-attaching on RE-RUN.
+      const tombstones = await getDeletionTombstones();
+      const tombstonedIds = new Set(tombstones.map((t) => t.lineId));
+      const serverLines = Array.isArray(q.lines) ? q.lines : [];
+      // Clean up tombstones for lines the server no longer has (autosave went through).
+      tombstones.forEach((t) => { if (!serverLines.some((l) => l.id === t.lineId)) removeDeletionTombstone(t.lineId); });
+      const restored = serverLines
+        .filter((l) => !tombstonedIds.has(l.id))
+        .map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' }));
       if (q.committedBy) setCommitted({ committedBy: q.committedBy, overriddenBy: q.overriddenBy || null });
       setLines(restored);
       setStep(restored.length ? 'quote' : (!q.committedBy && p.startAtPhotos && (q.stock || p.stock || '').trim() && (q.estimator || p.estimator || '').trim() ? 'photos' : 'confirm'));
       hydratedRef.current = true; setHydrating(false);
       // Re-attach wide-shot base64 for any line that has a server-side wide photo.
       // Without this, RE-RUN after a page reload falls back to single-image mode.
+      // Only runs for lines that survived the tombstone filter above, so a deleted
+      // line's wide photo can never be re-attached here even if the server still
+      // has the photo (offline autosave failure dropped the line deletion).
       const linesWithWide = restored.filter((l) => l.widePhotoId);
       if (linesWithWide.length) {
         (async () => {
@@ -911,10 +933,14 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const deletedPhoto = photos.find((p) => p.id === id);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
     deletedPhotoIdsRef.current.add(id); // cancels any in-flight/queued upload of this capture
+    recoveredIdsRef.current.add(id);   // prevents orphan recovery from re-adding it
     purgeDeletedDamagePhoto(id);
     // Also purge the wide shot that was uploaded alongside this close-up.
+    // Belt-and-suspenders: add to both refs even though orphan recovery
+    // already skips dmg_wide slots by slot-name filter.
     if (deletedPhoto?.widePhotoId) {
       deletedPhotoIdsRef.current.add(deletedPhoto.widePhotoId);
+      recoveredIdsRef.current.add(deletedPhoto.widePhotoId);
       purgeDeletedDamagePhoto(deletedPhoto.widePhotoId);
     }
   };
@@ -1057,10 +1083,18 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     recoveredIdsRef.current.add(id);
     purgeDeletedDamagePhoto(id);
     // Also purge the wide shot tied to this line, if one was uploaded.
+    // Belt-and-suspenders: add the wide id to both refs even though
+    // orphan recovery already skips dmg_wide slots — this keeps the
+    // guards consistent and future-proof.
     if (deletedLine?.widePhotoId) {
       deletedPhotoIdsRef.current.add(deletedLine.widePhotoId);
+      recoveredIdsRef.current.add(deletedLine.widePhotoId);
       purgeDeletedDamagePhoto(deletedLine.widePhotoId);
     }
+    // Persist a durable tombstone so that if autosave didn't reach the server
+    // before this session ended, the next hydration still filters this line
+    // out — preventing the wide shot from re-attaching on RE-RUN.
+    addDeletionTombstone(id, deletedLine?.widePhotoId || null);
   };
 
   // ---------- line editor ----------
