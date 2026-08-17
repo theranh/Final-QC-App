@@ -45,6 +45,13 @@ function writeU16LE(buf: Buffer, offset: number, value: number) {
 }
 
 /**
+ * Write a 4-byte big-endian unsigned integer into buf at offset.
+ */
+function writeU32BE(buf: Buffer, offset: number, value: number) {
+  buf.writeUInt32BE(value, offset);
+}
+
+/**
  * Build a minimal JPEG with a single APP1/EXIF segment containing one IFD0
  * entry: the Orientation tag (0x0112) set to `orientation`.
  *
@@ -134,6 +141,83 @@ function buildJpegWithOrientation(orientation: number): Buffer {
 }
 
 /**
+ * Build a minimal JPEG with a single APP1/EXIF segment containing one IFD0
+ * entry: the Orientation tag (0x0112) set to `orientation`.
+ *
+ * This is the big-endian ('MM') counterpart of buildJpegWithOrientation.
+ *
+ * Layout (big-endian TIFF):
+ *   SOI (2) | APP1 marker (2) | APP1 length (2) | "Exif\0\0" (6)
+ *   TIFF header: byte-order 'MM' (2) + magic 42 BE (2) + IFD0 offset BE (4) = 8
+ *   IFD0: entry count BE (2) + one 12-byte entry + next-IFD ptr BE (4)
+ *   Entry: tag BE (2) + type SHORT BE (2) + count BE (4) + value BE (2) + pad (2)
+ */
+function buildJpegWithOrientationBE(orientation: number): Buffer {
+  const tiffSize = 8 + 18; // 26 bytes (same layout as LE version)
+  const exifPayloadSize = 6 + tiffSize; // 32
+  const app1SegLen = 2 + exifPayloadSize; // 34
+
+  const totalSize = 2 + 2 + 2 + exifPayloadSize + 2;
+  const buf = Buffer.alloc(totalSize, 0);
+
+  let pos = 0;
+
+  // SOI
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xd8;
+
+  // APP1 marker
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xe1;
+
+  // APP1 segment length (big-endian)
+  writeU16BE(buf, pos, app1SegLen);
+  pos += 2;
+
+  // "Exif\0\0"
+  buf.write("Exif\0\0", pos, "latin1");
+  pos += 6;
+
+  // TIFF header (big-endian: 'MM')
+  buf[pos++] = 0x4d; // 'M'
+  buf[pos++] = 0x4d; // 'M'
+  writeU16BE(buf, pos, 42); // TIFF magic (big-endian)
+  pos += 2;
+  writeU32BE(buf, pos, 8); // IFD0 offset from TIFF header start = 8
+  pos += 4;
+
+  // IFD0 (starts at TIFF base + 8)
+  writeU16BE(buf, pos, 1); // entry count = 1
+  pos += 2;
+
+  // IFD0 entry: Orientation tag (all fields big-endian)
+  writeU16BE(buf, pos, 0x0112); // tag = Orientation
+  pos += 2;
+  writeU16BE(buf, pos, 3); // type = SHORT
+  pos += 2;
+  writeU32BE(buf, pos, 1); // count = 1
+  pos += 4;
+  writeU16BE(buf, pos, orientation); // value (first 2 bytes of the 4-byte value field)
+  pos += 2;
+  writeU16BE(buf, pos, 0); // padding
+  pos += 2;
+
+  // next IFD pointer = 0 (no more IFDs)
+  writeU32BE(buf, pos, 0);
+  pos += 4;
+
+  // EOI
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xd9;
+
+  if (pos !== totalSize) {
+    throw new Error(`Layout error: wrote ${pos} bytes, expected ${totalSize}`);
+  }
+
+  return buf;
+}
+
+/**
  * Build a minimal JPEG with no APP1 segment (just SOI + EOI).
  */
 function buildJpegNoExif(): Buffer {
@@ -194,6 +278,25 @@ describe("readJpegExifOrientation — synthetic single-entry buffers", () => {
   it("returns 3 for Orientation=3 (180° rotation)", () => {
     const buf = buildJpegWithOrientation(3);
     expect(readJpegExifOrientation(buf)).toBe(3);
+  });
+
+  // ---- Big-endian ('MM') TIFF synthetic buffers ---------------------------
+  // These exercise the BE branch (buf[t] !== 0x49) of readJpegExifOrientation,
+  // which is used by many Android OEM cameras.
+
+  it("BE TIFF: returns 6 for Orientation=6 (90° CW — Android portrait)", () => {
+    const buf = buildJpegWithOrientationBE(6);
+    expect(readJpegExifOrientation(buf)).toBe(6);
+  });
+
+  it("BE TIFF: returns 1 for Orientation=1 (upright — must not appear in sideways candidates)", () => {
+    const buf = buildJpegWithOrientationBE(1);
+    expect(readJpegExifOrientation(buf)).toBe(1);
+  });
+
+  it("BE TIFF: returns 8 for Orientation=8 (90° CCW — Android portrait rotated the other way)", () => {
+    const buf = buildJpegWithOrientationBE(8);
+    expect(readJpegExifOrientation(buf)).toBe(8);
   });
 });
 
