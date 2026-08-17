@@ -21,41 +21,47 @@ function dataUrlToBlob(dataUrl) {
 
 // Probe whether createImageBitmap actually applies the imageOrientation option.
 // Some early iOS Safari 15.x builds accept the call but silently return
-// un-rotated pixels. We detect this once per page load by inserting an EXIF
-// orientation-6 tag into a 2×1 JPEG and checking whether the bitmap comes
-// back as 1×2 (option honored) or 2×1 (option silently ignored).
+// un-rotated pixels. We detect this once per page load by decoding a tiny
+// EXIF orientation-6 JPEG and comparing bitmap dimensions: orientation-6 on
+// a 2×1 stored image should produce a 1-wide × 2-tall bitmap (width < height).
+// If the browser ignores the option the bitmap stays 2×1 (width > height).
 //
-// Result: null = not yet tested, true = honored, false = ignored/unavailable.
-let _orientationProbeResult = null;
+// Stored as a module-level promise so concurrent callers share a single probe
+// run — the promise is created once and reused for every subsequent call.
+let _orientationProbePromise = null;
 
-async function probeOrientationSupport() {
-  if (_orientationProbeResult !== null) return _orientationProbeResult;
-  if (typeof createImageBitmap !== 'function') {
-    _orientationProbeResult = false;
-    return false;
-  }
+function probeOrientationSupport() {
+  if (_orientationProbePromise) return _orientationProbePromise;
+  _orientationProbePromise = _runOrientationProbe();
+  return _orientationProbePromise;
+}
+
+async function _runOrientationProbe() {
+  if (typeof createImageBitmap !== 'function') return false;
   try {
-    // Build a 2×1 white JPEG via canvas and splice in an EXIF APP1 segment
+    // Build a 2×1 white JPEG via canvas, then splice in an EXIF APP1 segment
     // that declares orientation 6 (rotate 90° CW → corrected dims become 1×2).
+    // No network call: canvas.toBlob encodes inline; EXIF bytes are embedded here.
     const cv = document.createElement('canvas');
     cv.width = 2; cv.height = 1;
     cv.getContext('2d').fillRect(0, 0, 2, 1);
     const base = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 1));
     const raw = new Uint8Array(await base.arrayBuffer());
 
-    // EXIF APP1: orientation = 6 (rotate 90° CW)
+    // EXIF APP1 payload declaring orientation = 6 (rotate 90° CW).
+    // Big-endian TIFF header + single IFD entry for Orientation tag (0x0112).
     const exif = new Uint8Array([
-      0xFF, 0xE1, 0x00, 0x22,                                   // APP1, length=34
+      0xFF, 0xE1, 0x00, 0x22,                                   // APP1 marker, length=34
       0x45, 0x78, 0x69, 0x66, 0x00, 0x00,                       // "Exif\0\0"
-      0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,           // TIFF big-endian, IFD at 8
+      0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,           // TIFF big-endian, IFD at offset 8
       0x00, 0x01,                                                 // IFD: 1 entry
       0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,           // tag=Orientation, SHORT, count=1
-      0x00, 0x06, 0x00, 0x00,                                     // value=6
-      0x00, 0x00, 0x00, 0x00,                                     // next IFD=0
+      0x00, 0x06, 0x00, 0x00,                                     // value=6, padding
+      0x00, 0x00, 0x00, 0x00,                                     // next IFD=0 (none)
     ]);
 
-    // Replace any JFIF APP0 segment (FF E0) with the EXIF APP1: JPEG decoders
-    // are happy with EXIF-only; keeping both markers is harmless but wasteful.
+    // Replace any JFIF APP0 segment (FF E0) with the EXIF APP1.
+    // JPEG decoders work with EXIF-only; we drop APP0 to avoid duplicate markers.
     let rest = 2; // skip SOI (FF D8)
     if (raw[2] === 0xFF && raw[3] === 0xE0) rest = 2 + 2 + ((raw[4] << 8) | raw[5]);
     const jpeg = new Uint8Array(2 + exif.length + (raw.length - rest));
@@ -63,19 +69,22 @@ async function probeOrientationSupport() {
     jpeg.set(exif, 2);
     jpeg.set(raw.subarray(rest), 2 + exif.length);
 
-    const bmp = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }), { imageOrientation: 'from-image' });
+    const bmp = await createImageBitmap(
+      new Blob([jpeg], { type: 'image/jpeg' }),
+      { imageOrientation: 'from-image' },
+    );
     // Orientation 6 on a 2×1 raw JPEG → corrected bitmap must be 1 wide × 2 tall.
-    _orientationProbeResult = bmp.width < bmp.height;
+    const honored = bmp.width < bmp.height;
     try { bmp.close(); } catch { /* noop */ }
+    return honored;
   } catch {
     // createImageBitmap threw or canvas is unavailable — fall back to <img>.
-    _orientationProbeResult = false;
+    return false;
   }
-  return _orientationProbeResult;
 }
 
-// For tests: reset the cached probe result so each test starts fresh.
-export function _resetOrientationProbe() { _orientationProbeResult = null; }
+// For tests: reset the module-level promise so each test starts a fresh probe.
+export function _resetOrientationProbe() { _orientationProbePromise = null; }
 
 // Decode a File/Blob or data-URL string into a drawable whose pixels are
 // already upright. Returns { source, width, height, done() } — call done()
