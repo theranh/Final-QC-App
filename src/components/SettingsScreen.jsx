@@ -843,15 +843,20 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
                     >
                       🔍 Scan all trucks
                     </div>
-                    {fleetResumable && (
-                      <div
-                        className="btn btn-brown"
-                        style={{ flex: 1, height: 40, fontSize: 12 }}
-                        onClick={() => runFleetScan(loadFleetProgress())}
-                      >
-                        ↩ Resume scan
-                      </div>
-                    )}
+                    {fleetResumable && (() => {
+                      const saved = loadFleetProgress();
+                      const n = saved?.totalScanned ?? 0;
+                      const c = saved?.accumulated?.length ?? 0;
+                      return (
+                        <div
+                          className="btn btn-brown"
+                          style={{ flex: 1, height: 40, fontSize: 12 }}
+                          onClick={() => runFleetScan(saved)}
+                        >
+                          ↩ Resume scan ({n} photo{n === 1 ? '' : 's'} checked{c > 0 ? `, ${c} sideways` : ''})
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
