@@ -711,7 +711,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       tombstones.forEach((t) => { if (!serverLines.some((l) => l.id === t.lineId)) removeDeletionTombstone(t.lineId); });
       const restored = serverLines
         .filter((l) => !tombstonedIds.has(l.id))
-        .map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '' }));
+        .map((l) => ({ ...l, status: l.status || 'done', base64: '', thumb: l.thumb || '', wideThumb: l.wideThumb || '' }));
       if (q.committedBy) setCommitted({ committedBy: q.committedBy, overriddenBy: q.overriddenBy || null });
       setLines(restored);
       setStep(restored.length ? 'quote' : (!q.committedBy && p.startAtPhotos && (q.stock || p.stock || '').trim() && (q.estimator || p.estimator || '').trim() ? 'photos' : 'confirm'));
@@ -820,7 +820,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       estimator: s.estimator,
       dateISO: new Date().toISOString(),
       lines: ls.map((l) => ({
-        id: l.id, thumb: l.thumb,
+        id: l.id, thumb: l.thumb, wideThumb: l.wideThumb || '',
         status: l.status === 'running' || l.status === 'queued' ? 'done' : l.status,
         cls: l.cls, review: l.review, manual: l.manual, errMsg: l.errMsg || '',
         widePhotoId: l.widePhotoId || null,
@@ -929,9 +929,12 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const id = newId('w');
     const thumb = await thumbFromDataUrl(dataUrl);
     const wideBase64 = wideDataUrl ? wideDataUrl.split(',')[1] : undefined;
+    // Compressed thumbnail for the wide shot — stored alongside the line so it
+    // appears instantly on reopen without waiting for the full blob re-fetch.
+    const wideThumb = wideDataUrl ? await thumbFromDataUrl(wideDataUrl) : undefined;
     // Wide shot gets its own server record so it survives a page reload.
     const widePhotoId = wideDataUrl ? id + '_w' : undefined;
-    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64, widePhotoId }]);
+    setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64, wideThumb, widePhotoId }]);
     const uploads = [uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl })];
     if (wideDataUrl && widePhotoId) {
       // Slot name encodes the owning close-up id so recovery can re-link them.
@@ -1027,7 +1030,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     if (!photos.length) return;
     ensureQuoteId();
     const newLines = photos.map((p) => ({
-      id: p.id, thumb: p.thumb, base64: p.base64, wideBase64: p.wideBase64, widePhotoId: p.widePhotoId,
+      id: p.id, thumb: p.thumb, wideThumb: p.wideThumb || '', base64: p.base64, wideBase64: p.wideBase64, widePhotoId: p.widePhotoId,
       status: 'queued', cls: null, review: false, manual: false, open: false, editing: false, errMsg: '',
     }));
     setLines((prev) => [...prev, ...newLines]);
@@ -1940,9 +1943,9 @@ function LineCard({ line: l, rates, locked, onStartEdit, onCancelEdit, onApplyEd
                 <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>CLOSE</span>
               )}
             </div>
-            {l.wideBase64 && (
+            {(l.wideBase64 || l.wideThumb) && (
               <div style={{ position: 'relative' }}>
-                <img src={`data:image/jpeg;base64,${l.wideBase64}`} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
+                <img src={l.wideBase64 ? `data:image/jpeg;base64,${l.wideBase64}` : l.wideThumb} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
                 <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>WIDE</span>
               </div>
             )}

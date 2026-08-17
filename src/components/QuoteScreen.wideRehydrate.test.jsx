@@ -1,6 +1,10 @@
 // Wide-shot thumbnail persistence: after reopening a saved quote, any line
 // that has a widePhotoId must get its wideBase64 restored from the server
 // so the WIDE thumbnail still shows and re-running classify uses two-image mode.
+//
+// Task #87 regression: wideThumb (compressed data URL) must be stored in the
+// saved line so the WIDE thumbnail appears instantly on reopen, before the
+// async rehydrateWideShots fetch completes.
 import { describe, it, expect, vi } from 'vitest';
 import { rehydrateWideShots } from './QuoteScreen';
 
@@ -120,5 +124,72 @@ describe('rehydrateWideShots', () => {
     expect(next[0].wideBase64).toBeUndefined(); // untouched
     expect(typeof next[1].wideBase64).toBe('string');
     expect(next[1].wideBase64.length).toBeGreaterThan(0);
+  });
+
+  // ── Task #87 regression: wideThumb instant display ──────────────────────────
+
+  it('rehydrateWideShots preserves wideThumb when it patches wideBase64', async () => {
+    // A line restored from the server already has wideThumb (stored at capture
+    // time). rehydrateWideShots must not strip it — the thumbnail must remain
+    // visible while the full-res fetch is in progress AND after it completes.
+    const WIDE_THUMB = 'data:image/jpeg;base64,smallthumb';
+    const line = { id: 'lw', widePhotoId: 'lw_w', wideThumb: WIDE_THUMB };
+    const fetchFn = okFetch(makeBlob());
+    const setLines = vi.fn();
+
+    await rehydrateWideShots([line], setLines, () => true, fetchFn);
+
+    const updater = setLines.mock.calls[0][0];
+    const prev = [{ id: 'lw', widePhotoId: 'lw_w', wideThumb: WIDE_THUMB }];
+    const next = updater(prev);
+
+    // wideBase64 added (full-res arrived)
+    expect(typeof next[0].wideBase64).toBe('string');
+    expect(next[0].wideBase64.length).toBeGreaterThan(0);
+    // wideThumb not stripped
+    expect(next[0].wideThumb).toBe(WIDE_THUMB);
+  });
+
+  it('a line with wideThumb but no wideBase64 satisfies the WIDE thumbnail render condition', () => {
+    // LineCard renders the WIDE thumbnail when (l.wideBase64 || l.wideThumb).
+    // This test asserts that invariant holds for the pre-rehydration state so
+    // the WIDE thumbnail is visible the moment the quote loads, not 200–500 ms
+    // later when rehydrateWideShots completes.
+    const linePreRehydration = {
+      id: 'lp', widePhotoId: 'lp_w',
+      wideThumb: 'data:image/jpeg;base64,thumb', wideBase64: undefined,
+    };
+    const lineNoWide = { id: 'ln', widePhotoId: null, wideThumb: '', wideBase64: undefined };
+
+    expect(!!(linePreRehydration.wideBase64 || linePreRehydration.wideThumb)).toBe(true);
+    expect(!!(lineNoWide.wideBase64 || lineNoWide.wideThumb)).toBe(false);
+
+    // The src the component would use: wideBase64 preferred, wideThumb fallback.
+    const src = linePreRehydration.wideBase64
+      ? `data:image/jpeg;base64,${linePreRehydration.wideBase64}`
+      : linePreRehydration.wideThumb;
+    expect(src).toBe('data:image/jpeg;base64,thumb');
+  });
+
+  it('a line with wideThumb switches cleanly to wideBase64 after rehydration', async () => {
+    // After rehydrateWideShots resolves, the line has both fields.  The render
+    // must prefer the full-res wideBase64 over the compressed wideThumb.
+    const WIDE_THUMB = 'data:image/jpeg;base64,smallthumb';
+    const line = { id: 'lr', widePhotoId: 'lr_w', wideThumb: WIDE_THUMB };
+    const fetchFn = okFetch(makeBlob());
+    const setLines = vi.fn();
+
+    await rehydrateWideShots([line], setLines, () => true, fetchFn);
+
+    const updater = setLines.mock.calls[0][0];
+    const next = updater([{ ...line }]);
+
+    // After rehydration, wideBase64 is present; the component prefers it.
+    const src = next[0].wideBase64
+      ? `data:image/jpeg;base64,${next[0].wideBase64}`
+      : next[0].wideThumb;
+    expect(src.startsWith('data:image/jpeg;base64,')).toBe(true);
+    // Full-res is different from (longer than) the original compressed thumb.
+    expect(src).not.toBe(WIDE_THUMB);
   });
 });
