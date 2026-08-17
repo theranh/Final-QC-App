@@ -1565,10 +1565,17 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
 }
 
 /* ---------- photos step ---------- */
+const PHOTO_CAP = 160;
+const PHOTO_WARN_THRESHOLD = 20; // warn when remaining slots drop below this
+
 function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
   // All non-damage shots — guided slots and after-the-fact extras — are one
   // walk-around set; only damage close-ups ('dmg…') are shown apart.
   const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
+  const totalServerCount = serverPhotos.length;
+  const remaining = PHOTO_CAP - totalServerCount;
+  const atCap = remaining <= 0;
+  const nearCap = !atCap && remaining < PHOTO_WARN_THRESHOLD;
   return (
     <>
       {!damageFocus && <div className="card">
@@ -1597,6 +1604,23 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge,
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Take a close-up of each damage spot — these go to the AI for the body quote.
         </div>
+        {(atCap || nearCap) && !committed && (
+          <div style={{
+            marginTop: 10,
+            padding: '8px 12px',
+            borderRadius: 8,
+            background: atCap ? '#f9e7e6' : '#fdf3e0',
+            border: `1px solid ${atCap ? '#d99b96' : '#e3c07f'}`,
+            color: atCap ? '#b0322a' : '#8a6210',
+            fontSize: 13,
+            fontWeight: 600,
+            lineHeight: 1.4,
+          }}>
+            {atCap
+              ? `⛔ Photo limit reached (${PHOTO_CAP} stored). Delete a photo to make room before adding more damage shots.`
+              : `⚠ Only ${remaining} photo slot${remaining === 1 ? '' : 's'} remaining — this truck is ${totalServerCount} of ${PHOTO_CAP}. Prioritize the most important damage close-ups.`}
+          </div>
+        )}
         {serverPhotos.some((p) => String(p.slot || '').startsWith('dmg')) && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg') && !photos.some((lp) => lp.id === p.id)).map((p) => (
@@ -1611,7 +1635,7 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge,
             ))}
           </div>
         )}
-        {!committed && <><button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onDamage}>⚠ ADD DAMAGE CLOSE-UP</button>
+        {!committed && <><button className="btn btn-dark" style={{ marginTop: 10, opacity: atCap ? 0.45 : 1, cursor: atCap ? 'not-allowed' : 'pointer' }} onClick={atCap ? undefined : onDamage} disabled={atCap}>⚠ ADD DAMAGE CLOSE-UP</button>
           <button className="btn btn-outline-brown" style={{ marginTop: 8 }} onClick={onAdd}>Choose from device</button></>}
         {photos.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
