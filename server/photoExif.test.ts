@@ -1324,3 +1324,182 @@ describe("readJpegExifOrientation — malformed input hardening", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite 1h: Zero-length and one-length non-APP1 segment guard after APP1/EXIF.
+//
+// The segment walker advances `pos` by `2 + segLen` after processing each
+// segment.  The JPEG spec requires the 2-byte length field to be at least 2
+// (it counts itself).  A corrupt or truncated file can produce a non-APP1
+// segment (e.g. APP2 = FF E2) with segLen = 0 or segLen = 1, either of which
+// would leave `pos` pointing back at the same segment (segLen 0: pos += 2,
+// re-reads the same marker bytes; segLen 1: pos += 3, lands in the length
+// field of the same segment), creating an infinite loop.
+//
+// The guard in photoExif.ts:
+//   if (segLen < 2) break;
+// fires before the advance and stops the walk immediately.
+//
+// These tests exercise the guard via a buffer that has a valid APP1/EXIF
+// segment first (with zero IFD0 entries, so no Orientation tag is found and
+// the walker advances past APP1), immediately followed by a non-APP1 APP2
+// segment carrying the corrupt length.  Both LE ('II') and BE ('MM') TIFF
+// variants of the APP1 header are covered.
+//
+// Buffer layout (32 bytes total, all offsets absolute):
+//   0–1   SOI
+//   2–3   APP1 marker (FF E1)
+//   4–5   APP1 segLen = 22 (2 + 20-byte EXIF payload)
+//   6–11  "Exif\0\0"
+//   12–13 TIFF byte-order mark ('I','I' or 'M','M')  ← t = 12
+//   14–15 TIFF magic = 42
+//   16–19 IFD0 offset = 8 → ifd0 = t + 8 = 20
+//   20–21 IFD0 entry count = 0  (no entries, so Orientation not found)
+//   22–25 next-IFD pointer = 0
+//          (walker advances: pos = 2 + 2 + 22 = 26)
+//   26–27 APP2 marker (FF E2)  ← next segment, walker sees this
+//   28–29 APP2 segLen = 0 or 1  ← corrupt; guard fires here
+//   30–31 EOI
+//
+// With segLen = 0: naive pos += 2 + 0 = 2 would re-point at 0xFF of APP2,
+//   infinite loop.  Guard breaks instead.
+// With segLen = 1: naive pos += 2 + 1 = 3 would land at 0xE2 of APP2 (the
+//   second byte of the marker), misaligning the walk.  Guard breaks instead.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a 32-byte JPEG with:
+ *   - an APP1/EXIF segment using LE ('II') TIFF with zero IFD0 entries
+ *     (no Orientation tag → walker continues past APP1)
+ *   - followed by an APP2 segment whose length field is set to `badSegLen`
+ *   - followed by EOI
+ *
+ * The corrupt APP2 segLen triggers the `if (segLen < 2) break` guard.
+ */
+function buildJpegWithBadFollowingSegLenLE(badSegLen: number): Buffer {
+  // APP1 EXIF payload: "Exif\0\0"(6) + TIFF-header(8) + IFD0-count(2) + next-IFD(4) = 20
+  const exifPayload = 20;
+  const app1SegLen = 2 + exifPayload; // 22 (includes the length field itself)
+
+  // Total: SOI(2) + APP1-marker(2) + APP1-segLen-field(2) + exifPayload(20)
+  //        + APP2-marker(2) + APP2-segLen-field(2) + EOI(2) = 32
+  const totalSize = 2 + 2 + 2 + exifPayload + 2 + 2 + 2;
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+
+  // SOI
+  buf[pos++] = 0xff; buf[pos++] = 0xd8;
+
+  // APP1 marker
+  buf[pos++] = 0xff; buf[pos++] = 0xe1;
+  buf.writeUInt16BE(app1SegLen, pos); pos += 2;
+
+  // "Exif\0\0"
+  buf.write("Exif\0\0", pos, "latin1"); pos += 6;
+
+  // TIFF header — little-endian ('II')
+  buf[pos++] = 0x49; buf[pos++] = 0x49; // 'I','I'
+  buf.writeUInt16LE(42, pos); pos += 2;  // magic = 42
+  buf.writeUInt32LE(8, pos); pos += 4;   // IFD0 offset = 8 from TIFF base
+
+  // IFD0: entry count = 0, next-IFD = 0
+  buf.writeUInt16LE(0, pos); pos += 2;
+  buf.writeUInt32LE(0, pos); pos += 4;
+
+  // Walker should now be at pos=26 after advancing 2 + app1SegLen = 26.
+  // APP2 segment with corrupt length.
+  buf[pos++] = 0xff; buf[pos++] = 0xe2; // APP2 marker
+  buf.writeUInt16BE(badSegLen, pos); pos += 2;
+
+  // EOI
+  buf[pos++] = 0xff; buf[pos++] = 0xd9;
+
+  if (pos !== totalSize) {
+    throw new Error(`Layout error: wrote ${pos} bytes, expected ${totalSize}`);
+  }
+  return buf;
+}
+
+/**
+ * Big-endian ('MM') counterpart of buildJpegWithBadFollowingSegLenLE.
+ * The APP1/EXIF uses BE TIFF byte order; everything else is identical.
+ */
+function buildJpegWithBadFollowingSegLenBE(badSegLen: number): Buffer {
+  const exifPayload = 20;
+  const app1SegLen = 2 + exifPayload; // 22
+
+  const totalSize = 2 + 2 + 2 + exifPayload + 2 + 2 + 2;
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+
+  // SOI
+  buf[pos++] = 0xff; buf[pos++] = 0xd8;
+
+  // APP1 marker
+  buf[pos++] = 0xff; buf[pos++] = 0xe1;
+  buf.writeUInt16BE(app1SegLen, pos); pos += 2;
+
+  // "Exif\0\0"
+  buf.write("Exif\0\0", pos, "latin1"); pos += 6;
+
+  // TIFF header — big-endian ('MM')
+  buf[pos++] = 0x4d; buf[pos++] = 0x4d; // 'M','M'
+  buf.writeUInt16BE(42, pos); pos += 2;  // magic = 42
+  buf.writeUInt32BE(8, pos); pos += 4;   // IFD0 offset = 8 from TIFF base
+
+  // IFD0: entry count = 0, next-IFD = 0
+  buf.writeUInt16BE(0, pos); pos += 2;
+  buf.writeUInt32BE(0, pos); pos += 4;
+
+  // APP2 segment with corrupt length.
+  buf[pos++] = 0xff; buf[pos++] = 0xe2; // APP2 marker
+  buf.writeUInt16BE(badSegLen, pos); pos += 2;
+
+  // EOI
+  buf[pos++] = 0xff; buf[pos++] = 0xd9;
+
+  if (pos !== totalSize) {
+    throw new Error(`Layout error: wrote ${pos} bytes, expected ${totalSize}`);
+  }
+  return buf;
+}
+
+describe("readJpegExifOrientation — zero/one-length non-APP1 segment after APP1/EXIF", () => {
+  // ---- LE TIFF ('II') APP1/EXIF followed by APP2 with segLen = 0 ----------
+  //
+  // Walker parses APP1 (no Orientation tag found), advances pos to 26.
+  // At pos=26: marker=0xE2 (APP2, not APP1, not SOS); segLen=0.
+  // `if (segLen < 2) break` fires → walker exits → returns null.
+  // Without the guard: pos += 2 + 0 = 26, re-reads 0xFF at pos=26, infinite loop.
+  it("LE TIFF: APP2 with segLen=0 after APP1/EXIF — guard fires, returns null without hanging", () => {
+    const buf = buildJpegWithBadFollowingSegLenLE(0);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- LE TIFF ('II') APP1/EXIF followed by APP2 with segLen = 1 ----------
+  //
+  // Same path; segLen=1 is also below the minimum of 2.
+  // `if (segLen < 2) break` fires → returns null.
+  // Without the guard: pos += 2 + 1 = 29, misaligns the walk onto 0xE2 (APP2
+  // second byte), corrupting all subsequent marker reads.
+  it("LE TIFF: APP2 with segLen=1 after APP1/EXIF — guard fires, returns null without hanging", () => {
+    const buf = buildJpegWithBadFollowingSegLenLE(1);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- BE TIFF ('MM') APP1/EXIF followed by APP2 with segLen = 0 ----------
+  //
+  // Same scenario with a big-endian TIFF header in the APP1 block.
+  // The BE code path is exercised; the guard at `if (segLen < 2) break`
+  // fires identically regardless of TIFF byte order.
+  it("BE TIFF: APP2 with segLen=0 after APP1/EXIF — guard fires, returns null without hanging", () => {
+    const buf = buildJpegWithBadFollowingSegLenBE(0);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- BE TIFF ('MM') APP1/EXIF followed by APP2 with segLen = 1 ----------
+  it("BE TIFF: APP2 with segLen=1 after APP1/EXIF — guard fires, returns null without hanging", () => {
+    const buf = buildJpegWithBadFollowingSegLenBE(1);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+});
