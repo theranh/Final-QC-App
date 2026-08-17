@@ -491,6 +491,96 @@ function buildJpegWithBadIfd0OffsetBE(badOffset: number): Buffer {
   return buf;
 }
 
+/**
+ * Build a JPEG where the APP1/EXIF segment is preceded by a dummy APP2 segment,
+ * pushing the TIFF base `t` to absolute position 34 instead of 12.
+ * The IFD0 offset field is then set to `badOffset` (written little-endian).
+ *
+ * Buffer layout (62 bytes total):
+ *   0–1   SOI
+ *   2–3   APP2 marker  (FF E2)
+ *   4–5   APP2 length  = 20  (includes the 2-byte length field)
+ *   6–23  APP2 payload (18 zero bytes)
+ *   24–25 APP1 marker  (FF E1)
+ *   26–27 APP1 length  = 34
+ *   28–33 "Exif\0\0"
+ *   34–35 TIFF byte-order mark 'II'   ← t = 34
+ *   36–37 TIFF magic = 42 (LE)
+ *   38–41 IFD0 offset  ← overwritten with badOffset
+ *   42–43 IFD0 entry count = 1        ← ifd0 = t + badOffset = 34 + badOffset
+ *   44–55 12-byte IFD0 entry
+ *   56–59 next-IFD pointer = 0
+ *   60–61 EOI
+ *
+ * With badOffset = 0xFFFFFFFF:  ifd0 = 34 + 4 294 967 295 = 4 294 967 329
+ *   → well within JS's safe-integer range; ifd0 + 2 >= 62 so guard fires.
+ */
+function buildJpegWithLateExifAndBadOffsetLE(badOffset: number): Buffer {
+  // Start from the valid minimal LE JPEG (40 bytes) and prepend a dummy APP2.
+  const validBuf = buildJpegWithOrientation(6);
+
+  // Dummy APP2: marker(2) + length field(2) + 18-byte payload = 22 bytes.
+  const dummySegBodyLen = 18;
+  const dummySegLen = 2 + dummySegBodyLen; // length field value = 20
+
+  // Total: SOI(2) + APP2(22) + validBuf-without-SOI(38) = 62 bytes.
+  const totalSize = 2 + 2 + 2 + dummySegBodyLen + (validBuf.length - 2);
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+
+  // SOI
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xd8;
+
+  // Dummy APP2 segment
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xe2;
+  writeU16BE(buf, pos, dummySegLen);
+  pos += 2;
+  pos += dummySegBodyLen; // 18 zero bytes
+
+  // Copy the valid JPEG from byte 2 onwards (skip its SOI).
+  validBuf.copy(buf, pos, 2);
+
+  // Overwrite the IFD0 offset field.
+  // In the new buffer t = 34; the offset field is at t + 4 = 38.
+  buf.writeUInt32LE(badOffset, 38);
+
+  return buf;
+}
+
+/**
+ * Big-endian counterpart of buildJpegWithLateExifAndBadOffsetLE.
+ * The TIFF base `t` is 34 (same layout, same dummy APP2 prefix); the IFD0
+ * offset field is overwritten big-endian.
+ */
+function buildJpegWithLateExifAndBadOffsetBE(badOffset: number): Buffer {
+  const validBuf = buildJpegWithOrientationBE(6);
+
+  const dummySegBodyLen = 18;
+  const dummySegLen = 2 + dummySegBodyLen;
+
+  const totalSize = 2 + 2 + 2 + dummySegBodyLen + (validBuf.length - 2);
+  const buf = Buffer.alloc(totalSize, 0);
+  let pos = 0;
+
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xd8;
+
+  buf[pos++] = 0xff;
+  buf[pos++] = 0xe2;
+  writeU16BE(buf, pos, dummySegLen);
+  pos += 2;
+  pos += dummySegBodyLen;
+
+  validBuf.copy(buf, pos, 2);
+
+  // t = 34; IFD0 offset field at t + 4 = 38 (big-endian).
+  buf.writeUInt32BE(badOffset, 38);
+
+  return buf;
+}
+
 describe("readJpegExifOrientation — corrupt TIFF magic and out-of-bounds IFD0 offset", () => {
   // ---- BE TIFF with magic ≠ 42 -------------------------------------------
   // Build a valid BE buffer, then replace magic bytes (14–15) with 0x00 0x2B
@@ -566,6 +656,58 @@ describe("readJpegExifOrientation — corrupt TIFF magic and out-of-bounds IFD0 
   // ---- Valid magic, IFD0 offset one past end (LE) ------------------------
   it("LE TIFF with valid magic but IFD0 offset one past end: returns null without throwing", () => {
     const buf = buildJpegWithBadIfd0OffsetLE(29);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Late TIFF base (t=34) + near-max IFD0 offset (LE) -----------------
+  //
+  // These cases exercise the overflow-safety concern: `ifd0 = t + r32(t+4)`
+  // uses JS number arithmetic.  When `t` is large (APP1 comes after a
+  // preceding segment) and the offset is near 0xFFFFFFFF, the sum is ~4.3e9 —
+  // well inside JS's 2^53 safe-integer range so no precision is lost.
+  // The guard `ifd0 + 2 >= buf.length` must still fire and return null.
+  //
+  // Buffer layout: SOI + APP2(22 bytes) + APP1/EXIF/LE-TIFF + EOI = 62 bytes.
+  //   t = 34 (TIFF base is 22 bytes later than in the minimal 40-byte buffer).
+  //   badOffset = 0xFFFFFFFF → ifd0 = 34 + 4 294 967 295 = 4 294 967 329
+  //   ifd0 + 2 = 4 294 967 331 >= 62 → guard fires.
+
+  it("LE TIFF, late t=34, IFD0 offset=0xFFFFFFFF: guard fires, returns null without throwing", () => {
+    const buf = buildJpegWithLateExifAndBadOffsetLE(0xffffffff);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("LE TIFF, late t=34, IFD0 offset=0xFFFFFFFE: guard fires, returns null without throwing", () => {
+    // badOffset = 0xFFFFFFFE → ifd0 = 34 + 4 294 967 294 = 4 294 967 328
+    // ifd0 + 2 = 4 294 967 330 >= 62 → guard fires.
+    const buf = buildJpegWithLateExifAndBadOffsetLE(0xfffffffe);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("LE TIFF, late t=34, IFD0 offset=0x80000000 (high bit set): returns null without throwing", () => {
+    // badOffset = 2 147 483 648 → ifd0 = 34 + 2 147 483 648 = 2 147 483 682
+    // ifd0 + 2 = 2 147 483 684 >= 62 → guard fires.
+    const buf = buildJpegWithLateExifAndBadOffsetLE(0x80000000);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Late TIFF base (t=34) + near-max IFD0 offset (BE) -----------------
+  //
+  // Same scenario with a big-endian ('MM') TIFF header.
+  //   t = 34; badOffset = 0xFFFFFFFF → ifd0 = 4 294 967 329; buf.length = 62.
+
+  it("BE TIFF, late t=34, IFD0 offset=0xFFFFFFFF: guard fires, returns null without throwing", () => {
+    const buf = buildJpegWithLateExifAndBadOffsetBE(0xffffffff);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("BE TIFF, late t=34, IFD0 offset=0xFFFFFFFE: guard fires, returns null without throwing", () => {
+    const buf = buildJpegWithLateExifAndBadOffsetBE(0xfffffffe);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  it("BE TIFF, late t=34, IFD0 offset=0x80000000 (high bit set): returns null without throwing", () => {
+    const buf = buildJpegWithLateExifAndBadOffsetBE(0x80000000);
     expect(readJpegExifOrientation(buf)).toBeNull();
   });
 });
