@@ -119,6 +119,9 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   };
 
   // ----- photo orientation repair -----
+  const [photoRepairMode, setPhotoRepairMode] = useState('single'); // 'single' | 'fleet'
+
+  // --- single-truck mode ---
   const [photoRepairQuoteId, setPhotoRepairQuoteId] = useState('');
   const [photoRepairScanState, setPhotoRepairScanState] = useState('idle'); // idle | scanning | done | fixing | fixed | error
   const [photoRepairCandidates, setPhotoRepairCandidates] = useState(null); // null | [{id, slot, quoteId, orientation}]
@@ -141,14 +144,26 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     }
   };
 
-  const runPhotoFix = async () => {
-    if (!photoRepairCandidates || !photoRepairCandidates.length) return;
-    setPhotoRepairScanState('fixing');
-    setPhotoRepairProgress({ done: 0, total: photoRepairCandidates.length });
-    setPhotoRepairError('');
+  const runPhotoFix = async (candidateList, onProgress, onDone, onError) => {
+    const list = candidateList || photoRepairCandidates;
+    if (!list || !list.length) return;
+    const setProgress = onProgress || ((d, t) => setPhotoRepairProgress({ done: d, total: t }));
+    const setDone = onDone || (() => {
+      setPhotoRepairScanState('fixed');
+      showToast(`Fixed ${list.length} photo${list.length === 1 ? '' : 's'} ✓`);
+    });
+    const setError = onError || ((msg) => {
+      setPhotoRepairError(msg);
+      setPhotoRepairScanState('error');
+    });
+    if (!onProgress) {
+      setPhotoRepairScanState('fixing');
+      setPhotoRepairProgress({ done: 0, total: list.length });
+      setPhotoRepairError('');
+    }
     try {
-      for (let i = 0; i < photoRepairCandidates.length; i++) {
-        const ph = photoRepairCandidates[i];
+      for (let i = 0; i < list.length; i++) {
+        const ph = list[i];
         // Fetch the raw JPEG bytes from the server
         const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
         if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
@@ -157,13 +172,78 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         // the EXIF rotation into pixels, then the canvas produces an orientation-1 JPEG.
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
         await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
-        setPhotoRepairProgress({ done: i + 1, total: photoRepairCandidates.length });
+        setProgress(i + 1, list.length);
       }
-      setPhotoRepairScanState('fixed');
-      showToast(`Fixed ${photoRepairCandidates.length} photo${photoRepairCandidates.length === 1 ? '' : 's'} ✓`);
+      setDone();
     } catch (err) {
-      setPhotoRepairError('Fix failed: ' + err.message);
-      setPhotoRepairScanState('error');
+      setError('Fix failed: ' + err.message);
+    }
+  };
+
+  // --- fleet scan mode ---
+  const [fleetScanState, setFleetScanState] = useState('idle'); // idle | scanning | done | fixing | fixed | error
+  const [fleetScanned, setFleetScanned] = useState(0);
+  const [fleetCandidates, setFleetCandidates] = useState([]); // [{id, slot, quoteId, orientation}]
+  const [fleetFixProgress, setFleetFixProgress] = useState({ done: 0, total: 0, currentQuoteId: '' });
+  const [fleetError, setFleetError] = useState('');
+
+  // Derived: group fleet candidates by quoteId for display
+  const fleetByTruck = (() => {
+    const map = new Map();
+    for (const c of fleetCandidates) {
+      if (!map.has(c.quoteId)) map.set(c.quoteId, []);
+      map.get(c.quoteId).push(c);
+    }
+    return Array.from(map.entries()).map(([quoteId, list]) => ({ quoteId, count: list.length }));
+  })();
+
+  const runFleetScan = async () => {
+    setFleetScanState('scanning');
+    setFleetScanned(0);
+    setFleetCandidates([]);
+    setFleetError('');
+    try {
+      let offset = 0;
+      let totalScanned = 0;
+      const accumulated = [];
+      while (true) {
+        const r = await api.photoOrientationScanAll(offset);
+        totalScanned += r.scanned;
+        setFleetScanned(totalScanned);
+        if (r.candidates && r.candidates.length) {
+          accumulated.push(...r.candidates);
+          setFleetCandidates([...accumulated]);
+        }
+        if (r.done) break;
+        offset += r.scanned;
+      }
+      setFleetScanState('done');
+    } catch (err) {
+      setFleetError('Scan failed: ' + err.message);
+      setFleetScanState('error');
+    }
+  };
+
+  const runFleetFix = async () => {
+    if (!fleetCandidates.length) return;
+    setFleetScanState('fixing');
+    setFleetFixProgress({ done: 0, total: fleetCandidates.length, currentQuoteId: fleetCandidates[0]?.quoteId || '' });
+    setFleetError('');
+    try {
+      for (let i = 0; i < fleetCandidates.length; i++) {
+        const ph = fleetCandidates[i];
+        const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
+        if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
+        const blob = await resp.blob();
+        const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        setFleetFixProgress({ done: i + 1, total: fleetCandidates.length, currentQuoteId: fleetCandidates[i + 1]?.quoteId || ph.quoteId });
+      }
+      setFleetScanState('fixed');
+      showToast(`Fixed ${fleetCandidates.length} photo${fleetCandidates.length === 1 ? '' : 's'} across ${fleetByTruck.length} truck${fleetByTruck.length === 1 ? '' : 's'} ✓`);
+    } catch (err) {
+      setFleetError('Fix failed: ' + err.message);
+      setFleetScanState('error');
     }
   };
 
@@ -531,62 +611,189 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
           <div className="card">
             <div className="card-title">REPAIR SIDEWAYS PHOTOS</div>
             <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
-              Phones embed an EXIF orientation tag instead of storing pixels upright. Photos taken before the orientation fix shipped may appear sideways. Enter a truck ID (e.g. BC23092) to scan and straighten its photos without retaking them.
+              Phones embed an EXIF orientation tag instead of storing pixels upright. Photos taken before the orientation fix shipped may appear sideways.
             </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 9, alignItems: 'center' }}>
-              <input
-                value={photoRepairQuoteId}
-                onChange={(e) => {
-                  setPhotoRepairQuoteId(e.target.value.toUpperCase());
-                  setPhotoRepairScanState('idle');
-                  setPhotoRepairCandidates(null);
-                  setPhotoRepairError('');
-                }}
-                placeholder="Truck ID"
-                style={{ flex: 1, height: 36, padding: '0 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', textTransform: 'uppercase' }}
-                maxLength={30}
-                disabled={photoRepairScanState === 'scanning' || photoRepairScanState === 'fixing'}
-              />
+
+            {/* Mode toggle */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
               <div
-                className={'btn btn-brown' + (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim() ? ' disabled' : '')}
-                style={{ height: 36, fontSize: 12, paddingInline: 14, opacity: (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim()) ? 0.6 : 1, whiteSpace: 'nowrap' }}
-                onClick={photoRepairScanState !== 'scanning' ? runPhotoScan : undefined}
+                onClick={() => { setPhotoRepairMode('single'); setPhotoRepairScanState('idle'); setPhotoRepairCandidates(null); setPhotoRepairError(''); }}
+                style={{ flex: 1, textAlign: 'center', padding: '7px 0', borderRadius: 7, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', border: '1.5px solid var(--brown)', background: photoRepairMode === 'single' ? 'var(--brown)' : 'transparent', color: photoRepairMode === 'single' ? '#fff' : 'var(--brown)', transition: 'background 0.15s' }}
               >
-                {photoRepairScanState === 'scanning' ? 'Scanning…' : '🔍 Scan'}
+                One truck
+              </div>
+              <div
+                onClick={() => { setPhotoRepairMode('fleet'); setFleetScanState('idle'); setFleetCandidates([]); setFleetScanned(0); setFleetError(''); }}
+                style={{ flex: 1, textAlign: 'center', padding: '7px 0', borderRadius: 7, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', border: '1.5px solid var(--brown)', background: photoRepairMode === 'fleet' ? 'var(--brown)' : 'transparent', color: photoRepairMode === 'fleet' ? '#fff' : 'var(--brown)', transition: 'background 0.15s' }}
+              >
+                Scan all trucks
               </div>
             </div>
-            {photoRepairScanState === 'done' && photoRepairCandidates !== null && (
-              <div style={{ marginTop: 10 }}>
-                {photoRepairCandidates.length === 0 ? (
-                  <div style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>All photos are already upright ✓</div>
-                ) : (
+
+            {/* --- Single-truck mode --- */}
+            {photoRepairMode === 'single' && (
+              <>
+                <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 8, lineHeight: 1.5 }}>
+                  Enter a truck ID (e.g. BC23092) to scan and straighten its photos without retaking them.
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 9, alignItems: 'center' }}>
+                  <input
+                    value={photoRepairQuoteId}
+                    onChange={(e) => {
+                      setPhotoRepairQuoteId(e.target.value.toUpperCase());
+                      setPhotoRepairScanState('idle');
+                      setPhotoRepairCandidates(null);
+                      setPhotoRepairError('');
+                    }}
+                    placeholder="Truck ID"
+                    style={{ flex: 1, height: 36, padding: '0 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', textTransform: 'uppercase' }}
+                    maxLength={30}
+                    disabled={photoRepairScanState === 'scanning' || photoRepairScanState === 'fixing'}
+                  />
+                  <div
+                    className={'btn btn-brown' + (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim() ? ' disabled' : '')}
+                    style={{ height: 36, fontSize: 12, paddingInline: 14, opacity: (photoRepairScanState === 'scanning' || !photoRepairQuoteId.trim()) ? 0.6 : 1, whiteSpace: 'nowrap' }}
+                    onClick={photoRepairScanState !== 'scanning' ? runPhotoScan : undefined}
+                  >
+                    {photoRepairScanState === 'scanning' ? 'Scanning…' : '🔍 Scan'}
+                  </div>
+                </div>
+                {photoRepairScanState === 'done' && photoRepairCandidates !== null && (
+                  <div style={{ marginTop: 10 }}>
+                    {photoRepairCandidates.length === 0 ? (
+                      <div style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>All photos are already upright ✓</div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 10.5, color: 'var(--brown)', marginBottom: 7 }}>
+                          {photoRepairCandidates.length} sideways photo{photoRepairCandidates.length === 1 ? '' : 's'} found — fix will re-encode each one upright.
+                        </div>
+                        <div
+                          className="btn btn-brown"
+                          style={{ height: 40, fontSize: 12 }}
+                          onClick={() => runPhotoFix()}
+                        >
+                          ↻ Fix {photoRepairCandidates.length} photo{photoRepairCandidates.length === 1 ? '' : 's'}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+                {photoRepairScanState === 'fixing' && (
+                  <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--brown)' }}>
+                    Fixing {photoRepairProgress.done} / {photoRepairProgress.total}…
+                  </div>
+                )}
+                {photoRepairScanState === 'fixed' && (
+                  <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>
+                    Done — {photoRepairProgress.total} photo{photoRepairProgress.total === 1 ? '' : 's'} corrected ✓
+                  </div>
+                )}
+                {photoRepairError && (
+                  <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{photoRepairError}</div>
+                )}
+              </>
+            )}
+
+            {/* --- Fleet scan mode --- */}
+            {photoRepairMode === 'fleet' && (
+              <>
+                <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 8, lineHeight: 1.5 }}>
+                  Pages through every photo in the database to find sideways ones. Large photo libraries may take a minute to scan.
+                </div>
+
+                {fleetScanState === 'idle' && (
+                  <div
+                    className="btn btn-brown"
+                    style={{ marginTop: 10, height: 40, fontSize: 12 }}
+                    onClick={runFleetScan}
+                  >
+                    🔍 Scan all trucks
+                  </div>
+                )}
+
+                {fleetScanState === 'scanning' && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 10.5, color: 'var(--brown)', marginBottom: 6 }}>
+                      Scanning… {fleetScanned} photo{fleetScanned === 1 ? '' : 's'} checked
+                      {fleetCandidates.length > 0 && ` · ${fleetCandidates.length} sideways found so far`}
+                    </div>
+                    <div style={{ height: 4, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', borderRadius: 2, background: 'var(--brown)', width: '100%', opacity: 0.35 }} />
+                    </div>
+                  </div>
+                )}
+
+                {(fleetScanState === 'done' || fleetScanState === 'fixing' || fleetScanState === 'fixed') && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 10.5, color: 'var(--muted)', marginBottom: 6 }}>
+                      {fleetScanned} photo{fleetScanned === 1 ? '' : 's'} scanned
+                      {fleetScanState === 'done' && fleetCandidates.length === 0 && ' — all upright ✓'}
+                    </div>
+
+                    {fleetCandidates.length > 0 && (
+                      <>
+                        {/* Truck list */}
+                        <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', marginBottom: 10 }}>
+                          <div style={{ padding: '7px 11px', background: 'var(--panel)', fontSize: 9, fontWeight: 700, letterSpacing: 0.6, color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                            {fleetByTruck.length} TRUCK{fleetByTruck.length === 1 ? '' : 'S'} AFFECTED · {fleetCandidates.length} PHOTO{fleetCandidates.length === 1 ? '' : 'S'}
+                          </div>
+                          <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                            {fleetByTruck.map(({ quoteId, count }) => (
+                              <div key={quoteId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', borderTop: '1px solid var(--border)', fontSize: 11 }}>
+                                <span style={{ fontFamily: 'monospace', fontWeight: 700, flex: 1 }}>{quoteId}</span>
+                                <span style={{ fontSize: 9.5, color: 'var(--brown)', fontWeight: 600 }}>{count} photo{count === 1 ? '' : 's'}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {fleetScanState === 'done' && (
+                          <div
+                            className="btn btn-brown"
+                            style={{ height: 44, fontSize: 12 }}
+                            onClick={runFleetFix}
+                          >
+                            ↻ Fix all {fleetCandidates.length} photo{fleetCandidates.length === 1 ? '' : 's'} ({fleetByTruck.length} truck{fleetByTruck.length === 1 ? '' : 's'})
+                          </div>
+                        )}
+
+                        {fleetScanState === 'fixing' && (
+                          <div style={{ marginTop: 2 }}>
+                            <div style={{ fontSize: 10.5, color: 'var(--brown)', marginBottom: 5 }}>
+                              Fixing {fleetFixProgress.done} / {fleetFixProgress.total}
+                              {fleetFixProgress.currentQuoteId ? ` — ${fleetFixProgress.currentQuoteId}` : ''}…
+                            </div>
+                            <div style={{ height: 6, borderRadius: 3, background: 'var(--border)', overflow: 'hidden' }}>
+                              <div style={{ height: '100%', borderRadius: 3, background: 'var(--brown)', width: `${Math.round((fleetFixProgress.done / fleetFixProgress.total) * 100)}%`, transition: 'width 0.3s' }} />
+                            </div>
+                          </div>
+                        )}
+
+                        {fleetScanState === 'fixed' && (
+                          <div style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>
+                            Done — {fleetCandidates.length} photo{fleetCandidates.length === 1 ? '' : 's'} corrected across {fleetByTruck.length} truck{fleetByTruck.length === 1 ? '' : 's'} ✓
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {fleetScanState === 'done' && fleetCandidates.length === 0 && (
+                      <div style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>All photos are already upright ✓</div>
+                    )}
+                  </div>
+                )}
+
+                {fleetScanState === 'error' && (
                   <>
-                    <div style={{ fontSize: 10.5, color: 'var(--brown)', marginBottom: 7 }}>
-                      {photoRepairCandidates.length} sideways photo{photoRepairCandidates.length === 1 ? '' : 's'} found — fix will re-encode each one upright.
-                    </div>
-                    <div
-                      className="btn btn-brown"
-                      style={{ height: 40, fontSize: 12 }}
-                      onClick={runPhotoFix}
-                    >
-                      ↻ Fix {photoRepairCandidates.length} photo{photoRepairCandidates.length === 1 ? '' : 's'}
-                    </div>
+                    <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{fleetError}</div>
+                    <div className="btn btn-brown" style={{ marginTop: 8, height: 36, fontSize: 11 }} onClick={runFleetScan}>Retry scan</div>
                   </>
                 )}
-              </div>
-            )}
-            {photoRepairScanState === 'fixing' && (
-              <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--brown)' }}>
-                Fixing {photoRepairProgress.done} / {photoRepairProgress.total}…
-              </div>
-            )}
-            {photoRepairScanState === 'fixed' && (
-              <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--green)', fontWeight: 600 }}>
-                Done — {photoRepairProgress.total} photo{photoRepairProgress.total === 1 ? '' : 's'} corrected ✓
-              </div>
-            )}
-            {photoRepairError && (
-              <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{photoRepairError}</div>
+
+                {fleetError && fleetScanState !== 'error' && (
+                  <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--red, #c0392b)' }}>{fleetError}</div>
+                )}
+              </>
             )}
           </div>
         )}

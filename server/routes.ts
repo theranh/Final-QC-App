@@ -209,6 +209,44 @@ const importSchema = z.object({
     .default([]),
 });
 
+// ---------- shared helpers ----------
+
+/** Read the EXIF Orientation tag from a raw JPEG buffer.
+ *  Returns 1–8 per the EXIF spec, or null if absent/unreadable.
+ *  1 = upright; 3 = 180°; 6 = 90° CW (phone portrait → sideways);
+ *  8 = 90° CCW (phone portrait → sideways other way). */
+function readJpegExifOrientation(buf: Buffer): number | null {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let pos = 2;
+  while (pos < buf.length - 3) {
+    if (buf[pos] !== 0xff) break;
+    const marker = buf[pos + 1];
+    if (pos + 3 >= buf.length) break;
+    const segLen = buf.readUInt16BE(pos + 2); // includes 2-byte length field
+    if (marker === 0xe1 && pos + 10 < buf.length) { // APP1
+      if (buf.slice(pos + 4, pos + 10).toString("latin1") === "Exif\0\0") {
+        const t = pos + 10; // TIFF header start
+        const le = buf[t] === 0x49; // 'II' = little-endian; 'MM' = big-endian
+        const r16 = (o: number) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
+        const r32 = (o: number) => (le ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
+        if (t + 8 >= buf.length) break;
+        const ifd0 = t + r32(t + 4);
+        if (ifd0 + 2 >= buf.length) break;
+        const count = r16(ifd0);
+        for (let i = 0; i < count; i++) {
+          const e = ifd0 + 2 + i * 12;
+          if (e + 10 >= buf.length) break;
+          if (r16(e) === 0x0112) return r16(e + 8); // Orientation tag
+        }
+      }
+    } else if (marker === 0xda) {
+      break; // Start of Scan — no more metadata segments
+    }
+    pos += 2 + segLen;
+  }
+  return null;
+}
+
 // ---------- routes ----------
 
 export function registerAppRoutes(app: Express) {
@@ -1011,42 +1049,6 @@ export function registerAppRoutes(app: Express) {
           .from(photos)
           .where(eq(photos.quoteId, quoteId));
 
-        /** Read the EXIF Orientation tag from a raw JPEG buffer.
-         *  Returns 1–8 per the EXIF spec, or null if absent/unreadable.
-         *  1 = upright; 3 = 180°; 6 = 90° CW (phone portrait → sideways);
-         *  8 = 90° CCW (phone portrait → sideways other way). */
-        function readJpegExifOrientation(buf: Buffer): number | null {
-          if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
-          let pos = 2;
-          while (pos < buf.length - 3) {
-            if (buf[pos] !== 0xff) break;
-            const marker = buf[pos + 1];
-            if (pos + 3 >= buf.length) break;
-            const segLen = buf.readUInt16BE(pos + 2); // includes 2-byte length field
-            if (marker === 0xe1 && pos + 10 < buf.length) { // APP1
-              if (buf.slice(pos + 4, pos + 10).toString("latin1") === "Exif\0\0") {
-                const t = pos + 10; // TIFF header start
-                const le = buf[t] === 0x49; // 'II' = little-endian; 'MM' = big-endian
-                const r16 = (o: number) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
-                const r32 = (o: number) => (le ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
-                if (t + 8 >= buf.length) break;
-                const ifd0 = t + r32(t + 4);
-                if (ifd0 + 2 >= buf.length) break;
-                const count = r16(ifd0);
-                for (let i = 0; i < count; i++) {
-                  const e = ifd0 + 2 + i * 12;
-                  if (e + 10 >= buf.length) break;
-                  if (r16(e) === 0x0112) return r16(e + 8); // Orientation tag
-                }
-              }
-            } else if (marker === 0xda) {
-              break; // Start of Scan — no more metadata segments
-            }
-            pos += 2 + segLen;
-          }
-          return null;
-        }
-
         const candidates: { id: string; slot: string | null; quoteId: string; orientation: number }[] = [];
         for (const row of rows) {
           const buf = row.data as Buffer;
@@ -1060,6 +1062,48 @@ export function registerAppRoutes(app: Express) {
         }
         res.set("Cache-Control", "no-store");
         res.json({ scanned: rows.length, candidates });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ---------- admin: scan ALL photos for EXIF orientation issues ----------
+  // Pages through every photo in the DB (PAGE_SIZE rows at a time) and returns
+  // the sideways ones for this page. The client calls repeatedly with an
+  // increasing offset until done:true, accumulating candidates across pages so
+  // the whole table is checked without a single long-running query.
+  const SCAN_PAGE_SIZE = 100;
+  app.get(
+    "/api/admin/photo-orientation-scan-all",
+    requireAdmin,
+    async (req: any, res, next) => {
+      try {
+        const offset = Math.max(0, Number(req.query.offset) || 0);
+
+        const page = await db
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data })
+          .from(photos)
+          .orderBy(photos.id)
+          .limit(SCAN_PAGE_SIZE)
+          .offset(offset);
+
+        const candidates: { id: string; slot: string | null; quoteId: string; orientation: number }[] = [];
+        for (const row of page) {
+          const buf = row.data as Buffer;
+          const orientation = readJpegExifOrientation(buf);
+          if (orientation !== null && orientation !== 1) {
+            candidates.push({ id: row.id, slot: row.slot, quoteId: row.quoteId, orientation });
+          }
+        }
+
+        res.set("Cache-Control", "no-store");
+        res.json({
+          offset,
+          scanned: page.length,
+          done: page.length < SCAN_PAGE_SIZE,
+          candidates,
+        });
       } catch (err) {
         next(err);
       }

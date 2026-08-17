@@ -69,6 +69,7 @@ export const api = {
   classify: (payload) => request('POST', '/api/quoter/classify', payload),
 
   photoOrientationCandidates: (quoteId) => request('GET', `/api/admin/photo-orientation-candidates?quoteId=${encodeURIComponent(quoteId)}`),
+  photoOrientationScanAll: (offset) => request('GET', `/api/admin/photo-orientation-scan-all?offset=${offset}`),
 
   // ---------- PIN sign-off ----------
   signers: () => request('GET', '/api/quoter/signers'),
