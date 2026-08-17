@@ -6,6 +6,56 @@ import { parseBackupFile, convertOldReconBackup } from '../lib/exports';
 import { api } from '../lib/api';
 import { orientedJpegDataUrl } from '../lib/photo';
 
+// ---------------------------------------------------------------------------
+// Fleet-scan checkpoint helpers — exported for testing
+// ---------------------------------------------------------------------------
+export const FLEET_SCAN_KEY = 'fleetScanProgress_v1';
+
+export const saveFleetProgress = (offset, accumulated, totalScanned) => {
+  try { sessionStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
+};
+export const loadFleetProgress = () => {
+  try {
+    const raw = sessionStorage.getItem(FLEET_SCAN_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+};
+export const removeFleetProgress = () => {
+  try { sessionStorage.removeItem(FLEET_SCAN_KEY); } catch {}
+};
+
+/**
+ * Core fleet-scan loop — exported for unit testing.
+ *
+ * Calls `apiFn(offset)` repeatedly, accumulates candidates, and fires
+ * `onPage({ offset, totalScanned, accumulated, newCandidates, done })` after
+ * each successful page.  Throws if `apiFn` throws (so the caller can
+ * checkpoint the last-saved offset and surface the error).
+ *
+ * @param {(offset: number) => Promise<{scanned:number, candidates?:any[], done:boolean}>} apiFn
+ * @param {{offset?:number, totalScanned?:number, accumulated?:any[]}|null} resumeFrom
+ * @param {{ onPage?: (info: object) => void }} callbacks
+ * @returns {Promise<{totalScanned: number, accumulated: any[]}>}
+ */
+export async function runFleetScanLoop(apiFn, resumeFrom, callbacks = {}) {
+  const { onPage } = callbacks;
+  let offset = resumeFrom?.offset ?? 0;
+  let totalScanned = resumeFrom?.totalScanned ?? 0;
+  const accumulated = resumeFrom?.accumulated ? [...resumeFrom.accumulated] : [];
+
+  while (true) {
+    const r = await apiFn(offset);
+    totalScanned += r.scanned;
+    offset += r.scanned;
+    const newCandidates = r.candidates?.length ? r.candidates : [];
+    if (newCandidates.length) accumulated.push(...newCandidates);
+    onPage?.({ offset, totalScanned, accumulated: [...accumulated], newCandidates, done: !!r.done });
+    if (r.done) break;
+  }
+
+  return { totalScanned, accumulated };
+}
+
 const STATUS_META = {
   pending: { label: 'PENDING', bg: 'var(--amber)' },
   active: { label: 'ACTIVE', bg: 'var(--green)' },
@@ -189,20 +239,10 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   const [fleetTruckBusy, setFleetTruckBusy] = useState(new Set()); // quoteIds currently being fixed individually
   const [fleetResumable, setFleetResumable] = useState(false);
 
-  // sessionStorage key for mid-scan resume checkpoints
-  const FLEET_SCAN_KEY = 'fleetScanProgress_v1';
-
-  const saveFleetProgress = (offset, accumulated, totalScanned) => {
-    try { sessionStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
-  };
+  // Wraps the module-level removeFleetProgress so it also clears the React flag
   const clearFleetProgress = () => {
-    try { sessionStorage.removeItem(FLEET_SCAN_KEY); setFleetResumable(false); } catch {}
-  };
-  const loadFleetProgress = () => {
-    try {
-      const raw = sessionStorage.getItem(FLEET_SCAN_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
+    removeFleetProgress();
+    setFleetResumable(false);
   };
 
   // Check for a saved resume point whenever fleet mode becomes active
@@ -227,13 +267,9 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     setFleetScanState('scanning');
     setFleetError('');
 
-    let offset = resumeFrom?.offset ?? 0;
-    let totalScanned = resumeFrom?.totalScanned ?? 0;
-    const accumulated = resumeFrom?.accumulated ? [...resumeFrom.accumulated] : [];
-
-    // Restore visible state when resuming
-    setFleetScanned(totalScanned);
-    setFleetCandidates([...accumulated]);
+    // Restore visible state immediately so the UI shows correct counts while scanning
+    setFleetScanned(resumeFrom?.totalScanned ?? 0);
+    setFleetCandidates(resumeFrom?.accumulated ? [...resumeFrom.accumulated] : []);
 
     if (!resumeFrom) {
       // Fresh start — drop any stale checkpoint
@@ -241,19 +277,18 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     }
 
     try {
-      while (true) {
-        const r = await api.photoOrientationScanAll(offset);
-        totalScanned += r.scanned;
-        offset += r.scanned;
-        setFleetScanned(totalScanned);
-        if (r.candidates && r.candidates.length) {
-          accumulated.push(...r.candidates);
-          setFleetCandidates([...accumulated]);
-        }
-        // Checkpoint after every page so the browser can resume if the tab sleeps
-        saveFleetProgress(offset, accumulated, totalScanned);
-        if (r.done) break;
-      }
+      await runFleetScanLoop(
+        (offset) => api.photoOrientationScanAll(offset),
+        resumeFrom,
+        {
+          onPage: ({ offset, totalScanned, accumulated, newCandidates }) => {
+            setFleetScanned(totalScanned);
+            if (newCandidates.length) setFleetCandidates([...accumulated]);
+            // Checkpoint after every page so the browser can resume if the tab sleeps
+            saveFleetProgress(offset, accumulated, totalScanned);
+          },
+        },
+      );
       clearFleetProgress();
       setFleetScanState('done');
     } catch (err) {
