@@ -44,10 +44,20 @@ const H = vi.hoisted(() => {
   const idOf = (cond: any) => sqlParts(cond).params[0];
 
   const fakeDb: any = {
-    // ----- insert (upsert) : PUT /api/quoter/quotes -----
+    // ----- insert (upsert) : PUT /api/quoter/quotes + POST /api/quoter/photos -----
     insert: (_table: any) => ({
       values: (v: any) => {
         const applyUpsert = () => {
+          // Photo rows have a quoteId field; quote rows do not.
+          if (v.quoteId !== undefined) {
+            const existing = photoRows.find((r: any) => r.id === v.id);
+            if (existing) {
+              Object.assign(existing, v);
+            } else {
+              photoRows.push({ ...v });
+            }
+            return [{ id: v.id }];
+          }
           const existing = quoteRows.find((r) => r.id === v.id);
           if (existing) {
             if (existing.committedBy) return []; // setWhere: committed_by IS NULL blocked
@@ -59,9 +69,13 @@ const H = vi.hoisted(() => {
           return [{ id: row.id }];
         };
         const builder: any = {
-          onConflictDoUpdate: () => ({
-            returning: (_c?: any) => Promise.resolve(applyUpsert()),
-          }),
+          onConflictDoUpdate: (_opts?: any) => {
+            // Return a thenable so `await insert().values().onConflictDoUpdate()`
+            // (without a trailing .returning()) still executes the upsert.
+            const p: any = Promise.resolve().then(applyUpsert);
+            p.returning = (_c?: any) => Promise.resolve(applyUpsert());
+            return p;
+          },
         };
         return builder;
       },
@@ -115,7 +129,7 @@ const H = vi.hoisted(() => {
         return p;
       },
     }),
-    // ----- execute : intakes upsert + photo count -----
+    // ----- execute : intakes upsert + photo count + advisory lock -----
     execute: async (q: any) => {
       const { text, params } = sqlParts(q);
       if (/FROM intakes i LEFT JOIN quotes/i.test(text)) {
@@ -129,8 +143,18 @@ const H = vi.hoisted(() => {
         row.quote_id = row.quote_id || requested;
         return { rows: [{ quote_id: row.quote_id }] };
       }
+      // Advisory lock acquire — no-op in tests (serialization is implicit in sync mock)
+      if (/pg_advisory_xact_lock/i.test(text)) {
+        return { rows: [] };
+      }
       if (/FROM photos WHERE quote_id/i.test(text)) {
-        return { rows: [{ n: 0 }] };
+        // params[0] = quoteId, params[1] = excluded photo id
+        const quoteId = params[0];
+        const excludeId = params[1];
+        const count = photoRows.filter(
+          (r: any) => r.quoteId === quoteId && r.id !== excludeId,
+        ).length;
+        return { rows: [{ n: count }] };
       }
       if (/FROM settings/i.test(text)) {
         return { rows: [] };
@@ -162,6 +186,8 @@ const H = vi.hoisted(() => {
       }
       return { rows: [] };
     },
+    // ----- transaction : run callback with fakeDb as the tx client -----
+    transaction: async (fn: any) => fn(fakeDb),
   };
 
   return { quoteRows, intakeRows, photoRows, fakeDb };
@@ -376,5 +402,84 @@ describe("GET /api/quoter/sync sign-off state", () => {
     expect(byId.s1.overriddenBy).toBe("Boss");
     expect(byId.s2.committedBy).toBeNull();
     expect(byId.s2.overriddenBy).toBeNull();
+  });
+});
+
+describe("photo cap enforcement (160-photo limit for two-shot damage capture)", () => {
+  // Seed helpers
+  function seedPhotos(quoteId: string, count: number) {
+    for (let i = 0; i < count; i++) {
+      photoRows.push({ id: `seed-${i}`, quoteId, slot: "dmg", mime: "image/png", data: Buffer.from("x"), ts: i });
+    }
+  }
+
+  it("POST /api/quoter/photos succeeds when existing count is 159 (one slot left)", async () => {
+    quoteRows.push({ id: "cap-q1", data: {}, committedBy: null, overriddenBy: null });
+    seedPhotos("cap-q1", 159);
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "new-photo",
+      quoteId: "cap-q1",
+      slot: "dmg",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    // The new photo was persisted
+    expect(photoRows.filter((p: any) => p.quoteId === "cap-q1").length).toBe(160);
+  });
+
+  it("POST /api/quoter/photos returns 409 when existing count is already 160", async () => {
+    quoteRows.push({ id: "cap-q2", data: {}, committedBy: null, overriddenBy: null });
+    seedPhotos("cap-q2", 160);
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "over-limit",
+      quoteId: "cap-q2",
+      slot: "dmg",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("Photo limit reached for this truck");
+    // No extra row was added
+    expect(photoRows.filter((p: any) => p.quoteId === "cap-q2").length).toBe(160);
+  });
+
+  it("POST /api/quoter/photos allows re-uploading the same photo id even when count is 160 (rotate)", async () => {
+    // The COUNT query uses id <> ${id}, so replacing an existing photo never
+    // counts against the cap — important for the in-place rotate flow.
+    quoteRows.push({ id: "cap-q3", data: {}, committedBy: null, overriddenBy: null });
+    seedPhotos("cap-q3", 159);
+    photoRows.push({ id: "existing-photo", quoteId: "cap-q3", slot: "dmg", mime: "image/png", data: Buffer.from("old"), ts: 999 });
+    // Now there are 160 photos, but re-uploading "existing-photo" must succeed.
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "existing-photo",
+      quoteId: "cap-q3",
+      slot: "dmg",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    // Count stays at 160 — no duplicate row was added
+    expect(photoRows.filter((p: any) => p.quoteId === "cap-q3").length).toBe(160);
+  });
+
+  it("two-shot pair (close-up + wide) at 158 photos both succeed — 28th damage pair fits", async () => {
+    // 24 walk-around + 27 prior pairs = 24 + 54 = 78 ... scaled down to 158 for this test.
+    quoteRows.push({ id: "cap-q4", data: {}, committedBy: null, overriddenBy: null });
+    seedPhotos("cap-q4", 158);
+    const close = await req("POST", "/api/quoter/photos", {
+      id: "pair-close",
+      quoteId: "cap-q4",
+      slot: "dmg",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(close.status).toBe(200);
+    const wide = await req("POST", "/api/quoter/photos", {
+      id: "pair-wide",
+      quoteId: "cap-q4",
+      slot: "dmg_wide_pair-close",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(wide.status).toBe(200);
+    expect(photoRows.filter((p: any) => p.quoteId === "cap-q4").length).toBe(160);
   });
 });

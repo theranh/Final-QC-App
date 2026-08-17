@@ -362,20 +362,33 @@ export function registerQuoterRoutes(app: Express) {
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
         return res.status(413).json({ error: "Photo too large" });
       }
-      const cnt = await db.execute(
-        sql`SELECT COUNT(*)::int AS n FROM photos WHERE quote_id = ${quoteId} AND id <> ${id}`,
-      );
-      if (Number((cnt.rows[0] as any).n) >= 80) {
+      // Acquire a per-quote advisory lock inside a transaction so that concurrent
+      // uploads (e.g. close-up + wide shot fired in parallel) cannot both observe
+      // a count below 160 and both insert, exceeding the cap.
+      let limitReached = false;
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`,
+        );
+        const cnt = await tx.execute(
+          sql`SELECT COUNT(*)::int AS n FROM photos WHERE quote_id = ${quoteId} AND id <> ${id}`,
+        );
+        if (Number((cnt.rows[0] as any).n) >= 160) {
+          limitReached = true;
+          return;
+        }
+        const ts = Date.now();
+        await tx
+          .insert(photos)
+          .values({ id, quoteId, slot, mime: mDU[1], data: buf, ts })
+          .onConflictDoUpdate({
+            target: photos.id,
+            set: { slot, mime: mDU[1], data: buf, ts },
+          });
+      });
+      if (limitReached) {
         return res.status(409).json({ error: "Photo limit reached for this truck" });
       }
-      const ts = Date.now();
-      await db
-        .insert(photos)
-        .values({ id, quoteId, slot, mime: mDU[1], data: buf, ts })
-        .onConflictDoUpdate({
-          target: photos.id,
-          set: { slot, mime: mDU[1], data: buf, ts },
-        });
       res.json({ ok: true, id });
     }),
   );
