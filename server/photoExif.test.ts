@@ -441,7 +441,9 @@ describe("readJpegExifOrientation — LE TIFF truncated-buffer safety", () => {
 // after accepting the byte-order mark.  A partial overwrite of the EXIF block
 // (e.g. a corrupt upload) can flip those two bytes without touching 'II'/'MM'.
 // An equally dangerous failure mode is a valid magic but a garbage IFD0 offset
-// that points past the end of the buffer.
+// that points past the end of the buffer (e.g. 0xFFFFFFFF from a bit-flip,
+// a value equal to buf.length, or the smallest value that places ifd0 + 2
+// beyond the last byte).
 //
 // Full buffer layout (40 bytes total, offsets absolute):
 //   0–1   SOI
@@ -457,8 +459,37 @@ describe("readJpegExifOrientation — LE TIFF truncated-buffer safety", () => {
 //   38–39 EOI
 //
 // Magic corruption: overwrite bytes 14–15 with a value ≠ 42.
-// Offset corruption: overwrite bytes 16–19 with 0xFFFFFFFF.
+// Offset corruption: overwrite bytes 16–19 with an out-of-range value.
+//
+// Bounds check under test (photoExif.ts):
+//   const ifd0 = t + r32(t + 4);
+//   if (ifd0 + 2 >= buf.length) break;   ← fires whenever offset is too large
 // ---------------------------------------------------------------------------
+
+/**
+ * Build a valid LE-TIFF JPEG and overwrite the 4-byte IFD0 offset field
+ * (at absolute position 16) with `badOffset` (written little-endian).
+ * Everything else in the TIFF header is correct so the only flaw is the
+ * offset itself.
+ */
+function buildJpegWithBadIfd0OffsetLE(badOffset: number): Buffer {
+  const buf = buildJpegWithOrientation(6).slice(); // copy so we can mutate
+  // TIFF base t = 12; offset field is at t + 4 = 16
+  buf.writeUInt32LE(badOffset, 16);
+  return buf;
+}
+
+/**
+ * Big-endian counterpart of buildJpegWithBadIfd0OffsetLE.
+ * The IFD0 offset field is at the same absolute position (16) but is
+ * written big-endian.
+ */
+function buildJpegWithBadIfd0OffsetBE(badOffset: number): Buffer {
+  const buf = buildJpegWithOrientationBE(6).slice(); // copy so we can mutate
+  // TIFF base t = 12; offset field is at t + 4 = 16
+  buf.writeUInt32BE(badOffset, 16);
+  return buf;
+}
 
 describe("readJpegExifOrientation — corrupt TIFF magic and out-of-bounds IFD0 offset", () => {
   // ---- BE TIFF with magic ≠ 42 -------------------------------------------
@@ -500,28 +531,41 @@ describe("readJpegExifOrientation — corrupt TIFF magic and out-of-bounds IFD0 
     expect(readJpegExifOrientation(buf)).toBeNull();
   });
 
-  // ---- Valid magic, IFD0 offset points beyond the buffer (BE) ------------
-  // Magic is correct (42) but the IFD0 offset field (bytes 16–19) is set to
-  // 0xFFFFFFFF so that ifd0 = t + 0xFFFFFFFF, which is far past buf.length.
-  // The existing `ifd0 + 2 >= buf.length` guard must fire and return null.
-  it("BE TIFF with valid magic but IFD0 offset beyond buffer: returns null without throwing", () => {
-    const buf = buildJpegWithOrientationBE(6).slice();
-    // absolute offset 16–19 = t + 4 = IFD0 offset field (big-endian)
-    buf[16] = 0xff;
-    buf[17] = 0xff;
-    buf[18] = 0xff;
-    buf[19] = 0xff;
+  // ---- Valid magic, IFD0 offset = 0xFFFFFFFF (BE) ------------------------
+  // ifd0 = t(12) + 0xFFFFFFFF = 4294967307, far past buf.length(40).
+  it("BE TIFF with valid magic but IFD0 offset = 0xFFFFFFFF: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetBE(0xffffffff);
     expect(readJpegExifOrientation(buf)).toBeNull();
   });
 
-  // ---- Valid magic, IFD0 offset points beyond the buffer (LE) ------------
-  it("LE TIFF with valid magic but IFD0 offset beyond buffer: returns null without throwing", () => {
-    const buf = buildJpegWithOrientation(6).slice();
-    // IFD0 offset field is little-endian at bytes 16–19
-    buf[16] = 0xff;
-    buf[17] = 0xff;
-    buf[18] = 0xff;
-    buf[19] = 0xff;
+  // ---- Valid magic, IFD0 offset = buf.length (BE) ------------------------
+  it("BE TIFF with valid magic but IFD0 offset = buf.length: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetBE(40 /* buf.length of the valid JPEG */);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Valid magic, IFD0 offset one past end (BE) ------------------------
+  // buf.length = 40; t = 12; ifd0 = 12 + 29 = 41 > 40 → guard fires.
+  it("BE TIFF with valid magic but IFD0 offset one past end: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetBE(29);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Valid magic, IFD0 offset = 0xFFFFFFFF (LE) ------------------------
+  it("LE TIFF with valid magic but IFD0 offset = 0xFFFFFFFF: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetLE(0xffffffff);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Valid magic, IFD0 offset = buf.length (LE) ------------------------
+  it("LE TIFF with valid magic but IFD0 offset = buf.length: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetLE(40 /* buf.length of the valid JPEG */);
+    expect(readJpegExifOrientation(buf)).toBeNull();
+  });
+
+  // ---- Valid magic, IFD0 offset one past end (LE) ------------------------
+  it("LE TIFF with valid magic but IFD0 offset one past end: returns null without throwing", () => {
+    const buf = buildJpegWithBadIfd0OffsetLE(29);
     expect(readJpegExifOrientation(buf)).toBeNull();
   });
 });
