@@ -7,6 +7,8 @@ import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 import { subscribePending } from '../lib/photoQueue';
+import { createSaveTracker } from '../lib/saveTracker';
+import SaveStatusPill from './SaveStatusPill';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -98,6 +100,18 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [dupWarn, setDupWarn] = useState(null); // { vin, intakeRow, quoteRow, proceed }
   const intakeRef = useRef(null);
   intakeRef.current = intake;
+  // Per-truck save status: 'saved' only after the server confirms; a failed
+  // push shows a RETRY. Each opened VIN gets its OWN tracker instance; the
+  // onChange guard means a retired tracker (previous truck) can never update
+  // the UI, and completion callbacks hold their own instance, so a late
+  // response for truck A can never mark truck B as saved.
+  const [saveStatus, setSaveStatus] = useState('idle');
+  const saveTrackerRef = useRef(null);
+  const makeSaveTracker = useCallback(() => {
+    const t = createSaveTracker((s) => { if (saveTrackerRef.current === t) setSaveStatus(s); });
+    return t;
+  }, []);
+  if (!saveTrackerRef.current) saveTrackerRef.current = makeSaveTracker();
   useEffect(() => { prefetchZxing(); }, []); // warm the barcode decoder before the scanner opens
   useEffect(() => { if (!intake) api.listIntakes().then((j) => setHomeRows(j?.intakes || [])).catch(() => {}); }, [intake]);
   useEffect(() => {
@@ -112,6 +126,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   }, []);
   const intakeQuoteId = intake?.quoteId ?? null;
   const intakeVin = intake?.vin ?? null;
+  // Fresh tracker whenever a different truck is opened (effect, not render).
+  useEffect(() => {
+    saveTrackerRef.current = makeSaveTracker();
+    setSaveStatus('idle');
+  }, [intakeVin, makeSaveTracker]);
   useEffect(() => {
     if (intakeVin == null) { setQuoteSummary(null); return; }
     let live = true;
@@ -132,7 +151,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         saveIntake({ miles: String(q.miles) });
       }
       const lines = Array.isArray(q.lines) ? q.lines.filter((l) => l && l.cls) : [];
-      api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: 0 }));
+      // Review-gated lines are excluded from billing — surfaced prominently
+      // in the commit confirmation so a sign-off can't miss them.
+      const reviewCount = (Array.isArray(q.lines) ? q.lines : []).filter((l) => l && l.status === 'done' && l.review).length;
+      api.quotePhotos(q.id).then((p) => live && setQuoteSummary({ id: q.id, lineCount: lines.length, reviewCount, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: (p?.photos || []).length })).catch(() => live && setQuoteSummary({ id: q.id, lineCount: lines.length, reviewCount, hrs: q.totals?.hrs || 0, notes: q.notes || '', photoCount: 0 }));
     }).catch(() => {});
     return () => { live = false; };
   }, [intakeQuoteId, intakeVin]);
@@ -150,21 +172,48 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     setQuoteSummary((s) => (s ? { ...s, notes: next } : s));
     clearTimeout(notesTimerRef.current);
     notesTimerRef.current = setTimeout(() => {
+      // Capture the tracker instance: a late response for a previous truck's
+      // tracker must never touch the currently open truck's status.
+      const tr = saveTrackerRef.current;
+      const tok = tr.begin('notes');
       api.patchQuoteNotes({
         id, notes: next,
         meta: { vin: cur?.vin || '', stock: cur?.stock || '', miles: cur?.miles || '', vehicle: cur?.vehicle || '', estimator: cur?.estimator || '' },
-      }).catch((e) => {
-        if (e?.status === 409) showToast?.('This quote is committed — notes are locked.');
+      }).then(() => tr.succeed('notes', tok)).catch((e) => {
+        if (e?.status === 409) {
+          // Locked quote — retrying can't help; don't leave a red pill up.
+          tr.reset('notes');
+          showToast?.('This quote is committed — notes are locked.');
+        } else {
+          tr.fail('notes', tok, 'error');
+        }
       });
     }, 600);
+  }, [showToast]);
+  // Re-send the latest notes text immediately (RETRY on the status pill).
+  const retryNotesPush = useCallback(() => {
+    clearTimeout(notesTimerRef.current);
+    const cur = intakeRef.current;
+    const id = quoteRowRef.current?.id || cur?.quoteId;
+    const tr = saveTrackerRef.current;
+    if (!id) { tr.reset('notes'); return; }
+    const tok = tr.begin('notes');
+    api.patchQuoteNotes({
+      id, notes: quoteRowRef.current?.notes ?? '',
+      meta: { vin: cur?.vin || '', stock: cur?.stock || '', miles: cur?.miles || '', vehicle: cur?.vehicle || '', estimator: cur?.estimator || '' },
+    }).then(() => tr.succeed('notes', tok)).catch((e) => {
+      if (e?.status === 409) { tr.reset('notes'); showToast?.('This quote is committed — notes are locked.'); }
+      else tr.fail('notes', tok, 'error');
+    });
   }, [showToast]);
   useEffect(() => () => clearTimeout(notesTimerRef.current), []);
 
   // Adopt a server row for a VIN, honoring the old conflict rule.
+  const [serverCheckFailed, setServerCheckFailed] = useState(false);
   const refreshFromServer = useCallback(async (v) => {
     try {
       const j = await api.getIntake(v);
-      if (!j || !j.found) return;
+      if (!j || !j.found) { setServerCheckFailed(false); return; }
       const cur = intakeRef.current;
       if (!cur || cur.vin !== v) return;
       if ((j.updatedAt || 0) <= (cur.ts || 0)) {
@@ -204,8 +253,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
       };
       saveToCache(it);
       setIntake(it);
+      setServerCheckFailed(false);
     } catch {
-      /* offline — local copy stands */
+      // Offline — local copy stands, but say so instead of looking current.
+      setServerCheckFailed(true);
     }
   }, []);
 
@@ -228,24 +279,48 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     },
   });
 
-  // Persist every change: cache locally, then push to the server (unless noPush).
+  // Persist every change: cache locally, then push to the server (unless
+  // noPush). The cache write, network call, and tracker updates all happen
+  // OUTSIDE the React state updater (updaters must stay pure — StrictMode
+  // double-invokes them, which would double the PUTs and corrupt sequencing).
+  // intakeRef is advanced synchronously so back-to-back keystrokes always
+  // build on the latest snapshot even before React re-renders.
   const saveIntake = useCallback((patch, opts) => {
     const noPush = !!(opts && opts.noPush);
-    setIntake((s) => {
-      if (!s) return s;
-      if (s.committedBy) return s;
-      const next = { ...s, ...patch, ts: noPush ? s.ts || 0 : Date.now() };
-      saveToCache(next);
-      if (!noPush && String(next.vin || '').length >= 6) {
-        api
-          .putIntake(intakePayload(next))
-          .catch(() => {
-            /* offline — the local cache keeps the work for resume */
-          });
-      }
-      return next;
-    });
+    const s = intakeRef.current;
+    if (!s || s.committedBy) return;
+    const next = { ...s, ...patch, ts: noPush ? s.ts || 0 : Date.now() };
+    intakeRef.current = next;
+    setIntake(next);
+    saveToCache(next);
+    if (!noPush && String(next.vin || '').length >= 6) {
+      const tr = saveTrackerRef.current; // instance-captured (see notes save)
+      const tok = tr.begin('intake');
+      api
+        .putIntake(intakePayload(next))
+        .then(() => tr.succeed('intake', tok))
+        .catch(() => {
+          // Offline/server error — the local cache keeps the work for
+          // resume; surface it honestly with an in-place retry.
+          tr.fail('intake', tok, 'error');
+        });
+    }
   }, []);
+  // Re-push the whole latest intake (RETRY on the status pill).
+  const retryIntakePush = useCallback(() => {
+    const cur = intakeRef.current;
+    const tr = saveTrackerRef.current;
+    if (!cur || cur.committedBy || String(cur.vin || '').length < 6) { tr.reset('intake'); return; }
+    const tok = tr.begin('intake');
+    api.putIntake(intakePayload(cur))
+      .then(() => tr.succeed('intake', tok))
+      .catch(() => tr.fail('intake', tok, 'error'));
+  }, []);
+  // One retry button drives every failed channel for this truck.
+  const retryFailedSaves = useCallback(() => {
+    if (saveTrackerRef.current.channelState('intake') === 'error') retryIntakePush();
+    if (saveTrackerRef.current.channelState('notes') === 'error') retryNotesPush();
+  }, [retryIntakePush, retryNotesPush]);
 
   // Open an intake for a VIN: prefer the local cache, then fetch the server copy.
   const openFor = useCallback(
@@ -379,6 +454,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   useEffect(() => () => clearTimeout(vinTimer.current), []);
 
   const [pinOpen, setPinOpen] = useState(false);
+  const [commitConfirm, setCommitConfirm] = useState(false); // summary shown before the PIN dialog
   const locked = !!(intake && intake.committedBy); // committed → read-only
 
   // "What's left" progress strip — card anchors for tap-to-scroll.
@@ -417,16 +493,20 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   // land, so a saved intake never looks like photos went missing.
   const [pendingUploads, setPendingUploads] = useState(0);
   useEffect(() => subscribePending(setPendingUploads), []);
+  const [photoLoadError, setPhotoLoadError] = useState(false);
+  const [photoLoadAttempt, setPhotoLoadAttempt] = useState(0); // bumped by RETRY
   useEffect(() => {
     if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
     let live = true;
-    const load = () => api.quotePhotos(photoQuoteId).then((j) => { if (live) setIntakePhotos(j?.photos || []); }).catch(() => {});
+    const load = () => api.quotePhotos(photoQuoteId)
+      .then((j) => { if (live) { setIntakePhotos(j?.photos || []); setPhotoLoadError(false); } })
+      .catch(() => { if (live) setPhotoLoadError(true); });
     load();
     // While uploads are draining, poll so each arriving shot appears; the
     // pendingUploads dependency triggers a final refresh when it hits zero.
     const t = pendingUploads > 0 ? setInterval(load, 4000) : null;
     return () => { live = false; if (t) clearInterval(t); };
-  }, [photoQuoteId, walkOpen, quoting, pendingUploads]);
+  }, [photoQuoteId, walkOpen, quoting, pendingUploads, photoLoadAttempt]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -518,6 +598,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
               <input className="input mono" value={vin} maxLength={17} autoFocus onChange={(e) => { setVin(e.target.value.toUpperCase()); setVinMessage(''); }} placeholder="17-character VIN" autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
               <div style={{ fontSize: 11, marginTop: 7, color: vinMessage === 'Valid VIN' ? 'var(--green)' : 'var(--red)' }}>{vin.length}/17 {vinMessage}</div>
               <button className="btn btn-dark" style={{ marginTop: 9 }} disabled={vin.length !== 17} onClick={() => acceptVin(vin)}>Start / Resume</button>
+              {/* After a failed scan the tech lands here — rescanning must not
+                  require backing out of the card. */}
+              <button className="btn btn-outline-brown" style={{ marginTop: 7 }} onClick={() => { setManualOpen(false); setVinMessage(''); setScanning(true); }}>📷 OPEN CAMERA AGAIN</button>
               <button className="btn btn-outline" style={{ marginTop: 7 }} disabled={vin.length !== 17 || vinValid(vin)} onClick={() => acceptVin(vin, true)}>Use check digit override</button>
             </div>
           )}
@@ -617,12 +700,23 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
             {/* Saved banner — the step-by-step progress strip was removed (too busy). */}
             {locked && (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: '#e8f3ea', border: '1px solid var(--green)', color: 'var(--green)', fontSize: 12, fontWeight: 700, letterSpacing: 0.5 }}>
-                ✓ SAVED — intake complete
+                ✓ COMMITTED &amp; LOCKED — intake complete
               </div>
+            )}
+            {/* Per-truck save status — 'Saved to server' only after the server
+                confirms; failed pushes offer an in-place RETRY. */}
+            {!locked && (
+              <SaveStatusPill status={saveStatus} pendingPhotos={pendingUploads} onRetry={retryFailedSaves} />
             )}
             {/* vehicle detail fields */}
             <div className="card" ref={truckCardRef}>
               <div className="card-title">TRUCK</div>
+              {serverCheckFailed && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '7px 10px', borderRadius: 8, background: 'var(--panel)', border: '1px solid var(--brown)', fontSize: 11, fontWeight: 700, color: 'var(--brown)' }}>
+                  <span style={{ flex: 1 }}>Couldn’t check the server — showing the copy on this device.</span>
+                  <button className="btn btn-outline-brown" style={{ height: 44, padding: '0 16px', fontSize: 11 }} onClick={() => intakeVin && refreshFromServer(intakeVin)}>RETRY</button>
+                </div>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
                 <div>
                   <div className="field-label">STOCK #</div>
@@ -672,6 +766,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 {pendingUploads > 0 && <span style={{ marginLeft: 8, color: 'var(--amber)', fontWeight: 700 }}>· sending {pendingUploads}…</span>}
               </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
+              {photoLoadError && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '7px 10px', borderRadius: 8, background: '#fdecea', border: '1px solid var(--red)', fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>
+                  <span style={{ flex: 1 }}>Photos didn’t load — check your connection.</span>
+                  <button className="btn btn-outline-red" style={{ height: 44, padding: '0 16px', fontSize: 11 }} onClick={() => setPhotoLoadAttempt((n) => n + 1)}>RETRY</button>
+                </div>
+              )}
               {walkPhotos.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
                   {walkPhotos.map((p) => (
@@ -764,11 +864,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 </div>
               ) : (
                 <>
-                  <button className="btn btn-green" style={{ height: 46 }} onClick={() => setPinOpen(true)}>
-                    ✍ SAVE
+                  <button className="btn btn-green" style={{ height: 46 }} onClick={() => setCommitConfirm(true)}>
+                    ✍ COMMIT &amp; LOCK
                   </button>
                   <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6, textAlign: 'center' }}>
-                    Saving signs off the intake with your PIN and locks it. Photos, notes, and the quote stay visible for review.
+                    Committing signs off the intake with your PIN and locks it. Photos, notes, and the quote stay visible for review.
                   </div>
                 </>
               )}
@@ -777,9 +877,17 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
         )}
       </div>
 
+      {commitConfirm && intake && (
+        <CommitConfirmDialog
+          intake={intake}
+          quoteSummary={quoteSummary}
+          onContinue={() => { setCommitConfirm(false); setPinOpen(true); }}
+          onCancel={() => setCommitConfirm(false)}
+        />
+      )}
       {pinOpen && (
         <PinDialog
-          title="Save intake"
+          title="Commit & lock intake"
           subtitle={intake ? `${intake.vin} · ${intake.vehicle || 'vehicle'}` : ''}
           onCommit={doCommit}
           onClose={() => setPinOpen(false)}
@@ -894,6 +1002,52 @@ export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
         {footer && <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>{footer}</div>}
       </div>
     </button>
+  );
+}
+
+// Pre-PIN confirmation summary: what exactly is being committed & locked.
+// Excluded/review-pending damage lines are the headline — they are NOT in the
+// quote total, and this is the last chance to notice before sign-off.
+function CommitConfirmDialog({ intake, quoteSummary, onContinue, onCancel }) {
+  const reviewCount = quoteSummary?.reviewCount || 0;
+  return (
+    <div className="lightbox-overlay" onClick={onCancel} style={{ cursor: 'default', padding: 18 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 380, maxHeight: '90%', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span className="oswald" style={{ fontWeight: 700, fontSize: 18, flex: 1 }}>Commit &amp; lock this intake?</span>
+          <button type="button" className="dialog-close" onClick={onCancel} aria-label="Close">✕</button>
+        </div>
+        <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{intake.vin}</div>
+        <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 6 }}>{intake.vehicle || 'Vehicle not decoded'}{intake.stock ? ` · STOCK ${intake.stock}` : ''}</div>
+
+        {quoteSummary ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 10, padding: '9px 11px', borderRadius: 9, background: 'var(--panel)', border: '1px solid var(--border)', fontSize: 12, fontWeight: 700 }}>
+            <span>{quoteSummary.lineCount} damage line{quoteSummary.lineCount === 1 ? '' : 's'}</span>
+            <span>{quoteSummary.hrs} hr quoted</span>
+            <span>{quoteSummary.photoCount} photos</span>
+          </div>
+        ) : (
+          <div style={{ marginTop: 10, padding: '9px 11px', borderRadius: 9, background: 'var(--panel)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--brown)', fontWeight: 600 }}>
+            No body quote linked to this intake.
+          </div>
+        )}
+
+        {reviewCount > 0 && (
+          <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 9, background: '#fdf6e3', border: '2px solid var(--amber)', fontSize: 12.5, fontWeight: 700, color: 'var(--amber)' }}>
+            ⚠ {reviewCount} line{reviewCount === 1 ? ' is' : 's are'} EXCLUDED from the quote total — pending review. {reviewCount === 1 ? 'It stays' : 'They stay'} excluded after commit.
+          </div>
+        )}
+
+        <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 10, lineHeight: 1.5 }}>
+          Committing signs off with your PIN and locks this intake. A correction afterwards is a new record, not an edit.
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button className="btn btn-outline" style={{ height: 44, flex: '0 0 38%' }} onClick={onCancel}>Cancel</button>
+          <button className="btn btn-green" style={{ height: 44, flex: 1 }} onClick={onContinue}>Continue to PIN sign-off</button>
+        </div>
+      </div>
+    </div>
   );
 }
 

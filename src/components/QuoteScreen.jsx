@@ -7,6 +7,9 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { SignatureBadge } from './PinDialog';
+import { createSaveTracker } from '../lib/saveTracker';
+import SaveStatusPill from './SaveStatusPill';
+import { subscribePending } from '../lib/photoQueue';
 import {
   PANELS, DAMAGE, SEVS, PARTS,
   defaultRates, defaultFlags, quoteTotals, lineHours, pdrEligible,
@@ -606,12 +609,16 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   // damage close-ups alike — so a reopened quote shows the full photo set.
   const [serverPhotos, setServerPhotos] = useState([]);
   const [lightbox, setLightbox] = useState(null);
+  const [photosLoadError, setPhotosLoadError] = useState(false);
+  const [photosLoadAttempt, setPhotosLoadAttempt] = useState(0); // bumped by RETRY
   useEffect(() => {
     if (!quoteId || walkOpen) return;
     let live = true;
-    api.quotePhotos(quoteId).then((j) => { if (live) setServerPhotos(j?.photos || []); }).catch(() => {});
+    api.quotePhotos(quoteId)
+      .then((j) => { if (live) { setServerPhotos(j?.photos || []); setPhotosLoadError(false); } })
+      .catch(() => { if (live) setPhotosLoadError(true); });
     return () => { live = false; };
-  }, [quoteId, walkOpen, photos.length]);
+  }, [quoteId, walkOpen, photos.length, photosLoadAttempt]);
   // Recover orphaned damage close-ups: a photo can reach the server and then
   // vanish from local state (screen reload, PWA restart) before it was ever
   // analyzed. Any server 'dmg…' photo that has no quote line and no local
@@ -678,6 +685,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [armedDelete, setArmedDelete] = useState(null);
   const [hydrating, setHydrating] = useState(!!prefill?.quoteId);
   const [hydrateError, setHydrateError] = useState('');
+  const [hydrateAttempt, setHydrateAttempt] = useState(0); // bumped by RETRY
   const hydratedRef = useRef(!prefill?.quoteId);
   // Snapshot prefill in a ref: hydration must run only when the quote id
   // changes, not every time the parent re-renders with fresh prefill fields
@@ -731,7 +739,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       rehydrateWideShots(restored, setLines, () => live);
     }).catch(() => { if (live) { setHydrateError('Could not load the saved quote. It was not opened for editing.'); setHydrating(false); } });
     return () => { live = false; };
-  }, [prefill?.quoteId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.quoteId, hydrateAttempt]);
 
   const linesRef = useRef(lines);
   linesRef.current = lines;
@@ -854,6 +863,14 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   if (!saveNotifierRef.current) saveNotifierRef.current = createSaveFailureNotifier((msg) => showToast && showToast(msg));
   const warnSaveFailed = useCallback((e) => saveNotifierRef.current.failed(e), []);
 
+  // Per-truck save status pill — 'Saved' strictly means the server confirmed
+  // the latest putQuote; stale responses can't overwrite a newer state.
+  const [saveStatus, setSaveStatus] = useState('idle');
+  const saveTrackerRef = useRef(null);
+  if (!saveTrackerRef.current) saveTrackerRef.current = createSaveTracker(setSaveStatus);
+  const [pendingUploads, setPendingUploads] = useState(0);
+  useEffect(() => subscribePending(setPendingUploads), []);
+
   const autosave = useCallback((ls, overrides) => {
     if (!hydratedRef.current) return;
     const s = { ...stateRef.current, ...(overrides || {}) };
@@ -866,12 +883,26 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     const entry = buildEntry(ls != null ? ls : linesRef.current, overrides);
     if (!entry.id) return;
     clearTimeout(saveTimer.current);
+    const tr = saveTrackerRef.current; // instance-captured for token safety
+    const tok = tr.begin('quote');
     saveTimer.current = setTimeout(() => {
       api.putQuote({ id: entry.id, data: entry })
-        .then(() => { saveNotifierRef.current.succeeded(); })
-        .catch(warnSaveFailed);
+        .then(() => { saveNotifierRef.current.succeeded(); tr.succeed('quote', tok); })
+        .catch((e) => { warnSaveFailed(e); tr.fail('quote', tok, 'error'); });
     }, 600);
   }, [buildEntry, ensureQuoteId, warnSaveFailed]);
+
+  // RETRY on the status pill: rebuild from the LATEST state and send now.
+  const retryQuoteSave = useCallback(() => {
+    const entry = buildEntry(linesRef.current);
+    const tr = saveTrackerRef.current;
+    if (!entry.id) { tr.reset('quote'); return; }
+    clearTimeout(saveTimer.current);
+    const tok = tr.begin('quote');
+    api.putQuote({ id: entry.id, data: entry })
+      .then(() => { saveNotifierRef.current.succeeded(); tr.succeed('quote', tok); })
+      .catch((e) => { warnSaveFailed(e); tr.fail('quote', tok, 'error'); });
+  }, [buildEntry, warnSaveFailed]);
 
   useEffect(() => () => clearTimeout(saveTimer.current), []);
 
@@ -1245,9 +1276,25 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
       </div>
 
       <div className="screen-body">
-        {hydrateError && <div className="card" style={{color:'var(--red)',fontWeight:700}}>{hydrateError}<button className="btn btn-outline" style={{marginTop:9}} onClick={onClose}>Close</button></div>}
+        {hydrateError && (
+          <div className="card" style={{color:'var(--red)',fontWeight:700}}>
+            {hydrateError}
+            <button className="btn btn-outline-red" style={{marginTop:9}} onClick={() => { setHydrateError(''); setHydrating(true); setHydrateAttempt((n) => n + 1); }}>RETRY</button>
+            <button className="btn btn-outline" style={{marginTop:7}} onClick={onClose}>Close</button>
+          </div>
+        )}
         {hydrating && <div className="card"><div className="card-title">LOADING SAVED QUOTE</div><div style={{marginTop:8,color:'var(--muted)'}}>Restoring quote details…</div></div>}
         {!hydrating && !hydrateError && <>
+        {/* Per-truck save/sync status — shown once a quote exists and isn't locked. */}
+        {!committed && quoteId && step !== 'vin' && (
+          <SaveStatusPill status={saveStatus} pendingPhotos={pendingUploads} onRetry={retryQuoteSave} />
+        )}
+        {photosLoadError && !walkOpen && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 8, background: '#fdecea', border: '1px solid var(--red)', fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>
+            <span style={{ flex: 1 }}>Saved photos didn’t load — check your connection.</span>
+            <button className="btn btn-outline-red" style={{ height: 44, padding: '0 16px', fontSize: 11 }} onClick={() => setPhotosLoadAttempt((n) => n + 1)}>RETRY</button>
+          </div>
+        )}
         {step === 'vin' && (
           <VinStep
             vin={vin}
@@ -1263,6 +1310,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             vinOverridden={vinOverridden}
             decoding={decoding}
             decodeFailed={decodeFailed}
+            onRetryDecode={() => vin && vin.length === 17 && runDecode(vin)}
             vehicleText={vehicleText}
             onVehicle={setVehicleText}
             stock={stock}
@@ -1531,7 +1579,7 @@ function VinStep({ vin, onVin, onScan, onManual }) {
 }
 
 /* ---------- confirm step ---------- */
-function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, onVehicle, stock, onStock, estimator, onEstimator, miles, onMiles, onBack, onNext }) {
+function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, onRetryDecode, vehicleText, onVehicle, stock, onStock, estimator, onEstimator, miles, onMiles, onBack, onNext }) {
   const ready = String(stock).trim() && String(estimator).trim();
   return (
     <>
@@ -1545,8 +1593,13 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, vehicleText, 
         )}
         {decoding && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>Decoding VIN…</div>}
         {decodeFailed && (
-          <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 8 }}>
-            Could not decode this VIN — type the vehicle below.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--amber)', flex: 1 }}>
+              Could not decode this VIN — retry or type the vehicle below.
+            </span>
+            {onRetryDecode && (
+              <button className="btn btn-outline-brown" style={{ height: 44, padding: '0 16px', fontSize: 11, flex: '0 0 auto' }} onClick={onRetryDecode}>RETRY</button>
+            )}
           </div>
         )}
         <div style={{ marginTop: 8 }}>
@@ -1698,6 +1751,18 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
   flags, keep, notes, notesOpen, flagPick, flagSearch,
   onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep, onCopy, onImage, onPrint }) {
   const locked = !!committed;
+  // Jump-to-excluded-line: each review-gated line registers its wrapper node;
+  // repeated taps on VIEW cycle through them.
+  const reviewNodesRef = useRef({});
+  const reviewJumpIdxRef = useRef(0);
+  const reviewIds = lines.filter((l) => l.status === 'done' && l.review).map((l) => l.id);
+  const jumpToReview = () => {
+    if (!reviewIds.length) return;
+    const idx = reviewJumpIdxRef.current % reviewIds.length;
+    reviewJumpIdxRef.current = idx + 1;
+    const node = reviewNodesRef.current[reviewIds[idx]];
+    if (node && node.scrollIntoView) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
   return (
     <>
       <div className="card">
@@ -1712,11 +1777,20 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
           <Bucket label="R&I" hrs={totals.RI} />
         </div>
         {totals.usdPDR > 0 && <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 7 }}>Includes paintless dent repair (flat rate, no hours).</div>}
-        {(totals.flagged > 0 || totals.errors > 0) && (
+        {/* Excluded-pending-review lines are impossible to miss: a loud banner
+            right beside the total, with a jump straight to the lines. They
+            stay excluded from billing exactly as before. */}
+        {totals.flagged > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, padding: '9px 11px', borderRadius: 9, background: '#fdf6e3', border: '2px solid var(--amber)' }}>
+            <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: 'var(--amber)', lineHeight: 1.35 }}>
+              ⚠ {totals.flagged} line{totals.flagged === 1 ? '' : 's'} EXCLUDED from this total — pending review
+            </span>
+            <button className="btn btn-outline-brown" style={{ height: 44, padding: '0 16px', fontSize: 11, flex: '0 0 auto' }} onClick={jumpToReview}>VIEW</button>
+          </div>
+        )}
+        {totals.errors > 0 && (
           <div style={{ fontSize: 10.5, color: 'var(--amber)', fontWeight: 700, marginTop: 8 }}>
-            {totals.flagged > 0 && `${totals.flagged} flagged for review`}
-            {totals.flagged > 0 && totals.errors > 0 && ' · '}
-            {totals.errors > 0 && `${totals.errors} failed`}
+            {totals.errors} failed
           </div>
         )}
       </div>
@@ -1724,6 +1798,7 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
       {lines.map((l) => (
         <LineCard
           key={l.id}
+          reviewRef={l.status === 'done' && l.review ? (node) => { if (node) reviewNodesRef.current[l.id] = node; else delete reviewNodesRef.current[l.id]; } : null}
           line={l}
           rates={rates}
           locked={locked}
@@ -1932,7 +2007,7 @@ function Bucket({ label, hrs }) {
   );
 }
 
-function LineCard({ line: l, rates, locked, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart }) {
+function LineCard({ line: l, rates, locked, reviewRef, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart }) {
   const isErr = l.status === 'error';
   const cls = l.cls;
   const h = cls ? lineHours(cls, rates) : null;
@@ -1940,7 +2015,7 @@ function LineCard({ line: l, rates, locked, onStartEdit, onCancelEdit, onApplyEd
   const sub = cls ? [DMG_LABEL[cls.damage_type] || cls.damage_type, SEV_LABEL[cls.severity] || cls.severity, cls.paint_damaged && 'paint'].filter(Boolean).join(' · ') : '';
 
   return (
-    <div className="card" style={{ borderColor: l.review ? 'var(--amber)' : isErr ? 'var(--red)' : 'var(--border)' }}>
+    <div className="card" ref={reviewRef || undefined} style={{ borderColor: l.review ? 'var(--amber)' : isErr ? 'var(--red)' : 'var(--border)' }}>
       <div style={{ display: 'flex', gap: 10 }}>
         {l.thumb && (
           <div style={{ display: 'flex', gap: 4, flex: '0 0 auto' }}>

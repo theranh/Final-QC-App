@@ -28,8 +28,10 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  const [loadAttempt, setLoadAttempt] = useState(0); // bumped by RETRY
   useEffect(() => {
     let live = true;
+    setLoadError(false);
     api
       .signers()
       .then((j) => {
@@ -41,7 +43,7 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
     return () => {
       live = false;
     };
-  }, []);
+  }, [loadAttempt]);
 
   const withPin = useMemo(() => (signers || []).filter((s) => s.hasPin), [signers]);
   const signer = useMemo(() => (signers || []).find((s) => s.id === signerId) || null, [signers, signerId]);
@@ -105,7 +107,16 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
         {subtitle && <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{subtitle}</div>}
 
         {loadError && (
-          <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 10 }}>Could not load the signer list — check your connection.</div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--red)', fontWeight: 600 }}>Could not load the signer list — check your connection.</div>
+            <button
+              className="btn btn-outline-red"
+              style={{ height: 40, marginTop: 8, width: '100%' }}
+              onClick={() => { setSigners(null); setLoadAttempt((n) => n + 1); }}
+            >
+              RETRY
+            </button>
+          </div>
         )}
         {signers == null && !loadError && (
           <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Loading…</div>

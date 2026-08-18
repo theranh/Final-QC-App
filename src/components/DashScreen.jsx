@@ -96,6 +96,17 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
       <div className="screen-topbar">
         <div className="screen-title-row">
           <span className="screen-title">Dashboard</span>
+          <span style={{ flex: 1 }} />
+          {/* Freshness — this payload is server-cached; say when it was
+              composed, and be loud when tracker data is missing from it. */}
+          {dash.trackerSource === 'unavailable' && (
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.6, color: '#fff', background: 'var(--amber)', padding: '3px 8px', borderRadius: 5, marginRight: 8 }}>TRACKER OFFLINE</span>
+          )}
+          {dash.generatedAt ? (
+            <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>
+              Updated {new Date(dash.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>
