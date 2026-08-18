@@ -78,6 +78,7 @@ type LiteRow = {
   openItems: { cat: string; item: string; note: string }[];
   failItems: { cat: string; item: string }[];
   archived: boolean;
+  imported: boolean;
 };
 
 // ---------- helpers ----------
@@ -326,7 +327,7 @@ async function fetchSheetData(): Promise<SheetData | null> {
 async function fetchLiteRows(): Promise<LiteRow[]> {
   const res = await db.execute(sql`
     SELECT
-      qc_number, stock, vehicle, vin, result, status, archived,
+      qc_number, stock, vehicle, vin, result, status, archived, imported,
       data->>'inspector' AS inspector,
       data->>'title' AS title,
       data->>'ts' AS ts,
@@ -359,6 +360,7 @@ async function fetchLiteRows(): Promise<LiteRow[]> {
     openItems: (typeof r.open_items === "string" ? JSON.parse(r.open_items) : r.open_items) || [],
     failItems: (typeof r.fail_items === "string" ? JSON.parse(r.fail_items) : r.fail_items) || [],
     archived: r.archived === true || r.archived === "t",
+    imported: r.imported === true || r.imported === "t",
   }));
 }
 
@@ -393,6 +395,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
       status: row.status,
       statusKey,
       inspector: row.inspector,
+      imported: row.imported,
       createdTs: row.ts,
       finalizedTs: row.status === "cleared" && row.clearedTs ? row.clearedTs : row.ts,
       day: dayOf(row.ts),
@@ -547,8 +550,12 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
       segments: v.segments,
       itemCount: v.itemCount,
       note: v.note,
+      imported: v.imported,
     }))
-    .sort((a, b) => b.daysOpen - a.daysOpen);
+    // Units imported from the old app sink to the end — the team wants the
+    // fresh, actively-worked re-checks at the top. Within each group,
+    // longest-open first (unchanged).
+    .sort((a, b) => (a.imported === b.imported ? b.daysOpen - a.daysOpen : a.imported ? 1 : -1));
 
   // ----- aging / bottleneck board (current-state, range-independent) -----
   // Active trucks by current stage with days-in-stage, from existing

@@ -197,6 +197,11 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
                 <span className="oswald" style={{ fontWeight: 600, fontSize: 13.5, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {b.stock} · {b.vehicle}
                 </span>
+                {b.imported && (
+                  <span style={{ fontSize: 8, fontWeight: 700, color: 'var(--muted)', border: '1px solid #E4DDD3', borderRadius: 3, padding: '1px 4px', letterSpacing: 0.5 }}>
+                    OLD APP
+                  </span>
+                )}
                 <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)' }}>
                   {b.daysOpen === 0 ? 'today' : `${b.daysOpen}d open`}
                 </span>
