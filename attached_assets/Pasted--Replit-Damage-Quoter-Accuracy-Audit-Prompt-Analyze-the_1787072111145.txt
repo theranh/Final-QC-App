@@ -1,0 +1,79 @@
+# Replit Damage Quoter Accuracy Audit Prompt
+
+Analyze the damage quoter inside **TR Intake & QC-LIVE** as a read-only audit. Do **not modify any code yet**.
+
+My goal is to make the photo damage estimate as close as reasonably possible to a professional collision estimate from systems such as CCC, Mitchell, or Solera/Qapter.
+
+Review the entire damage-estimating pipeline, including:
+
+* AI photo analysis and the current Claude Sonnet 4.6 prompt
+* panel identification
+* damage-type classification
+* severity classification
+* repair-versus-replace decisions
+* PDR eligibility
+* paint/refinish decisions
+* blend recommendations
+* R&I operations
+* duplicate/same-panel handling
+* labor-hour tables
+* body, paint, and R&I rates
+* caps and minimums
+* pricing formulas
+* estimator correction/calibration history
+* confidence thresholds
+* wide-shot versus close-up photo use
+* possible hidden or secondary damage that cannot be directly seen in the photo
+
+I specifically want you to determine where our estimate is most likely to differ materially from a professional CCC/Mitchell-style collision estimate.
+
+Do not focus only on the AI model. Determine whether the bigger accuracy problem is likely coming from:
+
+1. visual damage recognition,
+2. severity determination,
+3. repair-versus-replace logic,
+4. labor-hour assumptions,
+5. refinish/paint calculations,
+6. R&I operations,
+7. parts and replacement pricing,
+8. ADAS/scanning/calibration operations,
+9. hidden-damage/supplement prediction,
+10. vehicle-specific differences,
+11. or another part of the estimating logic.
+
+For each significant weakness you find, explain:
+
+* what the system currently does,
+* why it could cause inaccurate estimates,
+* an example of the type of estimate error it could create,
+* whether the issue is likely to cause over-estimating or under-estimating,
+* how important the issue is,
+* and the best way to improve it.
+
+Pay particular attention to whether our current generic labor tables are too broad. For example, determine whether assigning hours based mainly on panel + severity is insufficient compared with vehicle-specific estimating data.
+
+Also evaluate whether we should add a separate **hidden-damage / supplement prediction layer**. The goal would be to estimate not only visible damage but also the probability of commonly associated concealed damage based on vehicle, impact location, severity, and historical estimator corrections.
+
+Review our existing estimator-correction history system and determine how it could be expanded so that the app learns from:
+
+AI classification → estimator correction → approved estimate → final actual repair cost.
+
+I eventually want the system to be able to produce:
+
+* visible-damage estimate,
+* likely supplement amount,
+* predicted final repair range,
+* confidence score,
+* and the reasons behind the range.
+
+Do not implement anything.
+
+At the end, give me a prioritized list of the **top 5 changes that would produce the largest real-world increase in estimate accuracy**, ordered by expected impact.
+
+For each of the top 5, label it:
+
+* QUICK WIN
+* MODERATE CHANGE
+* MAJOR CHANGE / EXTERNAL DATA REQUIRED
+
+Also tell me specifically whether integrating Mitchell, Solera/Qapter, CCC, or another professional data source would materially improve that part of our system, and what data we would need from them.
