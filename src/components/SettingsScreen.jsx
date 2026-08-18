@@ -62,7 +62,7 @@ const STATUS_META = {
   inactive: { label: 'DEACTIVATED', bg: 'var(--muted)' },
 };
 
-export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs, nextQc, onExportBackup, onImported, showToast }) {
+export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs, nextQc, onExportBackup, onImported, onArchived, showToast }) {
   const importRef = useRef(null);
   const [employees, setEmployees] = useState(null);
   const [empError, setEmpError] = useState(false);
@@ -166,6 +166,20 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       .then((r) => showToast(r.scanned === 0 ? 'Nothing to repair — all re-checks are complete ✓' : `Repaired ${r.rebuilt} re-check${r.rebuilt === 1 ? '' : 's'}, cleared ${r.cleared} ✓`))
       .catch((err) => showToast('Repair failed: ' + err.message))
       .finally(() => setRepairBusy(false));
+  };
+
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const runArchiveImported = () => {
+    if (archiveBusy) return;
+    setArchiveBusy(true);
+    api
+      .archiveImported()
+      .then((r) => {
+        showToast(r.archived === 0 ? 'Nothing to archive — all imported units are already archived ✓' : `Archived ${r.archived} imported unit${r.archived === 1 ? '' : 's'} ✓`);
+        if (r.archived > 0 && onArchived) onArchived();
+      })
+      .catch((err) => showToast('Archive failed: ' + err.message))
+      .finally(() => setArchiveBusy(false));
   };
 
   // ----- photo orientation repair -----
@@ -1000,6 +1014,22 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
               onClick={runRepair}
             >
               {repairBusy ? 'Repairing…' : '🔧 Repair migrated re-checks'}
+            </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">ARCHIVE IMPORTED (OLD APP) UNITS</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Marks every unit imported from the old app as archived. Archived units stay fully viewable in Records, but no longer count in any dashboard or report number (including the Blocked list). Safe to run more than once; individual units can be unarchived from their record page.
+            </div>
+            <div
+              className={'btn btn-brown' + (archiveBusy ? ' disabled' : '')}
+              style={{ marginTop: 9, height: 44, fontSize: 12, opacity: archiveBusy ? 0.6 : 1 }}
+              onClick={runArchiveImported}
+            >
+              {archiveBusy ? 'Archiving…' : '🗄 Archive imported units'}
             </div>
           </div>
         )}

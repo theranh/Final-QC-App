@@ -44,6 +44,7 @@ export default function RecordsList({ recs, q, onQ, fRes, onFRes, fFrom, onFFrom
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                 <span className="mono" style={{ fontSize: 10.5, fontWeight: 600 }}>{r.id}</span>
                 <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: sm.bg, padding: '2px 7px', borderRadius: 4 }}>{sm.label}</span>
+                {r.archived && <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--muted)', padding: '2px 7px', borderRadius: 4 }}>ARCHIVED</span>}
                 <span style={{ flex: 1 }} />
                 <span className="mono" style={{ fontSize: 9, color: 'var(--muted)' }}>{fmtDT(r.ts)}</span>
               </div>

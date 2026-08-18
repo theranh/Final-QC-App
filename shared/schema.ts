@@ -59,6 +59,9 @@ export const inspections = pgTable("inspections", {
   status: varchar("status").notNull(), // pass | open | cleared
   data: jsonb("data").notNull(), // full inspection payload (items, openItems, rechecks, photos, sig, ...)
   imported: boolean("imported").notNull().default(false),
+  // Archived records stay fully viewable but are excluded from every
+  // dashboard/report aggregation (KPIs, blocked list, throughput, etc).
+  archived: boolean("archived").notNull().default(false),
   createdById: varchar("created_by_id").notNull(),
   createdByEmail: varchar("created_by_email").notNull(),
   createdByName: varchar("created_by_name").notNull(),

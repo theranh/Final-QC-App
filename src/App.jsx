@@ -229,9 +229,13 @@ function AuthedApp({ me, onAuthRefresh }) {
     };
   }, [refreshDash]);
 
+  // Archived units stay viewable in Records but are excluded from every
+  // client-side report/export (CSV, PDF, period derivation) — mirrors server.
+  const activeRecs = useMemo(() => recs.filter((r) => !r.archived), [recs]);
+
   // Reports uses its own range so past months stay server-computed too.
   const [reportDash, setReportDash] = useState(null);
-  const periodObjForRange = useMemo(() => curPeriod(recs, period), [recs, period]);
+  const periodObjForRange = useMemo(() => curPeriod(activeRecs, period), [activeRecs, period]);
   useEffect(() => {
     if (tab !== 'reports') return;
     const isoDay = (ts) => {
@@ -454,9 +458,9 @@ function AuthedApp({ me, onAuthRefresh }) {
   };
 
   // ---------- reports ----------
-  const periodObj = useMemo(() => curPeriod(recs, period), [recs, period]);
+  const periodObj = useMemo(() => curPeriod(activeRecs, period), [activeRecs, period]);
   const onExportCsv = () => {
-    const ok = exportCsv(recs, periodObj);
+    const ok = exportCsv(activeRecs, periodObj);
     showToast(ok ? 'Excel (CSV) downloaded ✓' : 'No inspections in this period');
   };
   const onExportPdf = () => {
@@ -537,7 +541,7 @@ function AuthedApp({ me, onAuthRefresh }) {
   if (loadState === 'error') return <ErrorScreen onRetry={loadData} detail={loadError} />;
 
   if (printing) {
-    return <PrintReport recs={recs} period={period} onClose={() => setPrinting(false)} onPrint={() => window.print()} />;
+    return <PrintReport recs={activeRecs} period={period} onClose={() => setPrinting(false)} onPrint={() => window.print()} />;
   }
 
   const nextId = nextQc ? 'FQ-' + nextQc : 'FQ-…';
@@ -659,12 +663,28 @@ function AuthedApp({ me, onAuthRefresh }) {
   } else if (tab === 'records') {
     const record = viewRec ? recs.find((r) => r.id === viewRec) : null;
     content = record ? (
-      <RecordDetail record={record} onBack={() => setViewRec(null)} onStartRecheck={openRecheck} onOpenLightbox={setLightbox} />
+      <RecordDetail
+        record={record}
+        onBack={() => setViewRec(null)}
+        onStartRecheck={openRecheck}
+        onOpenLightbox={setLightbox}
+        isAdmin={!!me?.isAdmin}
+        onToggleArchive={(qc, archived) =>
+          api
+            .setArchived(qc, archived)
+            .then(() => {
+              setRecs((prev) => prev.map((x) => (x.id === qc ? { ...x, archived } : x)));
+              showToast(archived ? 'Archived — hidden from dashboard & reports' : 'Unarchived — counting again');
+              refreshDash();
+            })
+            .catch((err) => showToast(err.message))
+        }
+      />
     ) : (
       <RecordsList recs={recs} q={q} onQ={setQ} fRes={fRes} onFRes={setFRes} fFrom={fFrom} onFFrom={setFFrom} fTo={fTo} onFTo={setFTo} onOpenRecord={setViewRec} />
     );
   } else if (tab === 'reports') {
-    content = <ReportsScreen recs={recs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} dash={reportDash} onOpenVehicle={openVehicle} />;
+    content = <ReportsScreen recs={activeRecs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} dash={reportDash} onOpenVehicle={openVehicle} />;
   } else if (tab === 'settings') {
     content = (
       <SettingsScreen
@@ -675,6 +695,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         nextQc={nextQc || 1001}
         onExportBackup={onExportBackup}
         onImported={loadData}
+        onArchived={() => { refreshData(); refreshDash(); }}
         showToast={showToast}
       />
     );

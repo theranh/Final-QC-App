@@ -40,6 +40,7 @@ function toClientRecord(row: Inspection) {
     result: row.result,
     status: row.status,
     imported: row.imported,
+    archived: row.archived,
     createdBy: { id: row.createdById, email: row.createdByEmail, name: row.createdByName },
     createdAt: row.createdAt.getTime(),
     updatedBy: { id: row.updatedById, email: row.updatedByEmail, name: row.updatedByName },
@@ -1142,6 +1143,63 @@ export function registerAppRoutes(app: Express) {
       }
       if (rows.length) invalidateDashboardCache();
       res.json({ scanned: rows.length, rebuilt, cleared });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- admin: archive units imported from the old app ----------
+  // Archived inspections stay fully viewable (bootstrap/records) but are
+  // excluded from every dashboard and report aggregation. Idempotent.
+  app.post("/api/admin/archive-imported", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const updated = await db
+        .update(inspections)
+        .set({
+          archived: true,
+          updatedById: emp.userId || String(emp.id),
+          updatedByEmail: emp.email,
+          updatedByName: emp.name,
+          updatedAt: new Date(),
+        })
+        .where(sql`imported = true AND archived = false`)
+        .returning({ qcNumber: inspections.qcNumber });
+      if (updated.length) {
+        await audit(db, emp, "archived_imported", { details: { count: updated.length } });
+        invalidateDashboardCache();
+      }
+      res.json({ archived: updated.length });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- admin: archive/unarchive a single inspection ----------
+  app.post("/api/admin/archive", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const qcNumber = String(req.body?.qcNumber || "").trim();
+      const archived = req.body?.archived === true;
+      if (!qcNumber) return res.status(400).json({ message: "qcNumber required" });
+      const updated = await db
+        .update(inspections)
+        .set({
+          archived,
+          updatedById: emp.userId || String(emp.id),
+          updatedByEmail: emp.email,
+          updatedByName: emp.name,
+          updatedAt: new Date(),
+        })
+        .where(eq(inspections.qcNumber, qcNumber))
+        .returning({ id: inspections.id, qcNumber: inspections.qcNumber });
+      if (!updated.length) return res.status(404).json({ message: "Not found" });
+      await audit(db, emp, archived ? "archived" : "unarchived", {
+        inspectionId: updated[0].id,
+        qcNumber,
+      });
+      invalidateDashboardCache();
+      res.json({ qcNumber, archived });
     } catch (err) {
       next(err);
     }

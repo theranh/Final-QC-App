@@ -37,8 +37,10 @@ const payloadCache = new Map<string, { at: number; body: unknown }>();
 
 /** Drop composed payloads after an inspection commit, so a just-inspected
  *  vehicle never lingers in the "awaiting Final QC" list for the cache TTL. */
+let cacheGen = 0;
 export function invalidateDashboardCache() {
   payloadCache.clear();
+  cacheGen += 1; // in-flight builds started before this must not repopulate the cache
 }
 const payloadInFlight = new Map<string, Promise<unknown>>();
 let sheetCache: { at: number; body: SheetData | null } | null = null;
@@ -75,6 +77,7 @@ type LiteRow = {
   clearedTs: number | null;
   openItems: { cat: string; item: string; note: string }[];
   failItems: { cat: string; item: string }[];
+  archived: boolean;
 };
 
 // ---------- helpers ----------
@@ -323,7 +326,7 @@ async function fetchSheetData(): Promise<SheetData | null> {
 async function fetchLiteRows(): Promise<LiteRow[]> {
   const res = await db.execute(sql`
     SELECT
-      qc_number, stock, vehicle, vin, result, status,
+      qc_number, stock, vehicle, vin, result, status, archived,
       data->>'inspector' AS inspector,
       data->>'title' AS title,
       data->>'ts' AS ts,
@@ -355,18 +358,22 @@ async function fetchLiteRows(): Promise<LiteRow[]> {
     clearedTs: num(r.cleared_ts),
     openItems: (typeof r.open_items === "string" ? JSON.parse(r.open_items) : r.open_items) || [],
     failItems: (typeof r.fail_items === "string" ? JSON.parse(r.fail_items) : r.fail_items) || [],
+    archived: r.archived === true || r.archived === "t",
   }));
 }
 
 // ---------- payload assembly ----------
 
 export async function buildPayload(from: string, to: string): Promise<unknown> {
-  const [rows, stats, sheet, completedIntakes] = await Promise.all([
+  const [allRows, stats, sheet, completedIntakes] = await Promise.all([
     fetchLiteRows(),
     fetchIntakeStats(from, to),
     fetchSheetData(),
     fetchCompletedIntakes(),
   ]);
+  // Archived records (e.g. units imported from the old app) are excluded from
+  // every dashboard/report aggregation but stay viewable in the records list.
+  const rows = allRows.filter((r) => !r.archived);
 
   const trackerByVin = sheet?.byVin ?? new Map<string, TrackerRow>();
   const quotes = await fetchQuotes(rows.map((r) => r.vin));
@@ -441,9 +448,10 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // ----- daily: finalQcs from audit_log, intakes from local intakes table -----
   const qcByDay = await db.execute(sql`
     SELECT to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
-    FROM audit_log
+    FROM audit_log a
     WHERE action IN ('created', 'recheck_committed')
       AND to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') BETWEEN ${from} AND ${to}
+      AND NOT EXISTS (SELECT 1 FROM inspections i WHERE i.qc_number = a.qc_number AND i.archived)
     GROUP BY 1
   `);
   const qcDayMap = new Map<string, number>();
@@ -463,9 +471,10 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     fetchIntakeStats(d7from, today),
     db.execute(sql`
       SELECT to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
-      FROM audit_log
+      FROM audit_log a
       WHERE action IN ('created', 'recheck_committed')
         AND to_char(at AT TIME ZONE ${TZ}, 'YYYY-MM-DD') BETWEEN ${d7from} AND ${today}
+        AND NOT EXISTS (SELECT 1 FROM inspections i WHERE i.qc_number = a.qc_number AND i.archived)
       GROUP BY 1
     `),
   ]);
@@ -489,7 +498,9 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // ----- awaiting Final QC: completed intake, no inspection yet -----
   // A plain join now that intakes are local: every completed intake whose VIN
   // has no inspection row (VINs already normalized trim/upper on both sides).
-  const inspectedVins = new Set(rows.map((r) => r.vin));
+  // Archived inspections still count as "inspected" here — otherwise an
+  // archived unit's completed intake would resurface as Awaiting Final QC.
+  const inspectedVins = new Set(allRows.map((r) => r.vin));
   // One card per VIN: prefer a committed intake over an in-progress one; the
   // source list is newest-activity-first, so the first match per VIN wins.
   const byVin = new Map<string, (typeof completedIntakes)[number]>();
@@ -579,8 +590,9 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // ----- recent activity (QC commits; intake events live only in the quoter) -----
   const auditRes = await db.execute(sql`
     SELECT qc_number, action, actor_name, extract(epoch from at) * 1000 AS at_ms
-    FROM audit_log
+    FROM audit_log a
     WHERE action IN ('created', 'recheck_committed')
+      AND NOT EXISTS (SELECT 1 FROM inspections i WHERE i.qc_number = a.qc_number AND i.archived)
     ORDER BY at DESC
     LIMIT 30
   `);
@@ -599,8 +611,9 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   // ----- throughput per week (last 8 weeks, Monday start) -----
   const weeklyRes = await db.execute(sql`
     SELECT to_char(date_trunc('week', at AT TIME ZONE ${TZ}), 'YYYY-MM-DD') AS week, COUNT(*)::int AS n
-    FROM audit_log
+    FROM audit_log a
     WHERE action IN ('created', 'recheck_committed') AND at > now() - interval '8 weeks'
+      AND NOT EXISTS (SELECT 1 FROM inspections i WHERE i.qc_number = a.qc_number AND i.archived)
     GROUP BY 1 ORDER BY 1
   `);
   const weekly = (((weeklyRes as any).rows ?? weeklyRes) as any[]).map((r) => ({
@@ -661,6 +674,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
       SELECT result, COUNT(*)::int AS n
       FROM inspections
       WHERE created_at AT TIME ZONE ${TZ} >= date_trunc('week', now() AT TIME ZONE ${TZ})
+        AND NOT archived
       GROUP BY result
     `),
     db.execute(sql`
@@ -729,9 +743,12 @@ export function registerDashboardRoute(app: Express) {
       // Single-flight per range so a burst of polls builds the payload once.
       let inflight = payloadInFlight.get(key);
       if (!inflight) {
+        const genAtStart = cacheGen;
         inflight = buildPayload(from, to)
           .then((body) => {
-            payloadCache.set(key, { at: Date.now(), body });
+            // Only cache if nothing invalidated the cache while we were building;
+            // otherwise this snapshot is pre-invalidation and must not be reused.
+            if (genAtStart === cacheGen) payloadCache.set(key, { at: Date.now(), body });
             if (payloadCache.size > 20) payloadCache.delete(payloadCache.keys().next().value as string);
             return body;
           })

@@ -2,7 +2,7 @@ import { CATS, catByKey, chipStyle } from '../lib/constants';
 import { fmtDT } from '../lib/format';
 import { statusMeta } from '../lib/records';
 
-export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpenLightbox }) {
+export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpenLightbox, isAdmin = false, onToggleArchive = null }) {
   const sm = statusMeta(r);
   const catRows = CATS.map((c) => {
     const arr = r.items[c.k] || [];
@@ -51,7 +51,7 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
     { k: 'VIN — PRIMARY ID', v: r.vin || '—' },
     { k: 'STOCK #', v: r.stock },
     { k: 'VEHICLE', v: r.vehicle },
-    { k: 'STATUS', v: sm.txt },
+    { k: 'STATUS', v: r.archived ? `${sm.txt} · ARCHIVED` : sm.txt },
     { k: 'INSPECTOR', v: `${r.inspector} — ${r.title}` },
     { k: 'ITEMS CHECKED', v: String(r.checked) },
   ];
@@ -177,6 +177,24 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
             {rk.hasSig && <div style={{ width: '100%', maxWidth: 260, height: 70, marginTop: 9, border: '1px solid var(--border2)', borderRadius: 8, background: `#FDFCFB url('${rk.sigSrc}') no-repeat left center`, backgroundSize: 'contain' }} />}
           </div>
         ))}
+
+        {isAdmin && onToggleArchive && (
+          <div className="card">
+            <div className="card-title">{r.archived ? 'ARCHIVED UNIT' : 'ARCHIVE THIS UNIT'}</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              {r.archived
+                ? 'This unit is excluded from every dashboard and report number. Its data stays fully viewable here.'
+                : 'Archiving keeps this record fully viewable but removes it from every dashboard and report number.'}
+            </div>
+            <div
+              className="btn btn-brown"
+              style={{ marginTop: 9, height: 44, fontSize: 12 }}
+              onClick={() => onToggleArchive(r.id, !r.archived)}
+            >
+              {r.archived ? '↩ Unarchive — count it again' : '🗄 Archive — hide from dashboard & reports'}
+            </div>
+          </div>
+        )}
 
         {r.sig && (
           <div className="card">
