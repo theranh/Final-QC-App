@@ -168,6 +168,19 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
       .finally(() => setRepairBusy(false));
   };
 
+  // Phase 1A — read-only pricing-accuracy report (observation only).
+  const [accBusy, setAccBusy] = useState(false);
+  const [accReport, setAccReport] = useState(null);
+  const loadAccuracy = () => {
+    if (accBusy) return;
+    setAccBusy(true);
+    api
+      .accuracyReport()
+      .then((r) => setAccReport(r))
+      .catch((err) => showToast('Report failed: ' + err.message))
+      .finally(() => setAccBusy(false));
+  };
+
   const [archiveBusy, setArchiveBusy] = useState(false);
   const runArchiveImported = () => {
     if (archiveBusy) return;
@@ -1030,6 +1043,49 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
               onClick={runArchiveImported}
             >
               {archiveBusy ? 'Archiving…' : '🗄 Archive imported units'}
+            </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">QUOTE PRICING ACCURACY (DATA COLLECTION)</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Every PIN-committed quote is snapshotted, and lines where the estimator changed the calculated hours are logged. Read-only — nothing here changes pricing.
+            </div>
+            {accReport && (
+              <div style={{ marginTop: 9, fontSize: 10.5, color: 'var(--brown)', lineHeight: 1.6 }}>
+                <div>Committed quotes: <b>{accReport.committedQuotes}</b> · Billable lines: <b>{accReport.billableLines}</b></div>
+                <div>Overridden lines: <b>{accReport.overriddenLines}</b> ({accReport.overrideRate}%)</div>
+                <div>Calculated total: <b>${accReport.calcUsdTotal.toLocaleString()}</b> · Approved total: <b>${accReport.finalUsdTotal.toLocaleString()}</b></div>
+                {(accReport.byPanel || []).length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ fontSize: 9, color: 'var(--muted)' }}>MOST-CORRECTED PANELS</div>
+                    {accReport.byPanel.slice(0, 6).map((p) => (
+                      <div key={p.panel}>
+                        {String(p.panel).replace(/_/g, ' ')}: {p.n}× · body {Number(p.avg_calc_b).toFixed(1)}h → {Number(p.avg_final_b).toFixed(1)}h · avg {p.avg_usd_delta >= 0 ? '+' : '−'}${Math.abs(Math.round(p.avg_usd_delta))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(accReport.bySeverity || []).length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ fontSize: 9, color: 'var(--muted)' }}>BY SEVERITY</div>
+                    {accReport.bySeverity.map((s) => (
+                      <div key={s.severity}>
+                        {s.severity}: {s.n}× · body {Number(s.avg_calc_b).toFixed(1)}h → {Number(s.avg_final_b).toFixed(1)}h · avg {s.avg_usd_delta >= 0 ? '+' : '−'}${Math.abs(Math.round(s.avg_usd_delta))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <div
+              className={'btn btn-brown' + (accBusy ? ' disabled' : '')}
+              style={{ marginTop: 9, height: 44, fontSize: 12, opacity: accBusy ? 0.6 : 1 }}
+              onClick={loadAccuracy}
+            >
+              {accBusy ? 'Loading…' : accReport ? '↻ Refresh accuracy report' : '📊 Load accuracy report'}
             </div>
           </div>
         )}

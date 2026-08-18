@@ -13,6 +13,7 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -161,6 +162,106 @@ export const intakes = pgTable(
     overriddenBy: text("overridden_by"), // supervisor countersign; null on normal sign-off
   },
   (t) => [index("intakes_vin_idx").on(t.vin)],
+);
+
+// ---------------------------------------------------------------------------
+// Phase 1A — pricing feedback capture (observation only, no pricing changes).
+// ---------------------------------------------------------------------------
+
+// Immutable snapshot of a damage quote exactly as approved at PIN commit.
+// One row per committed version; content_hash makes retries idempotent and
+// lets a future re-commit of changed content create a NEW version instead of
+// overwriting history. No API route updates or deletes rows here.
+export const quoteSnapshots = pgTable(
+  "quote_snapshots",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    quoteId: text("quote_id").notNull(),
+    intakeId: text("intake_id"), // null when committed via the legacy quote path
+    vin: text("vin").notNull().default(""),
+    stock: text("stock").notNull().default(""),
+    vehicle: text("vehicle").notNull().default(""), // display string
+    veh: jsonb("veh"), // decoded {year,make,model,trim,body} when available
+    estimator: text("estimator").notNull().default(""),
+    committedBy: text("committed_by").notNull(),
+    overriddenBy: text("overridden_by"),
+    // Exact quote document as approved (lines + cls + overrides + totals).
+    doc: jsonb("doc").notNull(),
+    // Rate tables in force at commit time (merged defaults + saved settings).
+    rates: jsonb("rates").notNull(),
+    ratesSource: text("rates_source").notNull().default("default"), // default | settings
+    // Server-recomputed engine breakdown: per-line calculated vs approved
+    // hours/dollars plus quote-level totals for both.
+    engine: jsonb("engine").notNull(),
+    linesTotal: integer("lines_total").notNull().default(0), // billable lines
+    linesOverridden: integer("lines_overridden").notNull().default(0),
+    calcUsd: numeric("calc_usd").notNull().default("0"), // engine (no overrides)
+    finalUsd: numeric("final_usd").notNull().default("0"), // approved
+    contentHash: text("content_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("quote_snapshots_version_idx").on(t.quoteId, t.contentHash),
+    index("quote_snapshots_vin_idx").on(t.vin),
+  ],
+);
+
+// One row per committed line whose estimator-approved pricing differs from
+// the deterministic engine's calculation. Ground truth for future rate tuning.
+export const pricingCorrections = pgTable(
+  "pricing_corrections",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    snapshotId: bigint("snapshot_id", { mode: "number" }).notNull(),
+    quoteId: text("quote_id").notNull(),
+    intakeId: text("intake_id"),
+    lineId: text("line_id").notNull(),
+    vin: text("vin").notNull().default(""),
+    estimator: text("estimator").notNull().default(""),
+    committedBy: text("committed_by").notNull().default(""),
+    veh: jsonb("veh"),
+    panel: text("panel").notNull().default("unknown"),
+    damageType: text("damage_type").notNull().default(""),
+    severity: text("severity").notNull().default(""),
+    aiCls: jsonb("ai_cls"), // full classification incl. overrides as committed
+    overrideReason: text("override_reason"), // none captured yet; reserved
+    calcB: numeric("calc_b").notNull().default("0"),
+    calcP: numeric("calc_p").notNull().default("0"),
+    calcRi: numeric("calc_ri").notNull().default("0"),
+    calcUsd: numeric("calc_usd").notNull().default("0"),
+    finalB: numeric("final_b").notNull().default("0"),
+    finalP: numeric("final_p").notNull().default("0"),
+    finalRi: numeric("final_ri").notNull().default("0"),
+    finalUsd: numeric("final_usd").notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("pricing_corrections_line_idx").on(t.snapshotId, t.lineId),
+    index("pricing_corrections_panel_idx").on(t.panel),
+  ],
+);
+
+// Actual repair outcomes, linked to a committed snapshot. Populated later
+// from the recon/repair workflow — nothing in normal estimating writes here.
+export const repairActuals = pgTable(
+  "repair_actuals",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    snapshotId: bigint("snapshot_id", { mode: "number" }),
+    quoteId: text("quote_id"),
+    vin: text("vin").notNull().default(""),
+    actualBodyHours: numeric("actual_body_hours"),
+    actualPaintHours: numeric("actual_paint_hours"),
+    actualRiHours: numeric("actual_ri_hours"),
+    actualPartsUsd: numeric("actual_parts_usd"),
+    actualTotalUsd: numeric("actual_total_usd"),
+    supplementUsd: numeric("supplement_usd"),
+    hiddenDamageNotes: text("hidden_damage_notes"),
+    completedOn: timestamp("completed_on", { withTimezone: true }),
+    source: text("source").notNull().default("manual"), // manual | tracker | api
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("repair_actuals_vin_idx").on(t.vin)],
 );
 
 // Frozen monthly snapshots of the VPC Production Tracker sheet. Closed months

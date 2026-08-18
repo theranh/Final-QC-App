@@ -11,4 +11,5 @@
 - [Migrated re-checks](migrated-rechecks.md) — imported open inspections lacked openItems; admin repair button rebuilds them; 401s in a stale PWA now force the sign-in screen via auth:expired event.
 - [Photo upload queue](photo-upload-queue.md) — queue records keyed per capture, not per slot, or a slow upload's cleanup deletes a retake; 401 is transient, only 413/409/403 drop.
 - [Photo delete durability](photo-delete-durability.md) — offline deletes persist in IDB pendingDeletes and retry via flushQueue; EXIF parser lives only in photoExif.ts; corrections dedupe via unique index, not SELECT-then-INSERT.
+- [Phase 1A pricing capture](phase1a-pricing-capture.md) — commit-blocking snapshots at PIN commit; per-line math must use the full billing pipeline; observation only until user approves 1B.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

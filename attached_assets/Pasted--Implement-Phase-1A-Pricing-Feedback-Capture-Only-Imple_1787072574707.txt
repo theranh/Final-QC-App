@@ -1,0 +1,149 @@
+# Implement Phase 1A — Pricing Feedback Capture Only
+
+Implement only the first data-collection phase of the Damage Quoter Accuracy Upgrade in **TR Intake & QC-LIVE**.
+
+Do not implement the new labor engine, AI schema changes, parts pricing, supplement prediction, ADAS logic, or wide-shot gating yet.
+
+The purpose of this release is to begin collecting reliable ground-truth pricing data without changing any current quote behavior.
+
+## 1. Capture committed quote snapshots
+
+Whenever a damage quote is finalized/committed through the existing estimator PIN workflow, store an immutable snapshot representing exactly what was approved at that moment.
+
+The snapshot should contain enough information to reconstruct and analyze the approved estimate later, including:
+
+* QC number
+* VIN
+* vehicle year/make/model/trim when available
+* estimator
+* timestamp
+* all damage lines
+* AI classification associated with each line
+* original calculated body hours
+* original calculated paint hours
+* original calculated R&I hours
+* any estimator-overridden hours
+* rates used
+* quote totals
+* current rate-table/version information
+* relevant photo/image identifiers if available
+
+Do not allow later edits to overwrite the committed historical snapshot.
+
+If the quote is later recommitted, preserve the earlier committed version and create another version/snapshot rather than destroying the previous history.
+
+## 2. Capture pricing corrections
+
+Create a permanent pricing-correction record whenever the estimator-approved result differs from the deterministic pricing engine result.
+
+Capture at minimum:
+
+* QC number
+* VIN
+* committed quote/snapshot ID
+* damage line ID
+* estimator
+* timestamp
+* vehicle year/make/model/trim
+* panel
+* damage type
+* severity
+* current AI classification
+* calculated body hours
+* calculated paint hours
+* calculated R&I hours
+* calculated dollars
+* estimator-approved body hours
+* estimator-approved paint hours
+* estimator-approved R&I hours
+* estimator-approved dollars
+* differences between calculated and approved values
+
+Capture any existing estimator override reason if one already exists.
+
+Do not require new mandatory input from estimators in this release.
+
+## 3. Reliability requirement
+
+Do NOT use a best-effort or fire-and-forget database write for this information.
+
+This dataset will become the ground truth used to improve future estimating accuracy, so silent loss of records is unacceptable.
+
+Save the committed snapshot and correction information reliably as part of the commit process, or use another durable approach that guarantees the information can be retried/recovered if a write fails.
+
+Do not mark the historical-data portion of the commit successful if the required snapshot cannot be persisted.
+
+Handle duplicate/repeated commit requests idempotently so retries cannot accidentally create duplicate records for the exact same committed version.
+
+## 4. Preserve current production behavior
+
+This release must NOT change:
+
+* Claude model or prompt
+* AI classifications
+* repair-versus-replace behavior
+* existing labor-hour tables
+* current rates
+* pricing calculations
+* current quote totals
+* current inspector workflow
+* Tracker sync behavior
+* existing saved quotes
+
+The same quote entered before and after this release must calculate to exactly the same dollar amount.
+
+## 5. Prepare for actual repair outcomes
+
+Create the minimal database structure necessary to later connect a committed quote snapshot with actual repair results.
+
+Do not add these fields to the estimator's normal workflow yet.
+
+Future records should eventually support:
+
+* actual body hours
+* actual paint hours
+* actual R&I hours if available
+* actual parts dollars
+* actual total repair dollars
+* supplement/additional repair dollars
+* notes about previously hidden damage
+* completion date
+* source of actual data
+
+For now, only create the linkage/schema necessary so this data can be added later.
+
+## 6. Basic internal accuracy report
+
+If it can be added without changing the quoting workflow, add a simple internal/read-only report showing accumulated pricing-correction data.
+
+Useful metrics:
+
+* number of committed quotes
+* number/percentage of lines overridden
+* average calculated vs approved body hours
+* average difference by panel
+* average difference by severity
+* panels with the highest override frequency
+* calculated vs approved dollar difference
+
+Do not automatically change pricing tables based on this report.
+
+This release is observation only.
+
+## 7. Verification before completion
+
+Before considering this phase complete, verify that:
+
+1. Existing quote calculations are unchanged.
+2. Existing saved quotes still load normally.
+3. Commit still works normally.
+4. A committed quote produces an immutable snapshot.
+5. An overridden line produces a pricing-correction record.
+6. An unchanged line does not incorrectly appear as an override.
+7. Repeating the same commit cannot create accidental duplicate history.
+8. Later edits cannot overwrite an earlier committed snapshot.
+9. Existing Tracker synchronization remains unchanged.
+
+After implementation, give me a concise description of what was added and how I can verify that the new records are actually being captured.
+
+Do not proceed to Phase 1B or change the estimating calculations without my approval.

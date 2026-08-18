@@ -27,6 +27,8 @@ const H = vi.hoisted(() => {
   const intakeRows: any[] = [];
   const quoteRows: any[] = [];
   const audits: any[] = [];
+  const snapRows: any[] = []; // quote_snapshots (Phase 1A)
+  const corrRows: any[] = []; // pricing_corrections (Phase 1A)
 
   const sqlParts = (q: any): { text: string; params: any[] } => {
     const chunks: any[] = q?.queryChunks ?? [];
@@ -54,11 +56,39 @@ const H = vi.hoisted(() => {
     return { text, params };
   };
 
+  // Lazy thenable: the insert only runs when the FINAL link in the chain is
+  // awaited, so `.values().onConflictDoNothing().returning()` inserts once.
+  const lazy = (fn: () => any) => ({
+    then: (res: any, rej: any) => Promise.resolve().then(fn).then(res, rej),
+  });
+
   const makeInsert = () => (_table: any) => {
     const chain: any = {
       _setWhere: undefined as any,
       values: (v: any) => {
         chain._values = v;
+        // Phase 1A rows are recognized by shape (schema tables aren't
+        // imported here): snapshots carry contentHash, corrections lineId.
+        if (v.contentHash !== undefined || (v.snapshotId !== undefined && v.lineId !== undefined)) {
+          const doInsert = () => {
+            if (v.contentHash !== undefined) {
+              if (snapRows.some((r) => r.quoteId === v.quoteId && r.contentHash === v.contentHash)) return [];
+              const row = { id: snapRows.length + 1, ...v };
+              snapRows.push(row);
+              return [{ id: row.id }];
+            }
+            if (corrRows.some((r) => r.snapshotId === v.snapshotId && r.lineId === v.lineId)) return [];
+            corrRows.push(v);
+            return [];
+          };
+          const q: any = lazy(doInsert);
+          q.onConflictDoNothing = () => {
+            const r: any = lazy(doInsert);
+            r.returning = () => lazy(doInsert);
+            return r;
+          };
+          return q;
+        }
         // Audit-log inserts are terminal (awaited directly).
         const p: any = Promise.resolve().then(() => {
           audits.push(v);
@@ -90,10 +120,28 @@ const H = vi.hoisted(() => {
 
   const fakeDb: any = {
     insert: makeInsert(),
+    // Raw SQL used by the Phase 1A snapshot path: the rates settings lookup
+    // (no saved rates → defaults) and the FOR UPDATE quote read inside the
+    // intake-commit transaction.
+    execute: async (q: any) => {
+      const { text, params } = sqlParts(q);
+      // (Table objects contribute no literal text in sqlParts, so match on
+      // the FOR UPDATE marker — only the quote read uses it.)
+      if (/for update/i.test(text)) {
+        const row = quoteRows.find((r) => r.id === params[0]);
+        return {
+          rows: row
+            ? [{ id: row.id, data: row.data, committed_by: row.committedBy, overridden_by: row.overriddenBy }]
+            : [],
+        };
+      }
+      return { rows: [] };
+    },
     transaction: async (fn: any) => {
       const tx = {
         insert: makeInsert(),
         update: (_table: any) => fakeDb.update(_table),
+        execute: fakeDb.execute,
       };
       return fn(tx);
     },
@@ -155,10 +203,10 @@ const H = vi.hoisted(() => {
       },
     }),
   };
-  return { emps, intakeRows, quoteRows, audits, fakeDb };
+  return { emps, intakeRows, quoteRows, audits, snapRows, corrRows, fakeDb };
 });
 
-const { emps, intakeRows, quoteRows, audits } = H;
+const { emps, intakeRows, quoteRows, audits, snapRows, corrRows } = H;
 
 describe("PIN hashing", () => {
   it("round-trips a correct PIN and rejects a wrong one", async () => {
@@ -294,6 +342,125 @@ describe("commit endpoints", () => {
     // The audit INSERT ran inside db.transaction alongside the UPDATE.
     expect(audits.length).toBe(before + 1);
     expect(audits[audits.length - 1].action).toBe("quote_committed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1A — commit snapshots + pricing corrections
+// ---------------------------------------------------------------------------
+describe("commit snapshots (Phase 1A)", () => {
+  const line = (id: string, cls: any) => ({ id, status: "done", review: false, cls });
+
+  it("a committed quote produces an immutable snapshot row", async () => {
+    const before = snapRows.length;
+    quoteRows.push({
+      id: "qsnap",
+      data: {
+        vin: "SNAPVIN",
+        estimator: "Worker",
+        lines: [line("L1", { panel: "hood", damage_type: "dent", severity: "moderate", paint_damaged: false })],
+        totals: { hrs: 2.5, usd: 188, B: 2.5, P: 0, RI: 0, usdPDR: 0 },
+      },
+      committedBy: null,
+      overriddenBy: null,
+    });
+    const r = await post("/api/quoter/commit-quote", { id: "qsnap", signerId: 1, pin: "1111" });
+    expect(r.status).toBe(200);
+    expect(snapRows.length).toBe(before + 1);
+    const snap = snapRows[snapRows.length - 1];
+    expect(snap.quoteId).toBe("qsnap");
+    expect(snap.vin).toBe("SNAPVIN");
+    expect(snap.committedBy).toBe("Worker");
+    expect(snap.linesTotal).toBe(1);
+    // Engine recomputation matches the client's math for an untouched line.
+    expect(snap.linesOverridden).toBe(0);
+    expect(snap.engine.finalTotals.usd).toBe(188); // 2.5h × $75 body = 187.5 → 188
+  });
+
+  it("an unchanged line does NOT create a pricing correction", () => {
+    expect(corrRows.filter((c) => c.quoteId === "qsnap").length).toBe(0);
+  });
+
+  it("an overridden line creates a pricing-correction record", async () => {
+    quoteRows.push({
+      id: "qover",
+      data: {
+        vin: "OVERVIN",
+        estimator: "Worker",
+        lines: [
+          line("L1", { panel: "hood", damage_type: "dent", severity: "moderate", paint_damaged: false, b_override: "5" }),
+          line("L2", { panel: "tailgate", damage_type: "scratch", severity: "minor", paint_damaged: true }),
+        ],
+      },
+      committedBy: null,
+      overriddenBy: null,
+    });
+    const r = await post("/api/quoter/commit-quote", { id: "qover", signerId: 1, pin: "1111" });
+    expect(r.status).toBe(200);
+    const snap = snapRows.find((s) => s.quoteId === "qover");
+    expect(snap.linesTotal).toBe(2);
+    expect(snap.linesOverridden).toBe(1);
+    const corrs = corrRows.filter((c) => c.quoteId === "qover");
+    expect(corrs.length).toBe(1); // only the overridden line, not the clean one
+    expect(corrs[0].lineId).toBe("L1");
+    expect(corrs[0].panel).toBe("hood");
+    expect(Number(corrs[0].calcB)).toBe(2.5); // engine's answer
+    expect(Number(corrs[0].finalB)).toBe(5); // estimator's override
+  });
+
+  it("re-running the same snapshot content is idempotent (no duplicates)", async () => {
+    const { captureCommitSnapshot } = await import("./quoteSnapshot");
+    const row = quoteRows.find((q) => q.id === "qover");
+    const before = { snaps: snapRows.length, corrs: corrRows.length };
+    // Same content, second attempt (e.g. a retried request) — nothing new.
+    await captureCommitSnapshot(H.fakeDb, {
+      quoteRow: row,
+      intakeId: null,
+      committedBy: "Worker",
+      overriddenBy: null,
+    });
+    expect(snapRows.length).toBe(before.snaps);
+    expect(corrRows.length).toBe(before.corrs);
+  });
+
+  it("changed content creates a NEW version instead of overwriting history", async () => {
+    const { captureCommitSnapshot } = await import("./quoteSnapshot");
+    const row = quoteRows.find((q) => q.id === "qover");
+    const firstSnap = snapRows.find((s) => s.quoteId === "qover");
+    const edited = { ...row, data: { ...(row.data as any), notes: "supplement found" } };
+    await captureCommitSnapshot(H.fakeDb, {
+      quoteRow: edited as any,
+      intakeId: null,
+      committedBy: "Worker",
+      overriddenBy: null,
+    });
+    const versions = snapRows.filter((s) => s.quoteId === "qover");
+    expect(versions.length).toBe(2);
+    // The original committed version is untouched.
+    expect(snapRows.find((s) => s.id === firstSnap.id).doc.notes).toBeUndefined();
+  });
+
+  it("commit-intake snapshots the LINKED quote", async () => {
+    quoteRows.push({
+      id: "qlinked",
+      data: { vin: "LINKVIN", lines: [] },
+      committedBy: null,
+      overriddenBy: null,
+    });
+    intakeRows.push({ id: "insnap", vin: "LINKVIN", stock: "S9", quoteId: "qlinked", data: {}, committedBy: null, overriddenBy: null });
+    const r = await post("/api/quoter/commit-intake", { id: "insnap", signerId: 1, pin: "1111" });
+    expect(r.status).toBe(200);
+    const snap = snapRows.find((s) => s.quoteId === "qlinked");
+    expect(snap).toBeTruthy();
+    expect(snap.intakeId).toBe("insnap");
+  });
+
+  it("commit-intake without a linked quote commits fine with no snapshot", async () => {
+    intakeRows.push({ id: "innoq", vin: "NOQ", stock: "S10", quoteId: null, data: {}, committedBy: null, overriddenBy: null });
+    const before = snapRows.length;
+    const r = await post("/api/quoter/commit-intake", { id: "innoq", signerId: 1, pin: "1111" });
+    expect(r.status).toBe(200);
+    expect(snapRows.length).toBe(before);
   });
 });
 

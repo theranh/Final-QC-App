@@ -8,6 +8,7 @@ import { requireEmployee } from "./access";
 import { invalidateDashboardCache } from "./dashboard";
 import { and } from "drizzle-orm";
 import { auditLog, employees, quotes, intakes, type Employee } from "@shared/schema";
+import { captureCommitSnapshot } from "./quoteSnapshot";
 
 // ---------------------------------------------------------------------------
 // PIN sign-off for Body Quoter commits.
@@ -241,6 +242,25 @@ export function registerPinRoutes(app: Express) {
           committedBy: sig.committedBy,
           overriddenBy: sig.overriddenBy,
         });
+        // Phase 1A: snapshot the linked quote in the SAME transaction — a
+        // failed snapshot rolls the commit back (never fire-and-forget).
+        // The quote is read HERE, under FOR UPDATE, so a concurrent autosave
+        // can neither change the document mid-commit nor leave the snapshot
+        // stale relative to what was approved.
+        if (row.quoteId) {
+          const qr = await tx.execute(
+            sql`SELECT id, data, committed_by, overridden_by FROM ${quotes} WHERE id = ${row.quoteId} FOR UPDATE`,
+          );
+          const q = qr.rows?.[0] as any;
+          if (q) {
+            await captureCommitSnapshot(tx, {
+              quoteRow: { id: q.id, data: q.data, committedBy: q.committed_by, overriddenBy: q.overridden_by, updatedAt: null } as any,
+              intakeId: id,
+              committedBy: sig.committedBy,
+              overriddenBy: sig.overriddenBy,
+            });
+          }
+        }
         return true;
       });
       if (!committed) {
@@ -288,6 +308,15 @@ export function registerPinRoutes(app: Express) {
           quoteId: id,
           vin: qData.vin || null,
           stock: qData.stock || null,
+          committedBy: sig.committedBy,
+          overriddenBy: sig.overriddenBy,
+        });
+        // Phase 1A: same-transaction snapshot (see commit-intake). `saved` is
+        // the row AS LOCKED AND UPDATED by this transaction — never the
+        // pre-transaction read — so the snapshot can't capture a stale doc.
+        await captureCommitSnapshot(tx, {
+          quoteRow: saved,
+          intakeId: null,
           committedBy: sig.committedBy,
           overriddenBy: sig.overriddenBy,
         });

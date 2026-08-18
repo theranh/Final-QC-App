@@ -23,6 +23,7 @@ import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 import { registerQuoterRoutes } from "./quoter";
 import { registerQuoterSyncAdminRoute } from "./quoterSyncAdmin";
 import { registerPinRoutes, hashPin, isValidPin } from "./pin";
+import { registerAccuracyReportRoute } from "./quoteSnapshot";
 import { registerTrackerRoutes } from "./tracker";
 import { readJpegExifOrientation } from "./photoExif";
 
@@ -226,6 +227,7 @@ export function registerAppRoutes(app: Express) {
   registerQuoterSyncAdminRoute(app);
   registerTrackerSyncAdminRoute(app);
   registerPinRoutes(app);
+  registerAccuracyReportRoute(app);
   registerTrackerRoutes(app);
 
   app.get("/api/health", async (_req, res) => {

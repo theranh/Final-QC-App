@@ -51,6 +51,7 @@ export const api = {
   archiveImported: () => request('POST', '/api/admin/archive-imported'),
   setArchived: (qcNumber, archived) => request('POST', '/api/admin/archive', { qcNumber, archived }),
   unlockQuotes: () => request('POST', '/api/admin/unlock-quotes'),
+  accuracyReport: () => request('GET', '/api/quoter/accuracy-report'),
   addEmployee: (payload) => request('POST', '/api/employees', payload),
   updateEmployee: (id, patch) => request('PATCH', `/api/employees/${id}`, patch),
   setEmployeePin: (id, pin) => request('POST', `/api/employees/${id}/pin`, { pin }),
