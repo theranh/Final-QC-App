@@ -1,0 +1,156 @@
+# Phase 1 — Damage Quoter Accuracy Upgrade
+
+I want to begin improving the Damage Quoter in TR Intake & QC-LIVE based on the audit you just completed.
+
+Do NOT integrate CCC, Mitchell, Qapter, or any paid external estimating system yet.
+
+For this phase, focus on improving our own estimating engine and collecting the data we will need to make it increasingly accurate.
+
+Before changing anything, create a detailed implementation plan for the following changes. Do not implement them yet.
+
+## 1. Replace generic body-hour assumptions with panel-specific estimating logic
+
+The current minor / moderate / heavy body-hour values are too generic.
+
+Design a better system where repair hours can vary based on:
+
+* panel
+* damage size
+* damage depth
+* crease/bodyline involvement
+* complexity
+* vehicle material when known
+* access difficulty when relevant
+
+Keep the system understandable and editable by Truck Ranch rather than turning it into an opaque AI-generated labor number.
+
+I want AI to describe the physical damage, but deterministic logic should continue calculating the labor hours.
+
+Recommend the new data structure and explain how existing quotes/rates would migrate into it.
+
+## 2. Improve the AI damage schema
+
+Evaluate adding structured fields such as:
+
+* damage depth: shallow / medium / deep
+* crease: yes/no
+* bodyline involved: yes/no
+* edge damage: yes/no
+* affected area/estimated size
+* complexity: simple / moderate / complex
+* material if reasonably known from vehicle data
+* confidence for the severity/complexity judgment
+
+Do not allow Claude to generate hours or dollar amounts.
+
+Determine which fields will genuinely improve labor estimation versus which would just add noise.
+
+Require or strongly enforce a wide/context photo when severity appears moderate or heavy so the model has scale and location context.
+
+## 3. Capture estimator pricing corrections
+
+Currently classification corrections are learned from, but labor-hour overrides are not.
+
+Design a permanent feedback record that captures:
+
+* AI classification
+* calculated original hours
+* estimator-adjusted hours
+* original estimated dollars
+* estimator-approved dollars
+* reason for override if available
+* vehicle year/make/model
+* panel
+* damage characteristics
+* estimator
+* date
+
+Do not automatically change future pricing yet.
+
+The first goal is simply to capture reliable historical data.
+
+## 4. Prepare for actual repair-cost feedback
+
+Design a way to later connect each damage quote or quoted line to:
+
+* actual repair performed
+* actual body hours
+* actual paint hours
+* actual parts cost
+* actual total repair cost
+* supplement/additional damage
+* final completion cost
+
+Do not require these fields during normal estimating yet.
+
+The system should be designed so they can be populated later from our recon/repair workflow.
+
+The long-term goal is to compare:
+
+AI observation → calculated estimate → estimator adjustment → actual final repair cost.
+
+## 5. Add replacement-part cost support
+
+Design a parts-cost field for damage lines where:
+
+* replacement is selected
+* a part is missing
+* a damaged component must be replaced
+
+For now support:
+
+* manual part-cost entry
+* editable default estimated part cost by common component
+* clear indication when the price is only an estimated/default amount
+
+Do not create fake precision.
+
+Do not build a massive static OEM parts database at this stage.
+
+The design should allow an external parts-pricing API to replace the default values later.
+
+## 6. Hidden-damage / supplement prediction — design only
+
+Design, but do not yet implement, a separate hidden-damage exposure system.
+
+It should NOT add invisible damage as definite repair line items.
+
+Instead, the eventual quote should be capable of displaying something like:
+
+Visible damage estimate: $2,350
+
+Possible additional hidden/supplement exposure: $350–$900
+
+Likely final repair range: $2,700–$3,250
+
+The future model should be based on combinations such as:
+
+vehicle + panel + visible severity + damage characteristics + historical actual outcomes.
+
+Initially this could use deterministic rules, but eventually our own historical data should calibrate the probabilities and dollar ranges.
+
+## 7. Do not automatically charge ADAS calibration
+
+Do not implement a blanket rule that adds scan or calibration charges solely because a vehicle is newer or because a bumper, grille, mirror, or tailgate is damaged.
+
+Instead, design the system so future scan/calibration charges can be triggered by the specific affected equipment or repair/replacement operation.
+
+We want to avoid systematically overestimating these charges.
+
+## Final deliverable
+
+Do not change production behavior yet.
+
+Give me:
+
+1. the proposed architecture,
+2. the specific existing areas of TR Intake & QC-LIVE that would need modification,
+3. any database/schema changes required,
+4. how existing quotes remain compatible,
+5. risks or unintended consequences,
+6. which changes can safely be released independently,
+7. and the recommended implementation order.
+
+Prioritize accuracy, simplicity for estimators, and collection of useful historical data.
+
+The system must remain fast enough for everyday vehicle intake and recon use.
