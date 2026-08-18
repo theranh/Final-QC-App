@@ -9,7 +9,7 @@ import WalkAroundCamera from './WalkAroundCamera';
 import { SignatureBadge } from './PinDialog';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
-import { subscribePending } from '../lib/photoQueue';
+import { subscribePending, subscribePersistence } from '../lib/photoQueue';
 import {
   PANELS, DAMAGE, SEVS, PARTS,
   defaultRates, defaultFlags, quoteTotals, lineHours, pdrEligible,
@@ -870,6 +870,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   if (!saveTrackerRef.current) saveTrackerRef.current = createSaveTracker(setSaveStatus);
   const [pendingUploads, setPendingUploads] = useState(0);
   useEffect(() => subscribePending(setPendingUploads), []);
+  // Photo persistence probe: when IndexedDB is unavailable (private mode,
+  // blocked storage) queued photos can't survive an app close — warn visibly
+  // instead of failing silently.
+  const [persistenceOk, setPersistenceOk] = useState(null);
+  useEffect(() => subscribePersistence(setPersistenceOk), []);
 
   const autosave = useCallback((ls, overrides) => {
     if (!hydratedRef.current) return;
@@ -1289,6 +1294,11 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         {!committed && quoteId && step !== 'vin' && (
           <SaveStatusPill status={saveStatus} pendingPhotos={pendingUploads} onRetry={retryQuoteSave} />
         )}
+        {persistenceOk === false && !committed && (
+          <div style={{ padding: '7px 10px', borderRadius: 8, background: '#fdf3e0', border: '1px solid var(--amber)', fontSize: 11, fontWeight: 700, color: '#8a6210' }}>
+            ⚠ This browser can’t save photos for retry (private mode or blocked storage). Keep the app open until every photo finishes sending.
+          </div>
+        )}
         {photosLoadError && !walkOpen && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 8, background: '#fdecea', border: '1px solid var(--red)', fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>
             <span style={{ flex: 1 }}>Saved photos didn’t load — check your connection.</span>
@@ -1329,6 +1339,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             photos={photos}
             damageFocus={!!prefill?.startAtPhotos}
             serverPhotos={serverPhotos}
+            pendingUploads={pendingUploads}
             onEnlarge={setLightbox}
             lineCount={lines.length}
             committed={!!committed}
@@ -1640,11 +1651,14 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, onRetryDecode
 const PHOTO_CAP = 160;
 const PHOTO_WARN_THRESHOLD = 20; // warn when remaining slots drop below this
 
-function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
+function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUploads = 0, onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
   // All non-damage shots — guided slots and after-the-fact extras — are one
   // walk-around set; only damage close-ups ('dmg…') are shown apart.
   const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
-  const totalServerCount = serverPhotos.length;
+  // Count photos still uploading toward the cap too — otherwise 30 queued
+  // shots on weak signal make the warning read 30 slots too optimistic, and
+  // the server rejects (413-style surprise) once they land.
+  const totalServerCount = serverPhotos.length + Math.max(0, pendingUploads);
   const remaining = PHOTO_CAP - totalServerCount;
   const atCap = remaining <= 0;
   const nearCap = !atCap && remaining < PHOTO_WARN_THRESHOLD;
@@ -1689,8 +1703,8 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], onEnlarge,
             lineHeight: 1.4,
           }}>
             {atCap
-              ? `⛔ Photo limit reached (${PHOTO_CAP} stored). Delete a photo to make room before adding more damage shots.`
-              : `⚠ Only ${remaining} photo slot${remaining === 1 ? '' : 's'} remaining — this truck is ${totalServerCount} of ${PHOTO_CAP}. Prioritize the most important damage close-ups.`}
+              ? `⛔ Photo limit reached (${PHOTO_CAP} stored${pendingUploads ? ` incl. ${pendingUploads} still sending` : ''}). Delete a photo to make room before adding more damage shots.`
+              : `⚠ Only ${remaining} photo slot${remaining === 1 ? '' : 's'} remaining — this truck is ${totalServerCount} of ${PHOTO_CAP}${pendingUploads ? ` (${pendingUploads} still sending)` : ''}. Prioritize the most important damage close-ups.`}
           </div>
         )}
         {serverPhotos.some((p) => String(p.slot || '').startsWith('dmg')) && (

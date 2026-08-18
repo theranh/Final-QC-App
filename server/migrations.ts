@@ -90,6 +90,23 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    // Cycle-time foundations:
+    // - intakes.created_at: set ONCE at first insert (arrival at intake),
+    //   never overwritten by later edits. Historical rows are left NULL —
+    //   there is no defensible arrival timestamp for them (updated_at is
+    //   last-edit, completed_at is commit), and a fabricated backfill would
+    //   poison future arrival-to-frontline reporting. NULL means "unknown".
+    // - production_tracker(.archive).ro_open: RO Open Date exactly as typed
+    //   in sheet column B, preserved so future reporting can use it. Never
+    //   parsed/recomputed, consistent with the other tracker columns.
+    id: "0005_cycle_time_columns",
+    statements: [
+      sql`ALTER TABLE intakes ADD COLUMN IF NOT EXISTS created_at timestamptz`,
+      sql`ALTER TABLE production_tracker ADD COLUMN IF NOT EXISTS ro_open text`,
+      sql`ALTER TABLE production_tracker_archive ADD COLUMN IF NOT EXISTS ro_open text`,
+    ],
+  },
 ];
 
 /**

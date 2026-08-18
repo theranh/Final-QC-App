@@ -550,6 +550,71 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     }))
     .sort((a, b) => b.daysOpen - a.daysOpen);
 
+  // ----- aging / bottleneck board (current-state, range-independent) -----
+  // Active trucks by current stage with days-in-stage, from existing
+  // timestamps only. Thresholds are server-owned defaults the client renders
+  // (warn/alert day counts); an export failure is always an alert.
+  const AGING_LIST_CAP = 12;
+  const daysSince = (ms: number | null | undefined) =>
+    ms != null && Number.isFinite(ms) ? Math.max(0, Math.floor((nowTs - ms) / 86_400_000)) : null;
+  // Awaiting Final QC: committed intake, no inspection yet (reuse `awaiting`).
+  const agingAwaiting = awaiting
+    .filter((i) => !i.inProgress)
+    .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, days: daysSince(i.completedAt) }))
+    .filter((x) => x.days != null)
+    .sort((a, b) => (b.days as number) - (a.days as number));
+  // Open re-checks: reuse blocked (age from first-fail day, as elsewhere).
+  const agingRechecks = blocked.map((b) => ({
+    vin: b.vin, stock: b.stock, vehicle: b.vehicle, qcNumber: b.qcNumber, days: b.daysOpen,
+  }));
+  // Committed intake but the tracker sheet shows no RO opened yet for the VIN.
+  // Only meaningful when tracker data is live; empty (not zero-fabricated)
+  // when the sheet is unavailable.
+  const agingNoRo = sheet
+    ? completedIntakes
+        .filter((i) => !i.inProgress && i.completedAt != null)
+        .filter((i) => {
+          const t = trackerByVin.get(i.vin);
+          return !t || !t.roOpen;
+        })
+        .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, days: daysSince(i.completedAt) }))
+        .filter((x) => x.days != null)
+        .sort((a, b) => (b.days as number) - (a.days as number))
+    : [];
+  // Passed QC but the Google Sheets export durably failed (exhausted retries).
+  const exportFailedRes = await db.execute(sql`
+    SELECT j.qc_number, i.vin, i.stock, i.data->>'vehicle' AS vehicle,
+           EXTRACT(EPOCH FROM j.created_at) * 1000 AS created_ms
+    FROM sheet_export_jobs j
+    JOIN inspections i ON i.id = j.inspection_id
+    WHERE j.status = 'failed' AND NOT i.archived
+    ORDER BY j.created_at ASC
+  `);
+  const agingExportFailed = (((exportFailedRes as any).rows ?? exportFailedRes) as any[]).map((r) => ({
+    vin: String(r.vin ?? "").trim().toUpperCase(),
+    stock: String(r.stock ?? "").trim(),
+    vehicle: String(r.vehicle ?? "").trim(),
+    qcNumber: String(r.qc_number ?? ""),
+    days: daysSince(Number(r.created_ms)),
+  }));
+  const agingStage = (key: string, label: string, items: any[], warn: number, alert: number) => ({
+    key,
+    label,
+    count: items.length,
+    warnDays: warn,
+    alertDays: alert,
+    trucks: items.slice(0, AGING_LIST_CAP),
+  });
+  const aging = {
+    stages: [
+      agingStage("awaitingQc", "Awaiting Final QC", agingAwaiting, 2, 5),
+      agingStage("openRecheck", "Open re-check", agingRechecks, 3, 7),
+      agingStage("committedNoRo", "Committed, no RO open", agingNoRo, 3, 7),
+      agingStage("exportFailed", "Passed QC, export failed", agingExportFailed, 0, 1),
+    ],
+    trackerAvailable: !!sheet,
+  };
+
   // ----- deptFailRate + topFailedItems + byInspector (first inspections in range) -----
   const segVehicles = new Map<string, number>();
   const segItems = new Map<string, number>();
@@ -713,6 +778,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     byStatus,
     awaiting,
     blocked,
+    aging,
     deptFailRate,
     topFailedItems,
     byInspector,

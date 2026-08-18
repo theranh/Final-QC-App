@@ -69,6 +69,7 @@ function AuthedApp({ me, onAuthRefresh }) {
 
   const [tab, setTab] = useState('dash');
   const [intakeOpenVin, setIntakeOpenVin] = useState(null); // VIN to auto-open on the Intake tab
+  const [intakeOpenQuote, setIntakeOpenQuote] = useState(null); // quote-only search result to auto-open as a standalone quote
   const [stage, setStage] = useState(() => boot.stage);
   const [draft, setDraft] = useState(() => boot.draft);
   const [marks, setMarks] = useState(() => boot.marks);
@@ -711,10 +712,10 @@ function AuthedApp({ me, onAuthRefresh }) {
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onOpenIntake={openIntakeFor} />
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onOpenIntake={openIntakeFor} onOpenRecord={(id) => { setTab('records'); setViewRec(id); }} onOpenQuote={(q) => { setIntakeOpenQuote(q); setTab('intake'); }} />
     );
   } else if (tab === 'intake') {
-    content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} />;
+    content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} openQuote={intakeOpenQuote} onOpenQuoteConsumed={() => setIntakeOpenQuote(null)} />;
   } else if (tab === 'inspect') {
     content = (
       <HomeScreen

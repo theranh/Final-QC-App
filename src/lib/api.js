@@ -37,6 +37,7 @@ export const api = {
   dashboard: (from, to) =>
     request('GET', '/api/dashboard' + (from && to ? `?from=${from}&to=${to}` : '')),
   intakeByVin: (vin) => request('GET', `/api/intake/${encodeURIComponent(vin)}`),
+  search: (q) => request('GET', `/api/search?q=${encodeURIComponent(q)}`),
   getIntake: (vin) => request('GET', `/api/quoter/intakes?vin=${encodeURIComponent(vin)}`),
   listIntakes: () => request('GET', '/api/quoter/intakes'),
   putIntake: (payload) => request('PUT', '/api/quoter/intakes', payload),

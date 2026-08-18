@@ -106,7 +106,7 @@ export async function snapshotMonth(month: string, opts: { force?: boolean } = {
     throw new Error("Google Sheets is not configured — cannot snapshot the tracker.");
   }
 
-  // A VIN · E Retail Plan $ · F Closed RO $ · G Days Pic-to-Close.
+  // A VIN · B RO Open Date · E Retail Plan $ · F Closed RO $ · G Days Pic-to-Close.
   const seen = new Set<string>();
   const rows: {
     vin: string;
@@ -114,6 +114,7 @@ export async function snapshotMonth(month: string, opts: { force?: boolean } = {
     retailPlanUsd: string | null;
     closedRoUsd: string | null;
     daysToClose: number | null;
+    roOpen: string | null;
   }[] = [];
   for (const r of values) {
     const vin = String(r?.[0] ?? "").trim().toUpperCase();
@@ -122,6 +123,9 @@ export async function snapshotMonth(month: string, opts: { force?: boolean } = {
     const retail = parseMoney(r?.[4]); // col E
     const closed = parseMoney(r?.[5]); // col F
     const days = parseInt10(r?.[6]); // col G
+    // Col B RO Open Date: preserved verbatim (never parsed/recomputed) so
+    // future arrival-to-frontline reporting has the raw sheet value.
+    const roOpen = String(r?.[1] ?? "").trim().slice(0, 40) || null;
     rows.push({
       vin,
       month: tab,
@@ -129,6 +133,7 @@ export async function snapshotMonth(month: string, opts: { force?: boolean } = {
       retailPlanUsd: retail == null ? null : String(retail),
       closedRoUsd: closed == null ? null : String(closed),
       daysToClose: days,
+      roOpen,
     });
   }
 
@@ -151,8 +156,8 @@ export async function snapshotMonth(month: string, opts: { force?: boolean } = {
     if (existing > 0) {
       await tx.execute(sql`
         INSERT INTO production_tracker_archive
-          (vin, month, retail_plan_usd, closed_ro_usd, days_to_close, snapshot_at)
-        SELECT vin, month, retail_plan_usd, closed_ro_usd, days_to_close, snapshot_at
+          (vin, month, retail_plan_usd, closed_ro_usd, days_to_close, ro_open, snapshot_at)
+        SELECT vin, month, retail_plan_usd, closed_ro_usd, days_to_close, ro_open, snapshot_at
         FROM production_tracker WHERE month = ${tab}
       `);
     }

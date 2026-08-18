@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { RecentQuoteCard } from './IntakeScreen';
+import GlobalSearchResults from './GlobalSearch';
 
 const FILTERS = [
   ['awaitingFinalQc', 'In-Take Quotes'],
@@ -26,7 +27,7 @@ const usd = (v) =>
 // "mike smith" → "Mike Smith" (also after hyphens: "mary-jo" → "Mary-Jo").
 const titleCaseName = (s) => s.replace(/(^|[\s-])([a-zà-ö])/g, (m, sep, ch) => sep + ch.toUpperCase());
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onOpenIntake }) {
+export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onOpenIntake, onOpenRecord, onOpenQuote }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -163,6 +164,20 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
               </div>
             );
           })}
+        {/* Global search: everything the two dash buckets above can't show —
+            archived QC records, historical inspections, quote-only trucks.
+            Only rendered while the user is actually searching. */}
+        {needle.length >= 2 && (
+          <GlobalSearchResults
+            query={needle}
+            excludeVins={new Set([
+              ...(bucket === 'completed' ? list : awaiting).map((v) => v.vin),
+            ])}
+            onOpenRecord={onOpenRecord}
+            onOpenIntake={onOpenIntake}
+            onOpenQuote={onOpenQuote}
+          />
+        )}
       </div>
     </div>
   );

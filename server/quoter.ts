@@ -24,6 +24,89 @@ import { bestWalkPhotoIds } from "./localQuote";
 const ALLOWED_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5"];
 const CLASSIFY_MAX_BODY = 12 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// Server-authoritative AI classification config. Production behavior (model,
+// output cap, prompt base, timeout, retry) is owned HERE — a stale client can
+// no longer drift it by sending its own model/max_tokens/base prompt. The
+// values below are exactly what the current client requests, so effective
+// behavior is unchanged; classification semantics and output schema are the
+// prompt text, which is byte-identical to src/lib/quoterClassify.js.
+export const CLASSIFY_CONFIG = {
+  promptVersion: "tr-classify-v1",
+  model: "claude-sonnet-4-6",
+  maxTokens: 700,
+  timeoutMs: 45_000, // bounded — a hung upstream must not pin the request
+  transientRetries: 1, // one retry on transient upstream failure only
+} as const;
+
+// Canonical base system prompt — MUST stay byte-identical to BASE_SYS_PROMPT
+// in src/lib/quoterClassify.js (the client composes base + dynamic vehicle/
+// shop-calibration hints; the server verifies the base and keeps the hints).
+export const CLASSIFY_BASE_SYS_PROMPT = `You are the damage classifier for Truck Ranch, a used truck dealership. You will be shown ONE photo of a possibly damaged area on a pickup truck or SUV.
+
+Return ONLY a single JSON object. No markdown, no code fences, no preamble, no explanation.
+
+Schema (every key required):
+{"panel": one of "front_bumper","grille","hood","left_fender","right_fender","left_front_door","right_front_door","left_rear_door","right_rear_door","left_cab_corner","right_cab_corner","left_bedside","right_bedside","left_front_flare","right_front_flare","left_rear_flare","right_rear_flare","rocker_panel","roof","tailgate","rear_bumper","mirror","unknown",
+"damage_type": one of "dent","crease","scratch","crack","rust","missing_part","paint_only",
+"severity": one of "minor","moderate","heavy","replace",
+"paint_damaged": true or false,
+"pdr_candidate": true or false,
+"blend_adjacent_recommended": true or false,
+"ri_parts_needed": array from "door_handle","mirror","molding","bumper_cover","headlamp","tail_lamp","grille","emblem","fender_liner","tailgate_handle","mudflap","step_bar","antenna","door_panel","wheel_flare","other" (empty array if none),
+"confidence": one of "high","medium","low",
+"notes": one sentence describing what is visible}
+
+Severity is the SIZE of the damage. Judge size against reference objects in frame (door handles are ~6 inches, emblems ~3 inches). Apply exactly:
+- "minor" = damage under ~3 inches across (nickel to fist size)
+- "moderate" = damage 3 to 8 inches across
+- "heavy" = damage over 8 inches across, or buckled/torn metal, or misaligned panel gaps
+- "replace" = holes, tears, severe rust-through, or damage crossing structural lines
+BUMP RULE: if the metal is creased (a sharp line, not a smooth dent) OR the paint is broken/cracked through, move severity UP one level (minor->moderate, moderate->heavy). Never bump past "heavy" on the size rule alone.
+Set "pdr_candidate" true ONLY when ALL of these hold: damage_type is "dent", severity is "minor" or "moderate", paint is NOT broken (paint_damaged false), no crease, and the panel is metal (never front_bumper, rear_bumper, grille, mirror, or flares). PDR means paintless dent repair — a smooth shallow dent with intact factory paint.
+
+Each photo shows ONE damage area. Classify the panel the damage is centered on — the panel filling most of the frame. If damage continues onto an adjacent panel (example: a bedside corner next to a damaged rear bumper), classify ONLY the primary panel in this photo; the adjacent panel is photographed separately. The same panel may appear in several photos showing different damage areas — classify each photo independently on its own damage only.
+Left and right mean the VEHICLE's left and right (driver side is left on US trucks). If you cannot tell which side or which panel, use panel "unknown" with confidence "low" rather than guessing.
+Set "paint_damaged" true only if the finish is visibly broken, scratched through, cracked, or missing.
+Set "blend_adjacent_recommended" true when a refinish would end mid-panel or color-match risk is high (metallic or pearl paint, repair near a panel edge).
+List "ri_parts_needed" only for parts that must come off to repair or refinish properly.
+If the photo is not a vehicle exterior, is too blurry or dark, or has heavy glare: panel "unknown", confidence "low", and say why in notes.
+Never estimate labor hours, cost, or repair time. Classification only.`;
+
+const CLASSIFY_PROMPT_SINGLE = "Classify the damage in this photo. JSON only.";
+const CLASSIFY_PROMPT_PAIR =
+  "The first image is a close-up of the damage area; the second is a wide shot of the same area showing its panel location on the vehicle. Use both to classify the damage. JSON only.";
+
+/** Compose the effective system prompt: always the canonical base. Dynamic
+ *  client suffixes (vehicle context, shop-calibration hints, second-look
+ *  addendum) are DATA and are kept — but only when the client's base matches
+ *  the canonical prompt exactly. A stale client with a drifted base prompt is
+ *  ignored wholesale (canonical base, no suffix) rather than trusted. */
+export function resolveClassifySystem(clientSystem: unknown): string {
+  const s = typeof clientSystem === "string" ? clientSystem : "";
+  if (s.startsWith(CLASSIFY_BASE_SYS_PROMPT)) {
+    const suffix = s.slice(CLASSIFY_BASE_SYS_PROMPT.length).slice(0, 4000);
+    return CLASSIFY_BASE_SYS_PROMPT + suffix;
+  }
+  return CLASSIFY_BASE_SYS_PROMPT;
+}
+
+/** User-message text: only the two canonical instructions are honored; any
+ *  other client-supplied text is replaced by the canonical one. */
+export function resolveClassifyPrompt(clientPrompt: unknown, hasWide: boolean): string {
+  const p = typeof clientPrompt === "string" ? clientPrompt : "";
+  if (p === CLASSIFY_PROMPT_SINGLE || p === CLASSIFY_PROMPT_PAIR) return p;
+  return hasWide ? CLASSIFY_PROMPT_PAIR : CLASSIFY_PROMPT_SINGLE;
+}
+
+const TRANSIENT_AI_STATUSES = new Set([408, 500, 502, 503, 504, 529]);
+export function isTransientAiError(e: any): boolean {
+  const status = Number(e?.status);
+  if (TRANSIENT_AI_STATUSES.has(status)) return true;
+  // Network-level failures (no HTTP status) and our own abort/timeouts.
+  return !Number.isFinite(status) || status === 0;
+}
+
 // TR-INTAKE-V2 payload: 4 steps (3/6/6/5 sub-steps), 9 RO-Ready items.
 const INTAKE_STEP_SIZES: Record<string, number> = { "1": 3, "2": 6, "3": 6, "4": 5 };
 
@@ -671,12 +754,15 @@ export function registerQuoterRoutes(app: Express) {
         return res.status(409).json({ error: "Intake is committed" });
       }
       await db.execute(sql`
-        INSERT INTO intakes (id, vin, stock, vehicle, miles, estimator, quote_id, data, completed_at, updated_at)
+        INSERT INTO intakes (id, vin, stock, vehicle, miles, estimator, quote_id, data, created_at, completed_at, updated_at)
         VALUES (${id}, ${vin}, ${stock}, ${vehicle}, ${miles}, ${estimator}, ${quoteId}, ${dataJson}::jsonb,
-                NULL, to_timestamp(${ts} / 1000.0))
+                to_timestamp(${ts} / 1000.0), NULL, to_timestamp(${ts} / 1000.0))
         ON CONFLICT (id) DO UPDATE SET
           vin = ${vin}, stock = ${stock}, vehicle = ${vehicle}, miles = ${miles},
           estimator = ${estimator}, quote_id = ${quoteId}, data = ${dataJson}::jsonb,
+          -- created_at is the arrival timestamp: written once at first insert,
+          -- deliberately ABSENT from this update list so no later edit (from
+          -- any device, any offline queue) can ever overwrite it.
           -- Completion is now marked at PIN commit (see pin.ts), never derived
           -- from checklist state. Preserve whatever is already there.
           completed_at = intakes.completed_at,
@@ -706,7 +792,11 @@ export function registerQuoterRoutes(app: Express) {
         }
         return res.status(400).json({ error: "Invalid JSON body" });
       }
-      const { image, image2, system, prompt, model, max_tokens } = req.body || {};
+      // model/max_tokens from the body are deliberately IGNORED — production
+      // model, output cap, timeout, and retry policy are server-owned
+      // (CLASSIFY_CONFIG). system/prompt are validated against the canonical
+      // prompt; only recognized dynamic suffixes/data survive.
+      const { image, image2, system, prompt } = req.body || {};
       if (
         !image ||
         typeof image !== "string" ||
@@ -726,13 +816,29 @@ export function registerQuoterRoutes(app: Express) {
         if (hasWide) {
           userContent.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: image2 } });
         }
-        userContent.push({ type: "text", text: String(prompt || "Classify the damage in this photo. JSON only.").slice(0, 2000) });
-        const msg = await anthropic.messages.create({
-          model: ALLOWED_MODELS.includes(model) ? model : "claude-haiku-4-5",
-          max_tokens: Math.min(Number(max_tokens) || 2048, 8192),
-          system: String(system || "").slice(0, 8000),
+        userContent.push({ type: "text", text: resolveClassifyPrompt(prompt, !!hasWide) });
+        const request = {
+          model: CLASSIFY_CONFIG.model,
+          max_tokens: CLASSIFY_CONFIG.maxTokens,
+          system: resolveClassifySystem(system),
           messages: [{ role: "user", content: userContent }],
-        });
+        } as const;
+        // Bounded timeout + one retry on transient upstream failure only.
+        let msg: any;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            // maxRetries: 0 — the explicit loop below is the ONLY retry
+            // authority; the SDK's implicit retries would multiply attempts.
+            msg = await anthropic.messages.create(request as any, { timeout: CLASSIFY_CONFIG.timeoutMs, maxRetries: 0 });
+            break;
+          } catch (err: any) {
+            if (attempt < CLASSIFY_CONFIG.transientRetries && isTransientAiError(err)) {
+              await new Promise((r) => setTimeout(r, 750));
+              continue;
+            }
+            throw err;
+          }
+        }
         const text = (msg.content || [])
           .filter((c: any) => c.type === "text")
           .map((c: any) => c.text)

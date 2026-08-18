@@ -155,7 +155,10 @@ export async function fetchIntakeStats(from: string, to: string): Promise<Intake
     db.execute(sql`
       SELECT to_char(d.day, 'YYYY-MM-DD') AS day, COUNT(i.id)::int AS intakes
       FROM generate_series(${from}::date, ${to}::date, '1 day') AS d(day)
-      LEFT JOIN intakes i ON i.completed_at::date = d.day::date
+      -- Chicago-local day, matching every other dashboard day bucket. The
+      -- bare ::date cast previously used the server's UTC day, so intakes
+      -- completed after 6-7pm local drifted into the next day's bar.
+      LEFT JOIN intakes i ON (i.completed_at AT TIME ZONE 'America/Chicago')::date = d.day::date
       GROUP BY d.day ORDER BY d.day
     `),
     db.execute(sql`SELECT COUNT(*)::int AS n FROM intakes WHERE completed_at IS NULL`),

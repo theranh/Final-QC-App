@@ -156,6 +156,10 @@ export const intakes = pgTable(
     estimator: text("estimator").notNull().default(""),
     quoteId: text("quote_id"),
     data: jsonb("data").notNull(),
+    // Arrival at intake: set once on first insert, NEVER updated afterwards
+    // (the upsert's ON CONFLICT branch does not touch it). NULL on rows that
+    // predate this column — unknown, not backfilled (no defensible source).
+    createdAt: timestamp("created_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
     committedBy: text("committed_by"),
@@ -275,6 +279,8 @@ export const productionTracker = pgTable(
     retailPlanUsd: numeric("retail_plan_usd"),
     closedRoUsd: numeric("closed_ro_usd"),
     daysToClose: integer("days_to_close"),
+    // RO Open Date, sheet column B, stored exactly as typed (never parsed).
+    roOpen: text("ro_open"),
     snapshotAt: timestamp("snapshot_at", { withTimezone: true }).defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.vin, t.month] })],
@@ -290,6 +296,7 @@ export const productionTrackerArchive = pgTable("production_tracker_archive", {
   retailPlanUsd: numeric("retail_plan_usd"),
   closedRoUsd: numeric("closed_ro_usd"),
   daysToClose: integer("days_to_close"),
+  roOpen: text("ro_open"),
   snapshotAt: timestamp("snapshot_at", { withTimezone: true }),
   archivedAt: timestamp("archived_at", { withTimezone: true }).defaultNow().notNull(),
 });

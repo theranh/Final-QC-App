@@ -15,12 +15,23 @@ const STATUS_ROWS = [
 
 const ACTION_LABEL = { created: 'Final QC committed', recheck_committed: 'Re-check committed' };
 
-function Tile({ label, value, accent }) {
+function Tile({ label, value, accent, sub }) {
   return (
     <div style={{ background: '#fff', border: '1px solid var(--border)', borderLeft: `3px solid ${accent}`, borderRadius: 10, padding: '10px 11px' }}>
       <div style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.5, color: 'var(--muted)' }}>{label}</div>
       <div className="oswald" style={{ fontWeight: 600, fontSize: 22, marginTop: 2, color: accent }}>{value}</div>
+      {sub && <div style={{ fontSize: 7.5, fontWeight: 600, letterSpacing: 0.3, color: 'var(--muted)', marginTop: 2 }}>{sub}</div>}
     </div>
+  );
+}
+
+// Small scope chip so all-time / right-now cards can't be misread as
+// range-scoped (and vice versa).
+function ScopeChip({ children }) {
+  return (
+    <span style={{ fontSize: 7.5, fontWeight: 700, letterSpacing: 0.5, color: 'var(--muted)', background: '#F5F1EC', padding: '2px 6px', borderRadius: 4, marginLeft: 6, verticalAlign: 'middle' }}>
+      {children}
+    </span>
   );
 }
 
@@ -112,16 +123,16 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
       <div className="screen-body" style={{ gap: 9 }}>
         {/* 1 — KPI grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
-          <Tile label="INSPECTIONS ON RECORD" value={kpi.inspections} accent="var(--brown)" />
-          <Tile label="QC FAIL RATE" value={pct(kpi.failRate)} accent={kpi.failRate > 0.25 ? 'var(--red)' : 'var(--green)'} />
-          <Tile label="AVG DAYS IN PRODUCTION" value={n1(kpi.avgDaysInProduction)} accent="var(--gold)" />
-          <Tile label="OPEN RE-CHECKS" value={kpi.openRechecks} accent={kpi.openRechecks ? 'var(--amber)' : 'var(--muted)'} />
+          <Tile label="INSPECTIONS ON RECORD" value={kpi.inspections} accent="var(--brown)" sub="selected range" />
+          <Tile label="QC FAIL RATE" value={pct(kpi.failRate)} accent={kpi.failRate > 0.25 ? 'var(--red)' : 'var(--green)'} sub="selected range" />
+          <Tile label="AVG DAYS IN PRODUCTION" value={n1(kpi.avgDaysInProduction)} accent="var(--gold)" sub="range · trucks with tracker data" />
+          <Tile label="OPEN RE-CHECKS" value={kpi.openRechecks} accent={kpi.openRechecks ? 'var(--amber)' : 'var(--muted)'} sub="right now — all time" />
         </div>
 
         {/* 1b — This week strip */}
         {thisWeek && (
           <div className="card">
-            <div className="card-title">THIS WEEK</div>
+            <div className="card-title">THIS WEEK<ScopeChip>CURRENT WEEK — IGNORES RANGE</ScopeChip></div>
             <div style={{ display: 'flex', gap: 14, marginTop: 8 }}>
               {[
                 ['Intakes', thisWeek.intakesCompleted, 'var(--brown)'],
@@ -140,7 +151,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
 
         {/* 2 — Daily Tracker */}
         <div className="card">
-          <div className="card-title">DAILY TRACKER</div>
+          <div className="card-title">DAILY TRACKER<ScopeChip>LAST 7 DAYS — IGNORES RANGE</ScopeChip></div>
           <div style={{ display: 'flex', gap: 18, marginTop: 8 }}>
             {[
               ['Intakes today', tracker7.todayIntakes, tracker7.weekIntakes, 'var(--brown)'],
@@ -164,7 +175,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
 
         {/* 3 — Every record by status */}
         <div className="card">
-          <div className="card-title">EVERY RECORD BY STATUS</div>
+          <div className="card-title">EVERY RECORD BY STATUS<ScopeChip>RIGHT NOW — ALL TIME</ScopeChip></div>
           {STATUS_ROWS.map(([k, label, color]) => (
             <div key={k} onClick={() => onOpenStatus(k)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '11px 0', borderTop: '1px solid #F5F1EC', cursor: 'pointer', minHeight: 44 }}>
               <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, flex: '0 0 auto' }} />
@@ -177,7 +188,7 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
 
         {/* 4 — Blocked */}
         <div className="card">
-          <div className="card-title" style={{ color: blocked.length ? 'var(--red)' : undefined }}>BLOCKED — FAILED FINAL QC</div>
+          <div className="card-title" style={{ color: blocked.length ? 'var(--red)' : undefined }}>BLOCKED — FAILED FINAL QC<ScopeChip>RIGHT NOW</ScopeChip></div>
           {blocked.length === 0 && <div className="empty-note" style={{ padding: '10px 0 4px' }}>Nothing blocked — no open re-checks.</div>}
           {blocked.map((b) => (
             <div key={b.qcNumber} onClick={() => onOpenVehicle(b.vin, b.qcNumber)} style={{ borderTop: '1px solid #F5F1EC', padding: '10px 0', cursor: 'pointer' }}>
@@ -203,6 +214,49 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
             </div>
           ))}
         </div>
+
+        {/* 4b — Aging / bottleneck board */}
+        {dash.aging && (
+          <div className="card">
+            <div className="card-title">AGING — WHERE TRUCKS ARE STUCK<ScopeChip>RIGHT NOW</ScopeChip></div>
+            {dash.aging.stages.map((st) => {
+              const tone = (d) => (d == null ? 'var(--muted)' : d >= st.alertDays ? 'var(--red)' : d >= st.warnDays ? 'var(--amber)' : 'var(--green)');
+              const worst = st.trucks.length ? st.trucks[0].days : null;
+              return (
+                <div key={st.key} style={{ borderTop: '1px solid #F5F1EC', padding: '9px 0' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, flex: 1 }}>{st.label}</span>
+                    {st.count > 0 && worst != null && (
+                      <span style={{ fontSize: 9, fontWeight: 700, color: tone(worst) }}>oldest {worst === 0 ? 'today' : `${worst}d`}</span>
+                    )}
+                    <span className="oswald" style={{ fontSize: 16, fontWeight: 600, color: st.count ? tone(worst) : 'var(--muted)' }}>{st.count}</span>
+                  </div>
+                  {st.key === 'committedNoRo' && !dash.aging.trackerAvailable && (
+                    <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 3 }}>Tracker offline — can't tell which trucks have an RO open.</div>
+                  )}
+                  {st.trucks.map((t) => (
+                    <div
+                      key={st.key + t.vin}
+                      onClick={() => (t.qcNumber ? onOpenVehicle(t.vin, t.qcNumber) : undefined)}
+                      style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginTop: 5, cursor: t.qcNumber ? 'pointer' : 'default' }}
+                    >
+                      <span style={{ fontSize: 10.5, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {[t.stock, t.vehicle].filter(Boolean).join(' · ') || t.vin}
+                      </span>
+                      <span className="mono" style={{ fontSize: 8.5, color: 'var(--muted)', flex: '0 0 auto' }}>…{(t.vin || '').slice(-8)}</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: tone(t.days), flex: '0 0 auto' }}>
+                        {t.days == null ? '—' : t.days === 0 ? 'today' : `${t.days}d`}
+                      </span>
+                    </div>
+                  ))}
+                  {st.count > st.trucks.length && (
+                    <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 4 }}>+ {st.count - st.trucks.length} more</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* 5 — Recent activity */}
         <div className="card">

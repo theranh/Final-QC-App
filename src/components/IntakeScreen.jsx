@@ -6,7 +6,7 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
-import { subscribePending } from '../lib/photoQueue';
+import { subscribePending, subscribePersistence, queueServerDelete, attemptServerDelete } from '../lib/photoQueue';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
 
@@ -69,7 +69,7 @@ function blankIntake(vin) {
   };
 }
 
-export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) {
+export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, openQuote, onOpenQuoteConsumed }) {
   const [vin, setVin] = useState('');
   const [intake, setIntake] = useState(null);
   const [quoting, setQuoting] = useState(false); // Body Quoter sub-view
@@ -352,6 +352,14 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     openFor(openVin);
     onOpenVinConsumed?.();
   }, [openVin, openFor, onOpenVinConsumed]);
+  // Auto-open a saved quote handed in from global search (quote-only record —
+  // no intake exists, so it opens as a standalone quote, same as the RECENT
+  // QUOTES list). Consumed once so back-navigation still works.
+  useEffect(() => {
+    if (!openQuote?.quoteId) return;
+    setStandaloneQuote(openQuote);
+    onOpenQuoteConsumed?.();
+  }, [openQuote, onOpenQuoteConsumed]);
   // Commit to opening an intake for an already-validated VIN, seeding the
   // landing QUOTE DETAILS. Used by the plain (no-duplicate) path and by the
   // quote-only "Start intake anyway" path (both create a fresh intake, so the
@@ -493,6 +501,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   // land, so a saved intake never looks like photos went missing.
   const [pendingUploads, setPendingUploads] = useState(0);
   useEffect(() => subscribePending(setPendingUploads), []);
+  // Warn when IndexedDB is unavailable — queued photos won't survive a close.
+  const [persistenceOk, setPersistenceOk] = useState(null);
+  useEffect(() => subscribePersistence(setPersistenceOk), []);
   const [photoLoadError, setPhotoLoadError] = useState(false);
   const [photoLoadAttempt, setPhotoLoadAttempt] = useState(0); // bumped by RETRY
   useEffect(() => {
@@ -766,6 +777,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                 {pendingUploads > 0 && <span style={{ marginLeft: 8, color: 'var(--amber)', fontWeight: 700 }}>· sending {pendingUploads}…</span>}
               </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
+              {persistenceOk === false && (
+                <div style={{ marginTop: 8, padding: '7px 10px', borderRadius: 8, background: '#fdf3e0', border: '1px solid var(--amber)', fontSize: 11, fontWeight: 700, color: '#8a6210' }}>
+                  ⚠ This browser can’t save photos for retry (private mode or blocked storage). Keep the app open until every photo finishes sending.
+                </div>
+              )}
               {photoLoadError && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '7px 10px', borderRadius: 8, background: '#fdecea', border: '1px solid var(--red)', fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>
                   <span style={{ flex: 1 }}>Photos didn’t load — check your connection.</span>
@@ -957,8 +973,20 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
                     if (quoteRowRef.current) quoteRowRef.current.committedBy = quoteRowRef.current.committedBy || 'committed';
                     setLightbox(null);
                     showToast?.('This quote has been signed off — its photos are locked.');
+                  } else if (err?.status === 404) {
+                    // Already gone on the server — reflect it locally.
+                    setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));
+                    setLightbox(null);
+                    showToast?.('Photo deleted');
                   } else {
-                    showToast?.(err?.message || 'Couldn’t delete the photo');
+                    // Transient (offline / 5xx / signed out): make the delete
+                    // durable — it retries via the queue flush — and reflect
+                    // the inspector's intent locally right away.
+                    await queueServerDelete(lightbox.id);
+                    attemptServerDelete(lightbox.id);
+                    setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));
+                    setLightbox(null);
+                    showToast?.('Offline — photo will be deleted from the server when the connection returns.');
                   }
                 }
               }}

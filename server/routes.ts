@@ -22,6 +22,7 @@ import { registerIntakeQuoteRoute } from "./localQuote";
 import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 import { registerQuoterRoutes } from "./quoter";
 import { registerQuoterSyncAdminRoute } from "./quoterSyncAdmin";
+import { registerSearchRoute } from "./search";
 import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerAccuracyReportRoute } from "./quoteSnapshot";
 import { registerTrackerRoutes } from "./tracker";
@@ -223,6 +224,7 @@ const importSchema = z.object({
 export function registerAppRoutes(app: Express) {
   registerIntakeQuoteRoute(app);
   registerDashboardRoute(app);
+  registerSearchRoute(app);
   registerQuoterRoutes(app);
   registerQuoterSyncAdminRoute(app);
   registerTrackerSyncAdminRoute(app);

@@ -135,6 +135,29 @@ async function flushServerDeletes() {
   }
 }
 
+// ---------- persistence availability (drives a visible warning) ----------
+// Private-mode Safari, blocked storage, or quota exhaustion means photos
+// CANNOT survive an app close. That used to fail silently; now screens can
+// subscribe and show a one-time warning so the inspector keeps the app open
+// until uploads finish.
+let persistenceOk = null; // null = not probed yet
+const persistenceListeners = new Set();
+function setPersistence(ok) {
+  if (persistenceOk === ok) return;
+  persistenceOk = ok;
+  persistenceListeners.forEach((fn) => { try { fn(ok); } catch { /* listener error */ } });
+}
+export function subscribePersistence(fn) {
+  persistenceListeners.add(fn);
+  if (persistenceOk != null) fn(persistenceOk);
+  probePersistence();
+  return () => persistenceListeners.delete(fn);
+}
+export async function probePersistence() {
+  try { await openDb(); setPersistence(true); } catch { setPersistence(false); }
+  return persistenceOk;
+}
+
 // ---------- pending-count subscription (drives the "sending…" indicator) ----------
 const listeners = new Set();
 let lastCount = 0;
