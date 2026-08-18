@@ -1,9 +1,9 @@
 import express from "express";
 import http from "http";
-import { sql } from "drizzle-orm";
-import { db } from "./db";
 import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { registerAppRoutes } from "./routes";
+import { runMigrations } from "./migrations";
+import { startSheetExportWorker } from "./sheetExports";
 
 const app = express();
 // Replit runs behind exactly one reverse proxy, so trust a single hop. This
@@ -14,78 +14,6 @@ app.set("trust proxy", 1);
 // Inspection payloads include compressed JPEG data URLs.
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "40mb" }));
-
-// Ensure the AI accuracy schema is in place.  Runs after listen for the same
-// reason as seedQcCounter (health-check must not block).  Handles both a fresh
-// environment (CREATE TABLE IF NOT EXISTS) and an existing install that already
-// has ai_analyses without the analysis_id column (ALTER TABLE … IF NOT EXISTS).
-async function ensureAccuracySchema() {
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      // Create table; column list matches the full schema so new envs are complete.
-      await db.execute(sql`
-        CREATE TABLE IF NOT EXISTS ai_analyses (
-          id bigserial PRIMARY KEY,
-          ts bigint NOT NULL,
-          analysis_id text
-        )
-      `);
-      // For existing installs that pre-date analysis_id / corrected columns.
-      await db.execute(sql`ALTER TABLE ai_analyses ADD COLUMN IF NOT EXISTS analysis_id text`);
-      await db.execute(sql`ALTER TABLE ai_analyses ADD COLUMN IF NOT EXISTS corrected boolean NOT NULL DEFAULT false`);
-      // Regular (non-partial) unique index: PostgreSQL treats every NULL as
-      // distinct from every other NULL, so multiple rows with analysis_id IS NULL
-      // are allowed.  A non-partial index is required for ON CONFLICT
-      // (analysis_id) DO NOTHING — PostgreSQL cannot infer the conflict target
-      // from a partial WHERE index.
-      await db.execute(sql`
-        CREATE UNIQUE INDEX IF NOT EXISTS ai_analyses_analysis_id_key
-        ON ai_analyses (analysis_id)
-      `);
-      // Link corrections to the analysis that triggered them.
-      await db.execute(sql`ALTER TABLE corrections ADD COLUMN IF NOT EXISTS analysis_id text`);
-      // Idempotent corrections: the same (analysis, diffs) pair must exist at
-      // most once — concurrent retries of the same POST must not double-log a
-      // correction into the shop-calibration corpus. Clean up any duplicates
-      // that predate the constraint, then enforce it with an expression index
-      // (md5 of the canonical jsonb text keeps the index small).
-      await db.execute(sql`
-        DELETE FROM corrections a USING corrections b
-        WHERE a.id > b.id AND a.analysis_id IS NOT NULL
-          AND a.analysis_id = b.analysis_id
-          AND md5(a.diffs::text) = md5(b.diffs::text)
-      `);
-      await db.execute(sql`
-        CREATE UNIQUE INDEX IF NOT EXISTS corrections_analysis_diffs_key
-        ON corrections (analysis_id, md5(diffs::text))
-        WHERE analysis_id IS NOT NULL
-      `);
-      return;
-    } catch (err) {
-      console.error(`accuracy schema attempt ${attempt} failed:`, err);
-      await new Promise((r) => setTimeout(r, attempt * 2000));
-    }
-  }
-  console.error("accuracy schema setup gave up — AI accuracy tracking may not function correctly.");
-}
-
-// Ensure the QC-number counter row exists (first number handed out: FQ-1001).
-// Runs AFTER the server starts listening: a slow database connection during a
-// publish must never keep the health check from getting a response, or the
-// whole publish times out with no logs. Retries a few times, then gives up
-// loudly (the counter row already exists on any environment that has run once).
-async function seedQcCounter() {
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      await db.execute(sql`INSERT INTO qc_counter (id, value) VALUES (1, 1000) ON CONFLICT (id) DO NOTHING`);
-      return;
-    } catch (err) {
-      console.error(`qc_counter seed attempt ${attempt} failed:`, err);
-      await new Promise((r) => setTimeout(r, attempt * 2000));
-    }
-  }
-  console.error("qc_counter seed gave up — counter must already exist for FQ numbers to work.");
-}
 
 // Loud check for required production configuration. A missing secret must show
 // up as an explicit log line in deploy logs, never a silent hang.
@@ -120,6 +48,17 @@ async function main() {
   server.listen(port, "0.0.0.0", () => {
     console.log(`Final QC server listening on 0.0.0.0:${port} (${process.env.NODE_ENV || "development"})`);
   });
+
+  // Reviewed, versioned migrations run BEFORE the request gate opens: the
+  // port is already accepting connections (health check passes) but requests
+  // wait on `ready`, so traffic never hits a half-migrated schema. On a total
+  // failure (DB unreachable after bounded retries) we log loudly and still
+  // serve — a broken DB fails requests anyway, and a bricked publish is worse.
+  console.log("Startup: running migrations…");
+  const migrated = await runMigrations();
+  if (!migrated) {
+    console.error("STARTUP ERROR: serving with incomplete migrations — investigate immediately.");
+  }
 
   console.log("Startup: configuring auth…");
   await setupAuth(app);
@@ -172,9 +111,9 @@ self.addEventListener('activate', (e) => {
   markReady();
   console.log("Startup: auth + routes ready");
 
-  // Background DB seed — never blocks the health check.
-  void seedQcCounter();
-  void ensureAccuracySchema();
+  // Durable Google Sheets export queue: pick up any jobs left over from a
+  // previous run and keep retrying with bounded backoff.
+  startSheetExportWorker();
 }
 
 main().catch((err) => {

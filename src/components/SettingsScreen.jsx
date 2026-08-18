@@ -95,6 +95,27 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
     return out;
   })();
 
+  // Durable Google Sheets export queue (admin visibility + manual retry).
+  const [sheetJobs, setSheetJobs] = useState(null);
+  const [sheetJobsConfigured, setSheetJobsConfigured] = useState(true);
+  const [sheetRetryBusy, setSheetRetryBusy] = useState(null);
+  const loadSheetJobs = useCallback(() => {
+    if (!me.isAdmin) return;
+    api
+      .sheetExports()
+      .then((d) => { setSheetJobs(d.jobs || []); setSheetJobsConfigured(d.configured !== false); })
+      .catch(() => setSheetJobs([]));
+  }, [me.isAdmin]);
+  useEffect(() => { loadSheetJobs(); }, [loadSheetJobs]);
+  const retrySheetJob = (id) => {
+    setSheetRetryBusy(id);
+    api
+      .retrySheetExport(id)
+      .then(() => { showToast('Retry queued ✓'); setTimeout(loadSheetJobs, 1500); })
+      .catch((err) => showToast('Retry failed: ' + err.message))
+      .finally(() => setSheetRetryBusy(null));
+  };
+
   const loadSnapshots = useCallback(() => {
     if (!me.isAdmin) return;
     api
@@ -105,16 +126,28 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
   useEffect(() => { loadSnapshots(); }, [loadSnapshots]);
   useEffect(() => { if (isAdmin && !snapMonth) setSnapMonth(recentMonths[1] || recentMonths[0] || ''); }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runSnapshot = () => {
+  const runSnapshot = (force = false) => {
     if (!snapMonth || snapBusy) return;
     setSnapBusy(true);
     api
-      .snapshotTrackerMonth(snapMonth)
+      .snapshotTrackerMonth(snapMonth, force)
       .then((r) => {
-        showToast(`Snapshotted ${r.month}: ${r.rows} row${r.rows === 1 ? '' : 's'} frozen ✓`);
+        showToast(`Snapshotted ${r.month}: ${r.rows} row${r.rows === 1 ? '' : 's'} frozen ✓${r.previousRows ? ` (previous ${r.previousRows} rows archived)` : ''}`);
         loadSnapshots();
       })
-      .catch((err) => showToast('Snapshot failed: ' + err.message))
+      .catch((err) => {
+        // Guard refusal: the sheet read looked suspicious (empty or much
+        // smaller than what's frozen). The admin can force it knowingly —
+        // the replaced rows are archived either way.
+        if (err.status === 409 && err.data && err.data.guard) {
+          setSnapBusy(false);
+          if (window.confirm(err.message + '\n\nOverwrite anyway? The current frozen rows will be archived first.')) {
+            runSnapshot(true);
+          }
+          return;
+        }
+        showToast('Snapshot failed: ' + err.message);
+      })
       .finally(() => setSnapBusy(false));
   };
 
@@ -696,6 +729,40 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
             <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 9, lineHeight: 1.5 }}>
               Employees sign in with their @truckranch.com account. New sign-ins appear here as PENDING until an admin approves them.
             </div>
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="card">
+            <div className="card-title">GOOGLE SHEETS EXPORTS</div>
+            <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 7, lineHeight: 1.5 }}>
+              Passed/cleared QCs are exported to the VPC Production Tracker through a durable queue that survives restarts. Failed exports retry automatically with backoff; anything stuck can be retried here.
+            </div>
+            {!sheetJobsConfigured && (
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 8 }}>Google Sheets export is not configured.</div>
+            )}
+            {sheetJobs == null && <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 8 }}>Loading…</div>}
+            {sheetJobs != null && sheetJobs.filter((j) => j.status !== 'done').length === 0 && (
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 8 }}>No pending or failed exports ✓</div>
+            )}
+            {(sheetJobs || []).filter((j) => j.status !== 'done').map((j) => (
+              <div key={j.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 0', borderTop: '1px solid #F5F1EC' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, flex: '0 0 auto', minWidth: 66 }}>{j.qcNumber}</span>
+                <span style={{ fontSize: 8, fontWeight: 700, color: '#fff', background: j.status === 'failed' ? 'var(--red)' : 'var(--amber)', padding: '2px 6px', borderRadius: 4 }}>
+                  {j.status.toUpperCase()} · {j.attempts} TR{j.attempts === 1 ? 'Y' : 'IES'}
+                </span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 9, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={j.lastError || ''}>
+                  {j.lastError || ''}
+                </span>
+                <div
+                  className={'btn btn-brown' + (sheetRetryBusy === j.id ? ' disabled' : '')}
+                  style={{ flex: '0 0 auto', height: 34, fontSize: 10, padding: '0 12px', opacity: sheetRetryBusy === j.id ? 0.6 : 1 }}
+                  onClick={() => retrySheetJob(j.id)}
+                >
+                  {sheetRetryBusy === j.id ? '…' : 'RETRY'}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 

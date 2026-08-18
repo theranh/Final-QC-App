@@ -286,7 +286,9 @@ export async function flushQueue() {
         // queue doesn't retry forever (401 is transient: same job works
         // after the tech signs back in, so keep it).
          
-        if (e.status === 413 || e.status === 409 || e.status === 403) await removeJob(job.key);
+        // 410 = the owning quote was deleted (tombstoned) — the upload can
+        // never attach; drop it instead of retrying forever.
+        if (e.status === 413 || e.status === 409 || e.status === 403 || e.status === 410) await removeJob(job.key);
         // Transient (offline / 5xx / 401): leave it for the next flush pass.
       }
     }

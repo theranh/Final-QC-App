@@ -6,7 +6,7 @@
 //     PIN rejected, committed_by immutable (409 on re-commit), supervisor
 //     override writes committed_by=worker + overridden_by=supervisor, and a
 //     non-override signer cannot sign for someone else.
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 
@@ -29,6 +29,7 @@ const H = vi.hoisted(() => {
   const audits: any[] = [];
   const snapRows: any[] = []; // quote_snapshots (Phase 1A)
   const corrRows: any[] = []; // pricing_corrections (Phase 1A)
+  const settingsRows: any[] = []; // settings key/value store (ratesMeta)
 
   const sqlParts = (q: any): { text: string; params: any[] } => {
     const chunks: any[] = q?.queryChunks ?? [];
@@ -127,6 +128,11 @@ const H = vi.hoisted(() => {
       const { text, params } = sqlParts(q);
       // (Table objects contribute no literal text in sqlParts, so match on
       // the FOR UPDATE marker — only the quote read uses it.)
+      // Rates-version guard: locked read of the ratesMeta settings row.
+      if (/ratesMeta/i.test(text)) {
+        const row = settingsRows.find((s) => s.key === "ratesMeta");
+        return { rows: row ? [{ value: row.value }] : [] };
+      }
       if (/for update/i.test(text)) {
         const row = quoteRows.find((r) => r.id === params[0]);
         return {
@@ -153,7 +159,8 @@ const H = vi.hoisted(() => {
           return {
             then: (res: any, rej: any) => {
               let rows: any[] = [];
-              if (emps.some((e) => e.id === id)) rows = emps.filter((e) => e.id === id);
+              if (settingsRows.some((s) => s.key === id)) rows = settingsRows.filter((s) => s.key === id);
+              else if (emps.some((e) => e.id === id)) rows = emps.filter((e) => e.id === id);
               else if (intakeRows.some((r) => r.id === id)) rows = intakeRows.filter((r) => r.id === id);
               else if (quoteRows.some((r) => r.id === id)) rows = quoteRows.filter((r) => r.id === id);
               return Promise.resolve(rows).then(res, rej);
@@ -203,10 +210,10 @@ const H = vi.hoisted(() => {
       },
     }),
   };
-  return { emps, intakeRows, quoteRows, audits, snapRows, corrRows, fakeDb };
+  return { emps, intakeRows, quoteRows, audits, snapRows, corrRows, settingsRows, fakeDb };
 });
 
-const { emps, intakeRows, quoteRows, audits, snapRows, corrRows } = H;
+const { emps, intakeRows, quoteRows, audits, snapRows, corrRows, settingsRows } = H;
 
 describe("PIN hashing", () => {
   it("round-trips a correct PIN and rejects a wrong one", async () => {
@@ -261,6 +268,13 @@ beforeAll(async () => {
 });
 
 afterAll(() => server?.close());
+
+beforeEach(async () => {
+  // Each case gets a fresh PIN rate-limit window so unrelated tests' attempts
+  // don't overflow the per-signer/per-IP buckets mid-suite.
+  const { resetPinRateLimits } = await import("./pin");
+  resetPinRateLimits();
+});
 
 async function post(path: string, body: any) {
   const res = await fetch(base + path, {
@@ -342,6 +356,32 @@ describe("commit endpoints", () => {
     // The audit INSERT ran inside db.transaction alongside the UPDATE.
     expect(audits.length).toBe(before + 1);
     expect(audits[audits.length - 1].action).toBe("quote_committed");
+  });
+});
+
+describe("rates version guard at commit", () => {
+  it("409s with code rates_changed when the client's ratesVersion is stale", async () => {
+    settingsRows.push({ key: "ratesMeta", value: { version: 3 } });
+    quoteRows.push({ id: "qrv1", data: {}, committedBy: null, overriddenBy: null });
+    const r = await post("/api/quoter/commit-quote", { id: "qrv1", signerId: 1, pin: "1111", ratesVersion: 2 });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("rates_changed");
+    expect(r.body.currentRatesVersion).toBe(3);
+    // quote NOT committed
+    expect(quoteRows.find((q) => q.id === "qrv1").committedBy).toBeNull();
+    settingsRows.length = 0;
+  });
+
+  it("commits when the ratesVersion matches, and when omitted (old clients)", async () => {
+    settingsRows.push({ key: "ratesMeta", value: { version: 3 } });
+    quoteRows.push({ id: "qrv2", data: {}, committedBy: null, overriddenBy: null });
+    const ok = await post("/api/quoter/commit-quote", { id: "qrv2", signerId: 1, pin: "1111", ratesVersion: 3 });
+    expect(ok.status).toBe(200);
+
+    quoteRows.push({ id: "qrv3", data: {}, committedBy: null, overriddenBy: null });
+    const legacy = await post("/api/quoter/commit-quote", { id: "qrv3", signerId: 1, pin: "1111" });
+    expect(legacy.status).toBe(200);
+    settingsRows.length = 0;
   });
 });
 

@@ -38,6 +38,11 @@ const CATEGORY_COLUMNS: { key: string; label: string }[] = [
   { key: "bed", label: "Bedliner" },
 ];
 
+/** True when the service-account secret + spreadsheet id are both present. */
+export function isSheetsConfigured(): boolean {
+  return config() != null;
+}
+
 let warned = false;
 function config(): { creds: { client_email: string; private_key: string }; spreadsheetId: string } | null {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -195,39 +200,29 @@ export { monthTabName };
 /**
  * Export a passed/cleared inspection as a vehicle row on the matching monthly
  * tab, updating the next empty pre-formatted row in place (no row insertion).
- * Fire-and-forget: call without awaiting from route handlers; never throws.
+ *
+ * THROWS on any failure — the durable queue in server/sheetExports.ts owns
+ * retries, backoff, and admin visibility (the old in-memory fire-and-forget
+ * chain silently dropped exports across restarts). Callers must run exports
+ * sequentially: read-target-then-write on the sheet is not atomic.
  */
-// Exports run one at a time per server instance so two simultaneous QCs can't
-// both grab the same empty row (read-target-then-write is not atomic).
-let exportQueue: Promise<void> = Promise.resolve();
-
-export function exportInspectionToSheet(record: Inspection): Promise<void> {
-  exportQueue = exportQueue.then(() => doExport(record));
-  return exportQueue;
-}
-
-async function doExport(record: Inspection): Promise<void> {
-  try {
-    if (!isExportable(record)) return; // failed/open units wait for a clearing re-check
-    const cfg = config();
-    if (!cfg) return;
-    const finalized = finalizedDate(record);
-    const tab = monthTabName(finalized);
-    const token = await accessToken(cfg.creds);
-    const rowNum = await targetRow(cfg.spreadsheetId, token, tab, record.vin || "", record.qcNumber || "");
-    const range = encodeURIComponent(`'${tab}'!A${rowNum}:Q${rowNum}`);
-    const res = await fetch(`${SHEETS_API}/${cfg.spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [buildRow(record, finalized)] }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Update of tab "${tab}" row ${rowNum} failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-    console.log(`Google Sheets: exported ${record.qcNumber} to "${tab}" row ${rowNum}`);
-  } catch (err: any) {
-    // Sheet export must never affect the inspection itself.
-    console.error(`Google Sheets export failed for ${record.qcNumber}:`, err?.message || err);
+export async function performSheetExport(record: Inspection): Promise<void> {
+  if (!isExportable(record)) return; // failed/open units wait for a clearing re-check
+  const cfg = config();
+  if (!cfg) return;
+  const finalized = finalizedDate(record);
+  const tab = monthTabName(finalized);
+  const token = await accessToken(cfg.creds);
+  const rowNum = await targetRow(cfg.spreadsheetId, token, tab, record.vin || "", record.qcNumber || "");
+  const range = encodeURIComponent(`'${tab}'!A${rowNum}:Q${rowNum}`);
+  const res = await fetch(`${SHEETS_API}/${cfg.spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ values: [buildRow(record, finalized)] }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Update of tab "${tab}" row ${rowNum} failed (${res.status}): ${text.slice(0, 300)}`);
   }
+  console.log(`Google Sheets: exported ${record.qcNumber} to "${tab}" row ${rowNum}`);
 }

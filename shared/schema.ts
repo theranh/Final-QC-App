@@ -280,6 +280,41 @@ export const productionTracker = pgTable(
   (t) => [primaryKey({ columns: [t.vin, t.month] })],
 );
 
+// Prior versions of frozen tracker months. Every re-snapshot archives the
+// rows it replaces so a bad overwrite (empty/shrunken sheet read) is always
+// reversible. Append-only.
+export const productionTrackerArchive = pgTable("production_tracker_archive", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  vin: text("vin").notNull(),
+  month: text("month").notNull(),
+  retailPlanUsd: numeric("retail_plan_usd"),
+  closedRoUsd: numeric("closed_ro_usd"),
+  daysToClose: integer("days_to_close"),
+  snapshotAt: timestamp("snapshot_at", { withTimezone: true }),
+  archivedAt: timestamp("archived_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Durable Google Sheets export queue. One row per export attempt request;
+// survives restarts, retried with bounded backoff, visible to admins.
+export const sheetExportJobs = pgTable("sheet_export_jobs", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  inspectionId: integer("inspection_id").notNull(),
+  qcNumber: text("qc_number").notNull(),
+  status: text("status").notNull().default("pending"), // pending | done | failed
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).defaultNow().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Tombstones for deleted quotes: a queued photo upload from an offline device
+// must never resurrect data under a quote id that was deliberately deleted.
+export const deletedQuotes = pgTable("deleted_quotes", {
+  id: text("id").primaryKey(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type Quote = typeof quotes.$inferSelect;
 export type Intake = typeof intakes.$inferSelect;
 

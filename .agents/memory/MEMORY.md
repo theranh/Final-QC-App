@@ -12,4 +12,5 @@
 - [Photo upload queue](photo-upload-queue.md) — queue records keyed per capture, not per slot, or a slow upload's cleanup deletes a retake; 401 is transient, only 413/409/403 drop.
 - [Photo delete durability](photo-delete-durability.md) — offline deletes persist in IDB pendingDeletes and retry via flushQueue; EXIF parser lives only in photoExif.ts; corrections dedupe via unique index, not SELECT-then-INSERT.
 - [Phase 1A pricing capture](phase1a-pricing-capture.md) — commit-blocking snapshots at PIN commit; per-line math must use the full billing pipeline; observation only until user approves 1B.
+- [Reliability hardening](reliability-hardening.md) — guards live INSIDE transactions; ratesMeta versioning; delete tombstones (410); durable sheet-export queue with SKIP LOCKED claims; xact-lock migrations.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.

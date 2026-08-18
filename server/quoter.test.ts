@@ -16,6 +16,10 @@ const H = vi.hoisted(() => {
   const quoteRows: any[] = [];
   const intakeRows: any[] = [];
   const photoRows: any[] = [];
+  const deletedQuoteRows: string[] = []; // tombstones
+
+  // Drizzle pgTable name (works for the real schema objects passed through).
+  const tableName = (t: any): string => String(t?.[Symbol.for("drizzle:Name")] ?? "");
 
   const sqlParts = (q: any): { text: string; params: any[] } => {
     const chunks: any[] = q?.queryChunks ?? [];
@@ -47,6 +51,15 @@ const H = vi.hoisted(() => {
     // ----- insert (upsert) : PUT /api/quoter/quotes + POST /api/quoter/photos -----
     insert: (_table: any) => ({
       values: (v: any) => {
+        if (tableName(_table) === "deleted_quotes") {
+          const apply = () => {
+            if (!deletedQuoteRows.includes(v.id)) deletedQuoteRows.push(v.id);
+            return [];
+          };
+          const p: any = Promise.resolve().then(apply);
+          p.onConflictDoNothing = () => Promise.resolve().then(apply);
+          return p;
+        }
         const applyUpsert = () => {
           // Photo rows have a quoteId field; quote rows do not.
           if (v.quoteId !== undefined) {
@@ -99,6 +112,12 @@ const H = vi.hoisted(() => {
     // ----- delete : DELETE quotes/photos -----
     delete: (_table: any) => ({
       where: (cond: any) => {
+        if (tableName(_table) === "deleted_quotes") {
+          const idT = idOf(cond);
+          const i = deletedQuoteRows.indexOf(idT);
+          if (i >= 0) deletedQuoteRows.splice(i, 1);
+          return Promise.resolve([]);
+        }
         const { text, params } = sqlParts(cond);
         // The committed-guard delete uses a sql`` fragment ending in
         // "IS NULL"; plain eq()-based deletes do not. (Column refs contribute
@@ -147,6 +166,9 @@ const H = vi.hoisted(() => {
       if (/pg_advisory_xact_lock/i.test(text)) {
         return { rows: [] };
       }
+      if (/FROM deleted_quotes/i.test(text)) {
+        return { rows: deletedQuoteRows.includes(params[0]) ? [{ "?column?": 1 }] : [] };
+      }
       if (/FROM photos WHERE quote_id/i.test(text)) {
         // params[0] = quoteId, params[1] = excluded photo id
         const quoteId = params[0];
@@ -190,10 +212,10 @@ const H = vi.hoisted(() => {
     transaction: async (fn: any) => fn(fakeDb),
   };
 
-  return { quoteRows, intakeRows, photoRows, fakeDb };
+  return { quoteRows, intakeRows, photoRows, deletedQuoteRows, fakeDb };
 });
 
-const { quoteRows, intakeRows, photoRows } = H;
+const { quoteRows, intakeRows, photoRows, deletedQuoteRows } = H;
 
 vi.mock("./db", () => ({ db: H.fakeDb }));
 vi.mock("./access", () => ({
@@ -244,6 +266,7 @@ beforeEach(() => {
   quoteRows.length = 0;
   intakeRows.length = 0;
   photoRows.length = 0;
+  deletedQuoteRows.length = 0;
 });
 
 describe("quote immutability once committed", () => {
@@ -274,6 +297,45 @@ describe("quote immutability once committed", () => {
     const r = await req("DELETE", "/api/quoter/quotes?id=open2");
     expect(r.status).toBe(200);
     expect(quoteRows.some((x) => x.id === "open2")).toBe(false);
+  });
+});
+
+describe("quote delete integrity (no orphans, tombstoned uploads)", () => {
+  it("deleting a quote also deletes its photos and tombstones the id", async () => {
+    quoteRows.push({ id: "qd", data: {}, committedBy: null, overriddenBy: null });
+    photoRows.push({ id: "pd1", quoteId: "qd" }, { id: "pd2", quoteId: "qd" }, { id: "keep", quoteId: "other" });
+    const r = await req("DELETE", "/api/quoter/quotes?id=qd");
+    expect(r.status).toBe(200);
+    expect(photoRows.filter((p) => p.quoteId === "qd")).toHaveLength(0);
+    expect(photoRows.some((p) => p.id === "keep")).toBe(true);
+    expect(deletedQuoteRows.includes("qd")).toBe(true);
+  });
+
+  it("a queued photo upload for a deleted quote is refused with 410 and stores nothing", async () => {
+    deletedQuoteRows.push("gone");
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "late1",
+      quoteId: "gone",
+      slot: "front",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(r.status).toBe(410);
+    expect(photoRows.some((p) => p.id === "late1")).toBe(false);
+  });
+
+  it("an explicit full quote save clears the tombstone so uploads work again", async () => {
+    deletedQuoteRows.push("reborn");
+    const put = await req("PUT", "/api/quoter/quotes", { id: "reborn", data: { a: 1 } });
+    expect(put.status).toBe(200);
+    expect(deletedQuoteRows.includes("reborn")).toBe(false);
+    const up = await req("POST", "/api/quoter/photos", {
+      id: "np1",
+      quoteId: "reborn",
+      slot: "front",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(up.status).toBe(200);
+    expect(photoRows.some((p) => p.id === "np1")).toBe(true);
   });
 });
 

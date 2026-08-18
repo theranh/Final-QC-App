@@ -235,7 +235,11 @@ vi.mock("./replit_integrations/auth", () => ({
 vi.mock("./googleSheets", () => ({
   monthTabName: () => "TestTab",
   readTrackerRange: async () => null,
-  exportInspectionToSheet: async () => {},
+}));
+
+vi.mock("./sheetExports", () => ({
+  enqueueSheetExport: () => {},
+  registerSheetExportRoutes: () => {},
 }));
 
 // No frozen snapshots in these tests — closed months fall through to the live

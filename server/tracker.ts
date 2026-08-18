@@ -14,7 +14,7 @@
 import type { Express } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
-import { productionTracker, auditLog, type Employee } from "@shared/schema";
+import { productionTracker, productionTrackerArchive, auditLog, type Employee } from "@shared/schema";
 import { requireAdmin } from "./access";
 import { readTrackerRange } from "./googleSheets";
 
@@ -37,7 +37,52 @@ function parseInt10(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export type SnapshotResult = { month: string; rows: number; snapshotAt: string };
+export type SnapshotResult = {
+  month: string;
+  rows: number;
+  snapshotAt: string;
+  previousRows: number;
+  archived: boolean;
+};
+
+/**
+ * Guard against a suspicious re-snapshot silently replacing valid history:
+ * an empty read, or one materially smaller (< half) than what is already
+ * frozen, is refused unless the admin explicitly forces it.
+ * Pure — unit-tested in tracker.test.ts.
+ */
+export function snapshotGuard(
+  existingCount: number,
+  newCount: number,
+  force: boolean,
+): { ok: true } | { ok: false; reason: string } {
+  if (force || existingCount <= 0) return { ok: true };
+  if (newCount === 0) {
+    return {
+      ok: false,
+      reason: `The sheet read returned 0 rows but ${existingCount} rows are already frozen for this month — refusing to erase them. Check the tab name/sheet, or force the overwrite if this is intentional.`,
+    };
+  }
+  if (newCount * 2 < existingCount) {
+    return {
+      ok: false,
+      reason: `The sheet read returned only ${newCount} rows but ${existingCount} rows are already frozen for this month — refusing a suspiciously smaller overwrite. Check the sheet, or force the overwrite if this is intentional.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Error type the route maps to a 409 with guard context. */
+export class SnapshotGuardError extends Error {
+  previousRows: number;
+  newRows: number;
+  constructor(reason: string, previousRows: number, newRows: number) {
+    super(reason);
+    this.name = "SnapshotGuardError";
+    this.previousRows = previousRows;
+    this.newRows = newRows;
+  }
+}
 
 /**
  * Read one month tab and freeze its rows into production_tracker.
@@ -49,7 +94,7 @@ export type SnapshotResult = { month: string; rows: number; snapshotAt: string }
  * Throws if Google Sheets is not configured (readTrackerRange → null) so the
  * caller sees a clear error rather than silently freezing nothing.
  */
-export async function snapshotMonth(month: string): Promise<SnapshotResult> {
+export async function snapshotMonth(month: string, opts: { force?: boolean } = {}): Promise<SnapshotResult> {
   const tab = month.trim();
   if (!tab) throw new Error("month is required (e.g. 'Jul 2026')");
 
@@ -87,16 +132,46 @@ export async function snapshotMonth(month: string): Promise<SnapshotResult> {
     });
   }
 
-  const snapshotAt = await db.transaction(async (tx) => {
+  const { snapshotAt, previousRows } = await db.transaction(async (tx) => {
+    // Serialize per month: two concurrent re-snapshots of the same month
+    // would otherwise both read the pre-replace count (guard on stale data)
+    // and double-archive the same rows.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"tracker_snapshot:" + tab})::bigint)`);
+    // Count what's already frozen (inside the transaction so a concurrent
+    // re-run can't slip between check and replace).
+    const cnt = await tx.execute(
+      sql`SELECT COUNT(*)::int AS n FROM production_tracker WHERE month = ${tab}`,
+    );
+    const existing = Number((cnt.rows?.[0] as any)?.n ?? 0);
+
+    const verdict = snapshotGuard(existing, rows.length, !!opts.force);
+    if (!verdict.ok) throw new SnapshotGuardError(verdict.reason, existing, rows.length);
+
+    // Preserve the rows being replaced — corrections stay reversible.
+    if (existing > 0) {
+      await tx.execute(sql`
+        INSERT INTO production_tracker_archive
+          (vin, month, retail_plan_usd, closed_ro_usd, days_to_close, snapshot_at)
+        SELECT vin, month, retail_plan_usd, closed_ro_usd, days_to_close, snapshot_at
+        FROM production_tracker WHERE month = ${tab}
+      `);
+    }
+
     await tx.delete(productionTracker).where(eq(productionTracker.month, tab));
     const at = new Date();
     if (rows.length) {
       await tx.insert(productionTracker).values(rows.map((r) => ({ ...r, snapshotAt: at })));
     }
-    return at;
+    return { snapshotAt: at, previousRows: existing };
   });
 
-  return { month: tab, rows: rows.length, snapshotAt: snapshotAt.toISOString() };
+  return {
+    month: tab,
+    rows: rows.length,
+    snapshotAt: snapshotAt.toISOString(),
+    previousRows,
+    archived: previousRows > 0,
+  };
 }
 
 /** Rows for a frozen month, keyed by VIN. Empty map when nothing is snapshotted. */
@@ -152,18 +227,27 @@ export function registerTrackerRoutes(app: Express) {
   app.post("/api/tracker/snapshot", requireAdmin, async (req: any, res, next) => {
     try {
       const month = String(req.body?.month ?? "").trim();
+      const force = req.body?.force === true;
       if (!month) return res.status(400).json({ message: "month is required (e.g. 'Jul 2026')" });
-      const result = await snapshotMonth(month);
+      const result = await snapshotMonth(month, { force });
       const emp: Employee = req.employee;
       await db.insert(auditLog).values({
         action: "tracker_snapshot",
         actorId: emp.userId || String(emp.id),
         actorEmail: emp.email,
         actorName: emp.name,
-        details: { month: result.month, rows: result.rows },
+        details: { month: result.month, rows: result.rows, previousRows: result.previousRows, force },
       });
       res.json(result);
     } catch (err: any) {
+      if (err instanceof SnapshotGuardError) {
+        return res.status(409).json({
+          message: err.message,
+          guard: true,
+          previousRows: err.previousRows,
+          newRows: err.newRows,
+        });
+      }
       // A Sheets-config / read failure is a bad-gateway condition, not a 500.
       if (/not configured|Reading tab/i.test(String(err?.message || ""))) {
         return res.status(502).json({ message: String(err.message) });

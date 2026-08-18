@@ -17,7 +17,7 @@ import {
 } from "@shared/schema";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
-import { exportInspectionToSheet } from "./googleSheets";
+import { enqueueSheetExport, registerSheetExportRoutes } from "./sheetExports";
 import { registerIntakeQuoteRoute } from "./localQuote";
 import { registerDashboardRoute, invalidateDashboardCache } from "./dashboard";
 import { registerQuoterRoutes } from "./quoter";
@@ -229,6 +229,7 @@ export function registerAppRoutes(app: Express) {
   registerPinRoutes(app);
   registerAccuracyReportRoute(app);
   registerTrackerRoutes(app);
+  registerSheetExportRoutes(app);
 
   app.get("/api/health", async (_req, res) => {
     try {
@@ -387,8 +388,8 @@ export function registerAppRoutes(app: Express) {
         });
       }
 
-      // Fire-and-forget: sheet export never blocks or fails the inspection.
-      void exportInspectionToSheet(created.row);
+      // Durable queue: never blocks or fails the inspection; survives restarts.
+      enqueueSheetExport(created.row);
       invalidateDashboardCache(); // the new inspection leaves "awaiting Final QC" immediately
       res.status(201).json({ record: toClientRecord(created.row), nextQc: await nextQcPreview() });
     } catch (err) {
@@ -486,9 +487,9 @@ export function registerAppRoutes(app: Express) {
             : "Inspection is not open for re-check.";
         return res.status(code).json({ message });
       }
-      // A clearing re-check means the unit finally passed QC — export it now.
-      // Fire-and-forget: sheet export never blocks or fails the re-check.
-      if (updated.row!.status === "cleared") void exportInspectionToSheet(updated.row!);
+      // A clearing re-check means the unit finally passed QC — queue the
+      // export (durable; never blocks or fails the re-check).
+      if (updated.row!.status === "cleared") enqueueSheetExport(updated.row!);
       invalidateDashboardCache(); // re-check outcomes change dash counts right away
       res.json({ record: toClientRecord(updated.row!) });
     } catch (err) {

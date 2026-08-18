@@ -7,7 +7,7 @@ import { db } from "./db";
 import { requireEmployee } from "./access";
 import { invalidateDashboardCache } from "./dashboard";
 import { and } from "drizzle-orm";
-import { auditLog, employees, quotes, intakes, type Employee } from "@shared/schema";
+import { auditLog, employees, quotes, intakes, settings, type Employee } from "@shared/schema";
 import { captureCommitSnapshot } from "./quoteSnapshot";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,30 @@ import { captureCommitSnapshot } from "./quoteSnapshot";
 // pick whose work they are countersigning. committed_by = the worker,
 // overridden_by = the supervisor.
 // ---------------------------------------------------------------------------
+
+/**
+ * Rate-version guard for commits. When the client sends the ratesVersion it
+ * loaded with the quote, refuse the commit if rates have changed since — the
+ * estimator must reload and re-approve totals instead of silently committing
+ * against rates they never saw. Older clients that send nothing are unaffected.
+ */
+async function ratesVersionConflict(executor: any, body: any): Promise<{ conflict: boolean; current?: number }> {
+  const sent = body?.ratesVersion;
+  if (sent == null) return { conflict: false };
+  // FOR UPDATE inside the commit transaction: a rates save that races this
+  // commit must either land before (version bumped → conflict) or wait until
+  // the commit finishes — never slip between check and commit.
+  const r = await executor.execute(
+    sql`SELECT value FROM ${settings} WHERE key = 'ratesMeta' FOR UPDATE`,
+  );
+  const current = Number((r.rows?.[0] as any)?.value?.version ?? 0);
+  return { conflict: Number(sent) !== current, current };
+}
+
+const RATES_CHANGED_409 = {
+  error: "Pricing rates were updated since this quote was loaded. Reopen the quote to refresh totals, then commit.",
+  code: "rates_changed",
+};
 
 const scrypt = promisify(scryptCb) as (
   password: string,
@@ -80,6 +104,11 @@ function bumpBucket(key: string, now: number): number {
   }
   b.count++;
   return b.count;
+}
+
+/** Test-only: clear the rate-limit buckets so unrelated cases don't collide. */
+export function resetPinRateLimits() {
+  pinBuckets.clear();
 }
 
 function pinRateLimited(signerId: number, ip: string): boolean {
@@ -225,7 +254,13 @@ export function registerPinRoutes(app: Express) {
       // Commit + audit atomically: the immutability-guarded UPDATE and the
       // audit INSERT share one transaction, so a commit never lands without
       // its audit row (and a failed audit rolls the commit back).
+      let ratesConflict: { current?: number } | null = null;
       const committed = await db.transaction(async (tx) => {
+        const rv = await ratesVersionConflict(tx, req.body);
+        if (rv.conflict) {
+          ratesConflict = { current: rv.current };
+          return false;
+        }
         // Immutability guard: only write when committed_by is still NULL.
         const [saved] = await tx
           .update(intakes)
@@ -263,6 +298,9 @@ export function registerPinRoutes(app: Express) {
         }
         return true;
       });
+      if (ratesConflict) {
+        return res.status(409).json({ ...RATES_CHANGED_409, currentRatesVersion: (ratesConflict as any).current });
+      }
       if (!committed) {
         return res.status(409).json({ error: "This intake was just committed by someone else." });
       }
@@ -297,7 +335,13 @@ export function registerPinRoutes(app: Express) {
 
       const qData = (row.data as any) || {};
       // Commit + audit atomically (see commit-intake for rationale).
+      let ratesConflict: { current?: number } | null = null;
       const committed = await db.transaction(async (tx) => {
+        const rv = await ratesVersionConflict(tx, req.body);
+        if (rv.conflict) {
+          ratesConflict = { current: rv.current };
+          return false;
+        }
         const [saved] = await tx
           .update(quotes)
           .set({ committedBy: sig.committedBy, overriddenBy: sig.overriddenBy })
@@ -322,6 +366,9 @@ export function registerPinRoutes(app: Express) {
         });
         return true;
       });
+      if (ratesConflict) {
+        return res.status(409).json({ ...RATES_CHANGED_409, currentRatesVersion: (ratesConflict as any).current });
+      }
       if (!committed) {
         return res.status(409).json({ error: "This quote was just committed by someone else." });
       }

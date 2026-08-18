@@ -58,7 +58,11 @@ export const api = {
 
   // ---------- Production Tracker snapshots (admin) ----------
   trackerSnapshots: () => request('GET', '/api/tracker/snapshots'),
-  snapshotTrackerMonth: (month) => request('POST', '/api/tracker/snapshot', { month }),
+  snapshotTrackerMonth: (month, force) => request('POST', '/api/tracker/snapshot', { month, force: !!force }),
+
+  // ---------- Google Sheets export queue (admin) ----------
+  sheetExports: () => request('GET', '/api/sheet-exports'),
+  retrySheetExport: (id) => request('POST', `/api/sheet-exports/${id}/retry`),
 
   // ---------- Body Quoter ----------
   quoterSync: () => request('GET', '/api/quoter/sync'),

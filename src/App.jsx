@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { CATS, CHECKLIST } from './lib/constants';
 import { initDraftBoot, newDraft, persistDraftBundle, saveLS, loadLS, stripRc } from './lib/storage';
+import { savePendingCommit, loadPendingCommit, clearPendingCommit } from './lib/pendingCommit';
 import { curPeriod } from './lib/stats';
 import { exportCsv, exportBackup, downloadServerBackup } from './lib/exports';
 import { compressImageFile } from './lib/photo';
@@ -62,6 +63,9 @@ function AuthedApp({ me, onAuthRefresh }) {
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
   const [loadError, setLoadError] = useState(null); // last startup failure detail (shown on ErrorScreen)
   const [saving, setSaving] = useState(false);
+  // Durable pending commit (Final QC / re-check that failed to reach the
+  // server). Restored from localStorage so a crash/refresh can't hide it.
+  const [pendingCommit, setPendingCommit] = useState(() => loadPendingCommit());
 
   const [tab, setTab] = useState('dash');
   const [intakeOpenVin, setIntakeOpenVin] = useState(null); // VIN to auto-open on the Intake tab
@@ -367,10 +371,18 @@ function AuthedApp({ me, onAuthRefresh }) {
       failCount,
       sig: sigRef.current ? sigRef.current.toDataURL() : null,
     };
+    // Persist the exact payload BEFORE the network call: if the server write
+    // fails (offline, 5xx, crash), the app must show NOT SAVED with a retry —
+    // never look successfully saved.
+    const entry = { type: 'create', payload };
+    savePendingCommit(entry);
+    setPendingCommit(entry);
     setSaving(true);
     api
       .createInspection(payload)
       .then(({ record, nextQc: nq }) => {
+        clearPendingCommit();
+        setPendingCommit(null);
         dataGenRef.current++;
         setRecs((prev) => [record, ...prev]);
         setNextQc(nq);
@@ -388,9 +400,53 @@ function AuthedApp({ me, onAuthRefresh }) {
       })
       .catch((err) => {
         if (err.status === 401) window.location.href = '/api/login';
-        else showToast('Could not save: ' + err.message);
+        else if (err.status === 409) {
+          // Server says this VIN already has a Final QC — the work IS saved
+          // (e.g. a retry after an ambiguous timeout). Don't keep a stale
+          // pending copy around.
+          clearPendingCommit();
+          setPendingCommit(null);
+          showToast(err.message);
+          loadData();
+        } else showToast('NOT SAVED — ' + err.message + '. Your inspection is kept on this device; use RETRY below.');
       })
       .finally(() => setSaving(false));
+  };
+
+  // Retry a durable pending commit (create or re-check) kept on this device.
+  const retryPendingCommit = () => {
+    const p = pendingCommit || loadPendingCommit();
+    if (!p || saving) return;
+    setSaving(true);
+    const done = () => {
+      clearPendingCommit();
+      setPendingCommit(null);
+    };
+    const call =
+      p.type === 'recheck' ? api.commitRecheck(p.qc, p.payload) : api.createInspection(p.payload);
+    call
+      .then(() => {
+        done();
+        showToast('Saved to the server ✓');
+        loadData();
+      })
+      .catch((err) => {
+        if (err.status === 401) window.location.href = '/api/login';
+        else if (err.status === 409 || err.status === 400) {
+          // 409: already saved / already updated. 400 on a pending re-check:
+          // the open items no longer match (a retry of a re-check that DID
+          // land). Either way the server state is authoritative — reload.
+          done();
+          showToast('Already saved on the server — reloading');
+          loadData();
+        } else showToast('Still NOT SAVED — ' + err.message);
+      })
+      .finally(() => setSaving(false));
+  };
+  const discardPendingCommit = () => {
+    if (!window.confirm('Discard the unsaved inspection kept on this device? This cannot be undone.')) return;
+    clearPendingCommit();
+    setPendingCommit(null);
   };
 
   // ---------- re-check ----------
@@ -435,10 +491,18 @@ function AuthedApp({ me, onAuthRefresh }) {
       }
       return it;
     });
+    const rcPayload = { sig: rcSigRef.current ? rcSigRef.current.toDataURL() : null, items: cycleItems };
+    // Same durable pending-commit rule as Final QC: persist before the call,
+    // clear only after confirmed server success.
+    const entry = { type: 'recheck', qc: r.id, payload: rcPayload };
+    savePendingCommit(entry);
+    setPendingCommit(entry);
     setSaving(true);
     api
-      .commitRecheck(r.id, { sig: rcSigRef.current ? rcSigRef.current.toDataURL() : null, items: cycleItems })
+      .commitRecheck(r.id, rcPayload)
       .then(({ record }) => {
+        clearPendingCommit();
+        setPendingCommit(null);
         dataGenRef.current++;
         setRecs((prev) => prev.map((x) => (x.id === record.id ? record : x)));
         const still = (record.openItems || []).length;
@@ -449,10 +513,12 @@ function AuthedApp({ me, onAuthRefresh }) {
       .catch((err) => {
         if (err.status === 401) window.location.href = '/api/login';
         else if (err.status === 409) {
+          clearPendingCommit();
+          setPendingCommit(null);
           showToast('This inspection was already updated — reloading');
           loadData();
           closeRecheck();
-        } else showToast('Could not save: ' + err.message);
+        } else showToast('NOT SAVED — ' + err.message + '. Your re-check is kept on this device; use RETRY below.');
       })
       .finally(() => setSaving(false));
   };
@@ -722,6 +788,31 @@ function AuthedApp({ me, onAuthRefresh }) {
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />
+        {pendingCommit && (
+          <div
+            style={{ position: 'fixed', left: 0, right: 0, bottom: 62, zIndex: 60, display: 'flex', alignItems: 'center', gap: 10, background: '#b91c1c', color: '#fff', padding: '10px 14px', fontSize: 12, fontWeight: 700 }}
+          >
+            <span style={{ flex: 1, lineHeight: 1.4 }}>
+              {pendingCommit.type === 'recheck'
+                ? `Re-check for ${pendingCommit.qc} NOT SAVED — kept on this device.`
+                : 'A Final QC inspection is NOT SAVED — kept on this device.'}
+            </span>
+            <button
+              onClick={retryPendingCommit}
+              disabled={saving}
+              style={{ flex: '0 0 auto', background: '#fff', color: '#b91c1c', border: 'none', borderRadius: 6, padding: '8px 14px', fontWeight: 800, fontSize: 12 }}
+            >
+              {saving ? 'SAVING…' : 'RETRY'}
+            </button>
+            <button
+              onClick={discardPendingCommit}
+              disabled={saving}
+              style={{ flex: '0 0 auto', background: 'transparent', color: '#fff', border: '1px solid rgba(255,255,255,.6)', borderRadius: 6, padding: '8px 10px', fontWeight: 700, fontSize: 11 }}
+            >
+              DISCARD
+            </button>
+          </div>
+        )}
         <PhotoQueueIndicator />
         <Lightbox src={lightbox} onClose={() => setLightbox(null)} />
         {scanning && <VinScanner onDetected={onVinDetected} onCancel={() => setScanning(false)} />}

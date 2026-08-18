@@ -84,6 +84,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const [quoteSummary, setQuoteSummary] = useState(null);
   const [quoteNotes, setQuoteNotes] = useState('');
   const quoteRowRef = useRef(null); // full quote entry backing the notes editor
+  const ratesVersionRef = useRef(null); // rates version the quote view was loaded with
   const notesTimerRef = useRef(null);
   // Landing "QUOTE DETAILS" prefill + recent quotes (mirrors the old home)
   const [homeStock, setHomeStock] = useState('');
@@ -116,6 +117,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
     let live = true;
     api.quoterSync().then((j) => {
       if (!live) return;
+      // Remember which rates version this quote view was built from — sent
+      // back at commit so a rate change mid-quote can't silently reprice.
+      if (j && j.ratesVersion != null) ratesVersionRef.current = Number(j.ratesVersion);
       const qs = (j?.quotes || []).filter((q) => q && (intakeQuoteId ? q.id === intakeQuoteId : String(q.vin || '').toUpperCase() === intakeVin));
       const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
       if (!q) { quoteRowRef.current = null; setQuoteNotes(''); return setQuoteSummary(null); }
@@ -384,7 +388,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed }) 
   const quoteCardRef = useRef(null);
 
   const doCommit = ({ signerId, pin, forEmployeeId }) =>
-    api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId }).then((r) => {
+    api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId, ratesVersion: ratesVersionRef.current }).then((r) => {
       setIntake((s) => {
         const next = { ...s, committedBy: r.committedBy, overriddenBy: r.overriddenBy || null };
         saveToCache(next);

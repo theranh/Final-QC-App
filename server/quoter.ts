@@ -3,8 +3,9 @@ import express from "express";
 import Anthropic from "@anthropic-ai/sdk";
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db";
-import { requireEmployee } from "./access";
-import { aiAnalyses, corrections, intakes, photos, quotes, settings } from "@shared/schema";
+import { requireEmployee, requireAdmin } from "./access";
+import { aiAnalyses, corrections, deletedQuotes, intakes, photos, quotes, settings } from "@shared/schema";
+import { validateRates } from "./ratesValidation";
 import { bestWalkPhotoIds } from "./localQuote";
 
 // ---------------------------------------------------------------------------
@@ -132,6 +133,9 @@ export function registerQuoterRoutes(app: Express) {
       res.set("Cache-Control", "no-store");
       res.json({
         rates: (settingsMap as any).rates || null,
+        // Version of the rates the client just received; sent back at commit
+        // so a quote can't silently commit against rates the estimator never saw.
+        ratesVersion: Number((settingsMap as any).ratesMeta?.version ?? 0),
         estNames: (settingsMap as any).estNames
           ? normalizeEstNames((settingsMap as any).estNames).map((e) => ({
               name: e.name,
@@ -156,20 +160,46 @@ export function registerQuoterRoutes(app: Express) {
   );
 
   // ----- PUT /api/quoter/rates -----
+  // Admin-only, validated, and versioned. Every accepted change bumps
+  // settings['ratesMeta'].version; commits carry the version the estimator
+  // loaded so a stale-rates commit is refused instead of silently repriced.
   app.put(
     "/api/quoter/rates",
-    requireEmployee,
+    requireAdmin,
     withBody(async (req: any, res) => {
       const value = req.body?.rates;
       if (value == null) return res.status(400).json({ error: "Missing rates" });
-      await db
-        .insert(settings)
-        .values({ key: "rates", value, updatedAt: new Date() })
-        .onConflictDoUpdate({
-          target: settings.key,
-          set: { value, updatedAt: new Date() },
-        });
-      res.json({ ok: true });
+      const verdict = validateRates(value);
+      if (!verdict.ok) return res.status(400).json({ error: verdict.error });
+      const emp = req.employee;
+      const ratesVersion = await db.transaction(async (tx) => {
+        // Serialize concurrent rates saves even when no ratesMeta row exists
+        // yet (two first-time writers would otherwise both compute version 1).
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('ratesMeta')::bigint)`);
+        await tx
+          .insert(settings)
+          .values({ key: "rates", value, updatedAt: new Date() })
+          .onConflictDoUpdate({
+            target: settings.key,
+            set: { value, updatedAt: new Date() },
+          });
+        const metaR = await tx.execute(sql`SELECT value FROM ${settings} WHERE key = 'ratesMeta' FOR UPDATE`);
+        const version = Number((metaR.rows?.[0] as any)?.value?.version ?? 0) + 1;
+        const meta = {
+          version,
+          updatedAt: new Date().toISOString(),
+          updatedBy: emp?.name || emp?.email || null,
+        };
+        await tx
+          .insert(settings)
+          .values({ key: "ratesMeta", value: meta, updatedAt: new Date() })
+          .onConflictDoUpdate({
+            target: settings.key,
+            set: { value: meta, updatedAt: new Date() },
+          });
+        return version;
+      });
+      res.json({ ok: true, ratesVersion });
     }),
   );
 
@@ -255,6 +285,9 @@ export function registerQuoterRoutes(app: Express) {
         })
         .returning({ id: quotes.id });
       if (!saved) return res.status(409).json({ error: "Quote is committed" });
+      // An explicit full save re-creates the quote — clear any tombstone so
+      // future photo uploads for this id are accepted again.
+      await db.delete(deletedQuotes).where(eq(deletedQuotes.id, id));
       res.json({ ok: true });
     }),
   );
@@ -304,21 +337,34 @@ export function registerQuoterRoutes(app: Express) {
     guard(async (req, res) => {
       const id = String(req.query.id || "");
       if (!id) return res.status(400).json({ error: "Missing id" });
-      // A committed quote is a permanent signed record — never deletable.
-      const [del] = await db
-        .delete(quotes)
-        .where(sql`${quotes.id} = ${id} AND ${quotes.committedBy} IS NULL`)
-        .returning({ id: quotes.id });
-      if (!del) {
-        // Distinguish "committed" (row exists, guard blocked it) from a plain
-        // missing/already-gone row (idempotent success).
-        const [row] = await db
-          .select({ committedBy: quotes.committedBy })
-          .from(quotes)
-          .where(eq(quotes.id, id));
-        if (row && row.committedBy) return res.status(409).json({ error: "Quote is committed" });
-      }
-      await db.delete(photos).where(eq(photos.quoteId, id));
+      // Quote + photos + tombstone in ONE transaction, serialized against
+      // photo uploads via the same per-quote advisory lock the upload path
+      // takes — a crash or concurrent upload can no longer leave orphaned
+      // photos, and queued uploads for the deleted id are refused (410).
+      let committed = false;
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${id})::bigint)`);
+        // A committed quote is a permanent signed record — never deletable.
+        const [del] = await tx
+          .delete(quotes)
+          .where(sql`${quotes.id} = ${id} AND ${quotes.committedBy} IS NULL`)
+          .returning({ id: quotes.id });
+        if (!del) {
+          // Distinguish "committed" (row exists, guard blocked it) from a
+          // plain missing/already-gone row (idempotent success).
+          const [row] = await tx
+            .select({ committedBy: quotes.committedBy })
+            .from(quotes)
+            .where(eq(quotes.id, id));
+          if (row && row.committedBy) {
+            committed = true;
+            return;
+          }
+        }
+        await tx.delete(photos).where(eq(photos.quoteId, id));
+        await tx.insert(deletedQuotes).values({ id }).onConflictDoNothing();
+      });
+      if (committed) return res.status(409).json({ error: "Quote is committed" });
       res.json({ ok: true });
     }),
   );
@@ -338,38 +384,54 @@ export function registerQuoterRoutes(app: Express) {
       if (!id || !quoteId || !mDU) {
         return res.status(400).json({ error: "Missing id, quoteId, or image" });
       }
-      // Ownership guard: an existing photo may only be overwritten by its own
-      // quote — a photo id + an unrelated quoteId must never hijack the row.
-      const [existing] = await db
-        .select({ quoteId: photos.quoteId })
-        .from(photos)
-        .where(eq(photos.id, id));
-      if (existing && existing.quoteId !== quoteId) {
-        return res.status(409).json({ error: "Photo belongs to another quote" });
-      }
-      // Photos are part of a quote's signed content — once committed, no NEW
-      // photos may be added and none deleted. Overwriting an existing photo
-      // in place (the lightbox ROTATE button) is allowed even after sign-off,
-      // per shop policy: straightening a sideways shot isn't a content change.
-      const [ownerQuote] = await db
-        .select({ committedBy: quotes.committedBy })
-        .from(quotes)
-        .where(eq(quotes.id, quoteId));
-      if (ownerQuote && ownerQuote.committedBy && !existing) {
-        return res.status(409).json({ error: "Quote is committed" });
-      }
       const buf = Buffer.from(mDU[2], "base64");
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
         return res.status(413).json({ error: "Photo too large" });
       }
       // Acquire a per-quote advisory lock inside a transaction so that concurrent
       // uploads (e.g. close-up + wide shot fired in parallel) cannot both observe
-      // a count below 160 and both insert, exceeding the cap.
+      // a count below 160 and both insert, exceeding the cap. ALL guards run
+      // inside this transaction: checking committed state before it would let a
+      // PIN commit land between the read and the insert.
       let limitReached = false;
+      let quoteDeleted = false;
+      let wrongOwner = false;
+      let quoteCommitted = false;
       await db.transaction(async (tx) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`,
         );
+        // Ownership guard: an existing photo may only be overwritten by its own
+        // quote — a photo id + an unrelated quoteId must never hijack the row.
+        const [existing] = await tx
+          .select({ quoteId: photos.quoteId })
+          .from(photos)
+          .where(eq(photos.id, id));
+        if (existing && existing.quoteId !== quoteId) {
+          wrongOwner = true;
+          return;
+        }
+        // Photos are part of a quote's signed content — once committed, no NEW
+        // photos may be added and none deleted. Overwriting an existing photo
+        // in place (the lightbox ROTATE button) is allowed even after sign-off,
+        // per shop policy: straightening a sideways shot isn't a content change.
+        const [ownerQuote] = await tx
+          .select({ committedBy: quotes.committedBy })
+          .from(quotes)
+          .where(eq(quotes.id, quoteId));
+        if (ownerQuote && ownerQuote.committedBy && !existing) {
+          quoteCommitted = true;
+          return;
+        }
+        // A queued upload from an offline device must not resurrect photos
+        // under a quote that was deliberately deleted (tombstoned).
+        const tomb = await tx.execute(
+          sql`SELECT 1 FROM deleted_quotes WHERE id = ${quoteId}`,
+        );
+        if ((tomb.rows as any[]).length) {
+          quoteDeleted = true;
+          return;
+        }
         const cnt = await tx.execute(
           sql`SELECT COUNT(*)::int AS n FROM photos WHERE quote_id = ${quoteId} AND id <> ${id}`,
         );
@@ -386,6 +448,15 @@ export function registerQuoterRoutes(app: Express) {
             set: { slot, mime: mDU[1], data: buf, ts },
           });
       });
+      if (wrongOwner) {
+        return res.status(409).json({ error: "Photo belongs to another quote" });
+      }
+      if (quoteCommitted) {
+        return res.status(409).json({ error: "Quote is committed" });
+      }
+      if (quoteDeleted) {
+        return res.status(410).json({ error: "Quote was deleted — photo not saved" });
+      }
       if (limitReached) {
         return res.status(409).json({ error: "Photo limit reached for this truck" });
       }
