@@ -213,12 +213,41 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-note { text-align: center; padding: 30px 10px; color: var(--muted); font-style: italic; font-size: 12px; border: 1px dashed var(--muted2); border-radius: 10px; }
 .empty-note strong { display: block; font-style: normal; color: var(--ink); margin-bottom: 4px; }
 
+/* ---------- manager vehicle drilldown ---------- */
+.manager-drilldown-cards { display: grid; gap: 8px; margin-top: 8px; }
+.manager-drilldown-table { display: none; margin-top: 7px; }
+.manager-drilldown-card { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: #fff; }
+.manager-drilldown-summary {
+  width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 11px; text-align: left; color: var(--ink); background: #fff; border: 0; cursor: pointer; font-family: inherit;
+}
+.manager-drilldown-summary[aria-expanded="true"] { background: #f7f2eb; }
+.manager-drilldown-summary strong { display: block; font-size: 11.5px; }
+.manager-drilldown-summary .mono { display: block; margin-top: 3px; color: var(--muted); font-size: 8.5px; }
+.manager-drilldown-chevron {
+  width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; color: var(--brown); background: var(--panel); font-size: 18px; font-weight: 600;
+}
+.manager-drilldown-panel { padding: 10px 11px 11px; border-top: 1px solid var(--border2); background: #faf7f2; }
+.manager-drilldown-details { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.manager-drilldown-details div { min-width: 0; }
+.manager-drilldown-details span { display: block; font-size: 8px; font-weight: 700; letter-spacing: .35px; color: var(--muted); text-transform: uppercase; }
+.manager-drilldown-details strong { display: block; margin-top: 2px; font-size: 10px; color: var(--ink); }
+.manager-drilldown-details .manager-drilldown-fail { color: var(--red); }
+.manager-drilldown-details .manager-drilldown-pass { color: var(--green); }
+.manager-drilldown-open {
+  width: 100%; min-height: 48px; margin-top: 10px; padding: 0 14px; border: 1px solid var(--brown); border-radius: 8px;
+  background: #fff; color: var(--brown); font-family: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+}
+
 @media (min-width: 900px) {
   .app-frame { max-width: 1180px; }
   .screen-body { padding: 18px 22px; gap: 12px; }
   .screen-topbar { padding-inline: 6px; }
   .bottom-nav { padding-inline: 28%; }
   .workflow-context { padding-inline: 22px; }
+  .manager-drilldown-cards { display: none; }
+  .manager-drilldown-table { display: block; }
 }
 
 @media (max-width: 390px) {

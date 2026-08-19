@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 const pct = (value) => value == null ? '—' : `${Math.round(Number(value) * 1000) / 10}%`;
 const hours = (value) => value == null ? '—' : `${Math.round(Number(value) * 10) / 10}h`;
 const duration = (value, precision) => precision === 'calendar_day'
@@ -21,6 +23,7 @@ function RangeState({ loading, error, onRetry, children }) {
 }
 
 export default function ManagerAnalytics({ data, loading, error, filters, onFilters, onRetry, onOpenVehicle, onPrint, onShare }) {
+  const [expandedVehicleKey, setExpandedVehicleKey] = useState(null);
   const options = data?.filters?.options || { estimators: [], qcResults: ['pass', 'fail'] };
   const rows = data?.cycles?.rows || [];
   const stages = data?.cycles?.stages || [];
@@ -76,11 +79,40 @@ export default function ManagerAnalytics({ data, loading, error, filters, onFilt
 
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}><div className="card-title">VEHICLE DRILLDOWN</div>{scope(`${filteredRows.length} ROWS · SELECTED RANGE`)}</div>
-          {!filteredRows.length ? <div className="empty-note" style={{ marginTop: 8 }}>No vehicles match these filters.</div> : <div style={{ overflowX: 'auto', marginTop: 7 }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 580 }}><thead><tr>{['Vehicle', 'Estimator', 'QC', 'Intake → QC', 'QC → RO', 'RO → release'].map((heading) => <th key={heading} scope="col" style={{ textAlign: 'left', padding: '6px 7px', color: 'var(--muted)', fontSize: 8, letterSpacing: .4, borderBottom: '1px solid var(--border)' }}>{heading}</th>)}</tr></thead>
-              <tbody>{filteredRows.map((vehicle) => <tr key={`${vehicle.vin}-${vehicle.qcNumber}`}><td style={{ padding: '8px 7px', borderBottom: '1px solid #F5F1EC' }}><button type="button" onClick={() => onOpenVehicle(vehicle.vin, vehicle.qcNumber)} style={{ border: 0, padding: 0, textAlign: 'left', background: 'none', color: 'var(--ink)', cursor: 'pointer' }}><strong style={{ display: 'block', fontSize: 10.5 }}>{vehicle.stock || shortVin(vehicle.vin)} · {vehicle.vehicle || 'Vehicle'}</strong><span className="mono" style={{ fontSize: 8, color: 'var(--muted)' }}>{shortVin(vehicle.vin)} · {vehicle.qcNumber || 'no QC number'}</span></button></td><td style={{ fontSize: 10, padding: 7, borderBottom: '1px solid #F5F1EC' }}>{vehicle.estimator || 'unknown'}</td><td style={{ fontSize: 9, fontWeight: 800, color: vehicle.qcResult === 'fail' ? 'var(--red)' : 'var(--green)', padding: 7, borderBottom: '1px solid #F5F1EC' }}>{vehicle.qcResult || 'unknown'}</td>{['intakeToQc', 'qcToRo', 'roToRelease'].map((key) => <td className="mono" key={key} style={{ fontSize: 9, padding: 7, borderBottom: '1px solid #F5F1EC' }}>{duration(vehicle.durations?.[key], key === 'intakeToQc' ? 'timestamp' : 'calendar_day')}</td>)}</tr>)}</tbody>
-            </table>
-          </div>}
+          {!filteredRows.length ? <div className="empty-note" style={{ marginTop: 8 }}>No vehicles match these filters.</div> : <>
+            <div className="manager-drilldown-cards">
+              {filteredRows.map((vehicle) => {
+                const vehicleKey = `${vehicle.vin}-${vehicle.qcNumber}`;
+                const expanded = expandedVehicleKey === vehicleKey;
+                const vehicleLabel = `${vehicle.stock || shortVin(vehicle.vin)} · ${vehicle.vehicle || 'Vehicle'}`;
+                const panelId = `manager-cycle-${vehicleKey.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+                return <div className="manager-drilldown-card" key={vehicleKey}>
+                  <button type="button" className="manager-drilldown-summary" aria-expanded={expanded} aria-controls={panelId} aria-label={`${expanded ? 'Hide' : 'Show'} cycle details for ${vehicleLabel}`} onClick={() => setExpandedVehicleKey(expanded ? null : vehicleKey)}>
+                    <span>
+                      <strong>{vehicleLabel}</strong>
+                      <span className="mono">{shortVin(vehicle.vin)} · {vehicle.qcNumber || 'no QC number'}</span>
+                    </span>
+                    <span className="manager-drilldown-chevron" aria-hidden="true">{expanded ? '−' : '+'}</span>
+                  </button>
+                  {expanded && <div className="manager-drilldown-panel" id={panelId}>
+                    <div className="manager-drilldown-details">
+                      <div><span>Estimator</span><strong>{vehicle.estimator || 'unknown'}</strong></div>
+                      <div><span>Final QC</span><strong className={vehicle.qcResult === 'fail' ? 'manager-drilldown-fail' : 'manager-drilldown-pass'}>{vehicle.qcResult || 'unknown'}</strong></div>
+                      <div><span>Intake → QC</span><strong className="mono">{duration(vehicle.durations?.intakeToQc, 'timestamp')}</strong></div>
+                      <div><span>QC → RO</span><strong className="mono">{duration(vehicle.durations?.qcToRo, 'calendar_day')}</strong></div>
+                      <div><span>RO → release</span><strong className="mono">{duration(vehicle.durations?.roToRelease, 'calendar_day')}</strong></div>
+                    </div>
+                    <button type="button" className="manager-drilldown-open" onClick={() => onOpenVehicle(vehicle.vin, vehicle.qcNumber)}>Open vehicle</button>
+                  </div>}
+                </div>;
+              })}
+            </div>
+            <div className="manager-drilldown-table" style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 580 }}><thead><tr>{['Vehicle', 'Estimator', 'QC', 'Intake → QC', 'QC → RO', 'RO → release'].map((heading) => <th key={heading} scope="col" style={{ textAlign: 'left', padding: '6px 7px', color: 'var(--muted)', fontSize: 8, letterSpacing: .4, borderBottom: '1px solid var(--border)' }}>{heading}</th>)}</tr></thead>
+                <tbody>{filteredRows.map((vehicle) => <tr key={`${vehicle.vin}-${vehicle.qcNumber}`}><td style={{ padding: '8px 7px', borderBottom: '1px solid #F5F1EC' }}><button type="button" aria-label={`Open ${vehicle.stock || shortVin(vehicle.vin)} ${vehicle.vehicle || 'vehicle'}`} onClick={() => onOpenVehicle(vehicle.vin, vehicle.qcNumber)} style={{ border: 0, padding: 0, textAlign: 'left', background: 'none', color: 'var(--ink)', cursor: 'pointer' }}><strong style={{ display: 'block', fontSize: 10.5 }}>{vehicle.stock || shortVin(vehicle.vin)} · {vehicle.vehicle || 'Vehicle'}</strong><span className="mono" style={{ fontSize: 8, color: 'var(--muted)' }}>{shortVin(vehicle.vin)} · {vehicle.qcNumber || 'no QC number'}</span></button></td><td style={{ fontSize: 10, padding: 7, borderBottom: '1px solid #F5F1EC' }}>{vehicle.estimator || 'unknown'}</td><td style={{ fontSize: 9, fontWeight: 800, color: vehicle.qcResult === 'fail' ? 'var(--red)' : 'var(--green)', padding: 7, borderBottom: '1px solid #F5F1EC' }}>{vehicle.qcResult || 'unknown'}</td>{['intakeToQc', 'qcToRo', 'roToRelease'].map((key) => <td className="mono" key={key} style={{ fontSize: 9, padding: 7, borderBottom: '1px solid #F5F1EC' }}>{duration(vehicle.durations?.[key], key === 'intakeToQc' ? 'timestamp' : 'calendar_day')}</td>)}</tr>)}</tbody>
+              </table>
+            </div>
+          </>}
           {data.cycles?.truncated && <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 8 }}>Showing the first 500 rows. Narrow the date range or filters to inspect the complete cohort.</div>}
         </div>
 

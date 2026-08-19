@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ManagerAnalytics from './ManagerAnalytics';
 
@@ -38,11 +38,26 @@ describe('ManagerAnalytics', () => {
     expect(onPrint).toHaveBeenCalled();
     expect(onShare).toHaveBeenCalled();
   });
-  it('opens a vehicle from its accessible drilldown button', () => {
+  it('opens a vehicle from its desktop drilldown button', () => {
     const open = vi.fn();
     render(<ManagerAnalytics {...props({ onOpenVehicle: open })} />);
-    fireEvent.click(screen.getByRole('button', { name: /silverado/i }));
+    fireEvent.click(screen.getByRole('button', { name: /open t-14 silverado/i }));
     expect(open).toHaveBeenCalledWith('1ABCDEFGH', 'QC-4');
+  });
+  it('expands a touch-friendly vehicle card and keeps its open action available', () => {
+    const open = vi.fn();
+    render(<ManagerAnalytics {...props({ onOpenVehicle: open })} />);
+    const details = screen.getByRole('button', { name: /show cycle details for t-14.*silverado/i });
+    expect(details).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(details);
+    expect(details).toHaveAttribute('aria-expanded', 'true');
+    const panel = document.getElementById(details.getAttribute('aria-controls'));
+    expect(within(panel).getByText('Intake → QC')).toBeInTheDocument();
+    expect(within(panel).getByText('QC → RO')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open vehicle' }));
+    expect(open).toHaveBeenCalledWith('1ABCDEFGH', 'QC-4');
+    fireEvent.click(details);
+    expect(details).toHaveAttribute('aria-expanded', 'false');
   });
   it('explains unavailable calibration and tracker offline state', () => {
     const { rerender } = render(<ManagerAnalytics {...props()} />);
