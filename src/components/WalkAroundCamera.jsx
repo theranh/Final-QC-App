@@ -3,6 +3,8 @@ import { api } from '../lib/api';
 import { WALK_SLOTS, nextUntakenSlot, putSlotPhoto, walkProgress } from '../lib/walkSlots';
 import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, setCameraOpen } from '../lib/photoQueue';
 import { orientedJpegDataUrl } from '../lib/photo';
+import { analyzeDataUrl } from '../lib/photoQuality';
+import PhotoQualityReview from './PhotoQualityReview';
 
 const MAX = 1600;
 // iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
@@ -95,6 +97,11 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const fileRef = useRef(null); const canvasRef = useRef(null);
   const gravRef = useRef(null); // last gravity reading {x,y,t} for the rotation-lock fix
   const motionOnRef = useRef(false);
+  // Advisory quality review: null = no pending review; otherwise { dataUrl, warnings, action }
+  // where action is the deferred save function to call on Keep.
+  const [qualityReview, setQualityReview] = useState(null);
+  const qualityBusyRef = useRef(false);
+  const qualityDecisionRef = useRef(false);
   const progress = walkProgress(WALK_SLOTS, taken, skipped);
   const slot = WALK_SLOTS[current];
   const zooms = useMemo(() => [0.5, 1, 2, 3, 5], []);
@@ -274,6 +281,27 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     await uploadPhoto({ key, id, slotKey, dataUrl, prev });
   };
 
+  // Advisory quality gate: run a lightweight local analysis on the captured
+  // data URL and show the review overlay only when obvious issues are found.
+  // If analysis throws or returns no warnings, the action runs immediately.
+  // The exact original dataUrl is passed through unchanged on Keep.
+  const maybeReview = async (dataUrl, action) => {
+    if (qualityBusyRef.current) return;
+    qualityBusyRef.current = true;
+    try {
+      const warnings = await analyzeDataUrl(dataUrl);
+      if (warnings.length > 0) {
+        setQualityReview({ dataUrl, warnings, action });
+        return;
+      }
+    } catch {
+      // Fail open — never block saving.
+    } finally {
+      qualityBusyRef.current = false;
+    }
+    await action(dataUrl);
+  };
+
   // Leaving with unsent shots would lose them — hold the door once.
   const requestClose = () => {
     if (queueRef.current.length && Date.now() - closeWarnRef.current > 4000) {
@@ -342,16 +370,23 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     ctx.restore();
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     if (mode === 'damage') {
-      if (!committed) { damageCloseUpRef.current = dataUrl; setMode('damage_wide'); }
+      if (!committed) {
+        await maybeReview(dataUrl, async (url) => {
+          damageCloseUpRef.current = url;
+          setMode('damage_wide');
+        });
+      }
     } else if (mode === 'damage_wide') {
       if (!committed) {
         const closeUp = damageCloseUpRef.current;
-        damageCloseUpRef.current = null;
-        setMode('guided');
-        onDamageCapture?.(closeUp, dataUrl);
+        await maybeReview(dataUrl, async (url) => {
+          damageCloseUpRef.current = null;
+          setMode('guided');
+          onDamageCapture?.(closeUp, url);
+        });
       }
-    } else if (mode === 'extra') await saveExtra(dataUrl);
-    else await saveGuided(dataUrl);
+    } else if (mode === 'extra') await maybeReview(dataUrl, saveExtra);
+    else await maybeReview(dataUrl, saveGuided);
   };
   const onFile = async (event) => {
     const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
@@ -359,11 +394,19 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       if (committed) return;
       const normalized = await dataUrlImage(reader.result, MAX, 0.8, zoomRef.current);
       if (mode === 'damage') {
-        damageCloseUpRef.current = normalized; setMode('damage_wide');
+        await maybeReview(normalized, async (url) => {
+          damageCloseUpRef.current = url;
+          setMode('damage_wide');
+        });
       } else if (mode === 'damage_wide') {
-        const closeUp = damageCloseUpRef.current; damageCloseUpRef.current = null;
-        setMode('guided'); onDamageCapture?.(closeUp, normalized);
-      } else if (mode === 'extra') await saveExtra(normalized); else await saveGuided(normalized);
+        const closeUp = damageCloseUpRef.current;
+        await maybeReview(normalized, async (url) => {
+          damageCloseUpRef.current = null;
+          setMode('guided');
+          onDamageCapture?.(closeUp, url);
+        });
+      } else if (mode === 'extra') await maybeReview(normalized, saveExtra);
+      else await maybeReview(normalized, saveGuided);
     }; reader.readAsDataURL(file);
   };
   // Holds the close-up dataUrl while the camera waits for the matching wide shot.
@@ -441,6 +484,29 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     // asked mid-capture and dismissed) saved sideways when the phone was held
     // landscape with the iPhone orientation lock on.
     <div onPointerDown={enableMotion} style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
+      {qualityReview && (
+        <PhotoQualityReview
+          dataUrl={qualityReview.dataUrl}
+          warnings={qualityReview.warnings}
+          onKeep={async (url) => {
+            if (qualityDecisionRef.current) return;
+            qualityDecisionRef.current = true;
+            const action = qualityReview.action;
+            setQualityReview(null);
+            try {
+              await action(url);
+            } finally {
+              qualityDecisionRef.current = false;
+            }
+          }}
+          onRetake={() => {
+            if (qualityDecisionRef.current) return;
+            qualityDecisionRef.current = true;
+            setQualityReview(null);
+            queueMicrotask(() => { qualityDecisionRef.current = false; });
+          }}
+        />
+      )}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>

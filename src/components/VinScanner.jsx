@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { extractVin17, fallbackDecodeFrame, vinValid } from '../lib/vin';
 import { prefetchZxing, zxingDecodeImageData } from '../lib/zxingDecode';
+import { parseStockLabel } from '../lib/fieldCapabilities';
 
 const NATIVE_FORMATS = ['code_39', 'code_128', 'qr_code', 'data_matrix', 'pdf417'];
 
-export default function VinScanner({ onDetected, onCancel }) {
+// mode='vin'   (default) — existing VIN scanning; onDetected(vin, valid) unchanged.
+// mode='stock' — accepts any barcode/QR text as a stock-label shortcut.
+//                Applies parseStockLabel to filter junk; if the parsed result
+//                looks like a VIN (17 alphanum chars) it is still treated as a
+//                stock label so the caller can decide.  onDetected(code, true)
+//                where code is the cleaned stock label string.
+export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
+  const isStock = mode === 'stock';
+
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const detectorRef = useRef(null);
@@ -34,7 +43,11 @@ export default function VinScanner({ onDetected, onCancel }) {
 
     async function begin() {
       if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
-        setStatus('No camera on this device — type the VIN manually');
+        setStatus(
+          isStock
+            ? 'No camera on this device — type the stock number manually'
+            : 'No camera on this device — type the VIN manually'
+        );
         return;
       }
       try {
@@ -90,7 +103,11 @@ export default function VinScanner({ onDetected, onCancel }) {
         setStatus('Scanning… line the code up in the frame');
         timerRef.current = setInterval(scanFrame, 250);
       } catch {
-        setStatus('Camera unavailable or permission denied — type the VIN manually');
+        setStatus(
+          isStock
+            ? 'Camera unavailable or permission denied — type the stock number manually'
+            : 'Camera unavailable or permission denied — type the VIN manually'
+        );
       }
     }
 
@@ -155,10 +172,21 @@ export default function VinScanner({ onDetected, onCancel }) {
     }
 
     function handleText(text) {
-      const vin = extractVin17(text);
-      if (!vin || doneRef.current) return;
-      doneRef.current = true;
-      onDetected(vin, vinValid(vin));
+      if (doneRef.current) return;
+
+      if (isStock) {
+        // Stock-label mode: accept any parseable label; reject junk.
+        const code = parseStockLabel(text);
+        if (!code) return;
+        doneRef.current = true;
+        onDetected(code, true);
+      } else {
+        // VIN mode: unchanged behaviour.
+        const vin = extractVin17(text);
+        if (!vin) return;
+        doneRef.current = true;
+        onDetected(vin, vinValid(vin));
+      }
     }
 
     begin();
@@ -176,12 +204,19 @@ export default function VinScanner({ onDetected, onCancel }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // UI labels vary by mode.
+  const title = isStock ? 'Scan stock label' : 'Scan VIN barcode';
+  const subtitle = isStock
+    ? 'Stock tag · barcode or QR code'
+    : 'Door-jamb label · barcode or QR / Data Matrix';
+  const cancelLabel = isStock ? 'Cancel — type stock manually' : 'Cancel — type VIN manually';
+
   return (
     <div className="scan-overlay">
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 9, padding: '14px 16px' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="oswald" style={{ fontWeight: 600, fontSize: 15, color: '#fff' }}>Scan VIN barcode</div>
-          <div style={{ fontSize: 10, color: '#C9C1B8', marginTop: 1 }}>Door-jamb label · barcode or QR / Data Matrix</div>
+          <div className="oswald" style={{ fontWeight: 600, fontSize: 15, color: '#fff' }}>{title}</div>
+          <div style={{ fontSize: 10, color: '#C9C1B8', marginTop: 1 }}>{subtitle}</div>
         </div>
         {torchAvailable && (
           <div
@@ -219,7 +254,7 @@ export default function VinScanner({ onDetected, onCancel }) {
           onClick={onCancel}
           style={{ marginTop: 11, height: 48, borderRadius: 11, background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.25)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
         >
-          Cancel — type VIN manually
+          {cancelLabel}
         </div>
       </div>
     </div>

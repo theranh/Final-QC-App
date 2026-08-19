@@ -7,6 +7,7 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { SignatureBadge } from './PinDialog';
+import FieldReadiness from './FieldReadiness';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
 import { subscribePending, subscribePersistence } from '../lib/photoQueue';
@@ -585,6 +586,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
 
   const [step, setStep] = useState('vin'); // vin | confirm | photos | analyze | quote
   const [scanning, setScanning] = useState(false);
+  const [scanningStock, setScanningStock] = useState(false);
+  const [walkPreflight, setWalkPreflight] = useState(false); // preflight before walk-around camera
 
   const [vin, setVin] = useState(() => String(prefill?.vin || '').toUpperCase());
   const [vinOverridden, setVinOverridden] = useState(false);
@@ -1325,6 +1328,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onVehicle={setVehicleText}
             stock={stock}
             onStock={setStock}
+            onScanStock={() => setScanningStock(true)}
             estimator={estimator}
             onEstimator={setEstimator}
             miles={miles}
@@ -1345,8 +1349,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             committed={!!committed}
             armedDelete={armedDelete}
             onAdd={() => fileRef.current && fileRef.current.click()}
-            onWalk={() => { ensureQuoteId(); setWalkInitialMode('guided'); setWalkOpen(true); }}
-            onDamage={() => { ensureQuoteId(); setWalkInitialMode('damage'); setWalkOpen(true); }}
+            onWalk={() => { ensureQuoteId(); setWalkInitialMode('guided'); setWalkPreflight(true); }}
+            onDamage={() => { ensureQuoteId(); setWalkInitialMode('damage'); setWalkPreflight(true); }}
             onRemove={removePhoto}
             onAnalyze={startAnalyze}
             onBack={() => setStep('confirm')}
@@ -1471,6 +1475,19 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         style={{ display: 'none' }}
       />
       {scanning && <VinScanner onDetected={onScannerHit} onCancel={() => setScanning(false)} />}
+      {scanningStock && (
+        <VinScanner
+          mode="stock"
+          onDetected={(code) => { setScanningStock(false); setStock(code); }}
+          onCancel={() => setScanningStock(false)}
+        />
+      )}
+      {walkPreflight && (
+        <FieldReadiness
+          onContinue={() => { setWalkPreflight(false); setWalkOpen(true); }}
+          onCancel={() => setWalkPreflight(false)}
+        />
+      )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
           <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox}")` }} />
@@ -1590,7 +1607,7 @@ function VinStep({ vin, onVin, onScan, onManual }) {
 }
 
 /* ---------- confirm step ---------- */
-function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, onRetryDecode, vehicleText, onVehicle, stock, onStock, estimator, onEstimator, miles, onMiles, onBack, onNext }) {
+function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, onRetryDecode, vehicleText, onVehicle, stock, onStock, onScanStock, estimator, onEstimator, miles, onMiles, onBack, onNext }) {
   const ready = String(stock).trim() && String(estimator).trim();
   return (
     <>
@@ -1624,7 +1641,21 @@ function ConfirmStep({ vin, vinOverridden, decoding, decodeFailed, onRetryDecode
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
           <div>
             <div className="field-label">STOCK #</div>
-            <input className="input" value={stock} onChange={(e) => onStock(e.target.value.toUpperCase())} />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input className="input" value={stock} onChange={(e) => onStock(e.target.value.toUpperCase())} style={{ flex: 1, minWidth: 0 }} />
+              {onScanStock && (
+                <button
+                  className="btn btn-outline-brown"
+                  type="button"
+                  aria-label="Scan stock label"
+                  style={{ flex: '0 0 auto', height: 44, padding: '0 10px', fontSize: 13 }}
+                  title="Scan stock label"
+                  onClick={onScanStock}
+                >
+                  📷
+                </button>
+              )}
+            </div>
           </div>
           <div>
             <div className="field-label">MILES</div>

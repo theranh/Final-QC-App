@@ -1,5 +1,6 @@
 import { CATS, CHECKLIST, REQUIRE_PHOTO_ON_FAIL, chipStyle } from '../lib/constants';
 import PhotoRow from './PhotoRow';
+import VoiceNoteButton from './VoiceNoteButton';
 
 export default function ChecklistSheet({ draft, insp, marks, notes, photosMap, optOut, onMark, onNote, onTakePhoto, onRemovePhoto, onClose, onFinish }) {
   let answered = 0, total = 0, failCount = 0, noteMissing = 0, photoMissing = 0;
@@ -105,6 +106,10 @@ export default function ChecklistSheet({ draft, insp, marks, notes, photosMap, o
                         onChange={(e) => onNote(key, e)}
                         placeholder="Fail note (required)…"
                         style={{ flex: 1, minWidth: 140, height: 44, fontSize: 12 }}
+                      />
+                      <VoiceNoteButton
+                        currentNote={note}
+                        onNote={(text) => onNote(key, { target: { value: text } })}
                       />
                     </div>
                     {needLabel && <div style={{ fontSize: 9, color: 'var(--red)', fontWeight: 700, marginTop: 5 }}>● {needLabel}</div>}

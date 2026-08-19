@@ -9,6 +9,7 @@ import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 import { subscribePending, subscribePersistence, queueServerDelete, attemptServerDelete } from '../lib/photoQueue';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
+import FieldReadiness from './FieldReadiness';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -77,6 +78,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [homeRows, setHomeRows] = useState([]);
   const [homeSearch, setHomeSearch] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [scanningStock, setScanningStock] = useState(null); // null | 'home' | 'intake'
+  const [walkPreflight, setWalkPreflight] = useState(false); // show readiness dialog before walk-around
   const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
   const [walkOpen, setWalkOpen] = useState(false);
@@ -564,7 +567,19 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
               <div>
                 <div className="field-label">STOCK # <span style={{ color: 'var(--red)' }}>*</span></div>
-                <input className="input mono" value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input className="input mono" style={{ flex: 1, minWidth: 0 }} value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
+                  <button
+                    className="btn btn-outline-brown"
+                    type="button"
+                    aria-label="Scan stock label"
+                    title="Scan stock label"
+                    style={{ flex: '0 0 auto', height: 44, padding: '0 10px', fontSize: 13 }}
+                    onClick={() => setScanningStock('home')}
+                  >
+                    📷
+                  </button>
+                </div>
               </div>
               <div>
                 <div className="field-label">MILES <span style={{ color: 'var(--red)' }}>*</span></div>
@@ -581,6 +596,14 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               </div>
             </div>
           </div>
+
+          {scanningStock === 'home' && (
+            <VinScanner
+              mode="stock"
+              onDetected={(code) => { setScanningStock(null); setHomeStock(code); }}
+              onCancel={() => setScanningStock(null)}
+            />
+          )}
 
           {/* MDD tags */}
           <label className="card" style={{ display: 'flex', alignItems: 'center', gap: 11, cursor: 'pointer' }}>
@@ -734,12 +757,27 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
                 <div>
                   <div className="field-label">STOCK #</div>
-                  <input
-                    className="input"
-                    value={intake.stock}
-                    disabled={locked}
-                    onChange={(e) => saveIntake({ stock: e.target.value.trim().toUpperCase() })}
-                  />
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      className="input"
+                      value={intake.stock}
+                      disabled={locked}
+                      onChange={(e) => saveIntake({ stock: e.target.value.trim().toUpperCase() })}
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    {!locked && (
+                      <button
+                        className="btn btn-outline-brown"
+                        style={{ flex: '0 0 auto', height: 44, padding: '0 10px', fontSize: 13 }}
+                        type="button"
+                        aria-label="Scan stock label"
+                        title="Scan stock label"
+                        onClick={() => setScanningStock('intake')}
+                      >
+                        📷
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <div className="field-label">MILES</div>
@@ -805,11 +843,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   ))}
                 </div>
               )}
-              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkPreflight(true); }}>TAKE WALK-AROUND PHOTOS</button>}
               {/* Saved trucks can always ADD new photos after the fact —
                   each one is a brand-new picture; nothing saved is touched. */}
               {locked && intake.quoteId && !quoteRowRef.current?.committedBy && (
-                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD PHOTOS</button>
+                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkPreflight(true); }}>+ ADD PHOTOS</button>
               )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
@@ -912,8 +950,21 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           onClose={() => setPinOpen(false)}
         />
       )}
+      {walkPreflight && (
+        <FieldReadiness
+          onContinue={() => { setWalkPreflight(false); setWalkOpen(true); }}
+          onCancel={() => setWalkPreflight(false)}
+        />
+      )}
       {walkOpen && (
         <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkMode('guided'); }} showToast={showToast} />
+      )}
+      {scanningStock === 'intake' && (
+        <VinScanner
+          mode="stock"
+          onDetected={(code) => { setScanningStock(null); saveIntake({ stock: code }); }}
+          onCancel={() => setScanningStock(null)}
+        />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>

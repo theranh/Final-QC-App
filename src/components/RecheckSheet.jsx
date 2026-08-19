@@ -2,6 +2,7 @@ import { REQUIRE_PHOTO_ON_FAIL, catByKey, chipStyle } from '../lib/constants';
 import { fmtDT } from '../lib/format';
 import PhotoRow from './PhotoRow';
 import SignaturePad from './SignaturePad';
+import VoiceNoteButton from './VoiceNoteButton';
 
 export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, notes, photosMap, repairs, onMark, onNote, onRepair, onTakePhoto, onRemovePhoto, sigRef, sigSigned, onSigChange, onClearSig, onClose, onCommit, onOpenLightbox }) {
   const rcInsp = users.find((u) => u.id === rcUid) || users[0];
@@ -115,6 +116,10 @@ export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, 
                 <div style={{ display: 'flex', gap: 7, marginTop: 9, alignItems: 'center', flexWrap: 'wrap' }}>
                   <PhotoRow photos={phs} onAdd={() => onTakePhoto(key)} onRemove={(idx) => onRemovePhoto(key, idx)} />
                   <input className="input" value={note} onChange={(e) => onNote(key, e)} placeholder="New fail note (required)…" style={{ flex: 1, minWidth: 140, height: 44, fontSize: 12 }} />
+                  <VoiceNoteButton
+                    currentNote={note}
+                    onNote={(text) => onNote(key, { target: { value: text } })}
+                  />
                 </div>
                 {needLabel && <div style={{ fontSize: 9, color: 'var(--red)', fontWeight: 700, marginTop: 5 }}>● {needLabel}</div>}
               </>
