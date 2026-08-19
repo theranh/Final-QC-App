@@ -19,8 +19,8 @@ export default function PhotoQueueIndicator() {
 
   if (!pending) return null;
   return (
-    <div style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 'calc(72px + env(safe-area-inset-bottom))', zIndex: 150, background: 'rgba(35,32,26,.92)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: .3, padding: '8px 14px', borderRadius: 18, boxShadow: '0 2px 10px rgba(0,0,0,.35)', pointerEvents: 'none' }}>
-      Sending {pending} photo{pending === 1 ? '' : 's'}…
+    <div role="status" aria-live="polite" style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 'calc(72px + env(safe-area-inset-bottom))', zIndex: 150, background: 'rgba(35,32,26,.92)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: .3, padding: '8px 14px', borderRadius: 18, boxShadow: '0 2px 10px rgba(0,0,0,.35)', pointerEvents: 'none' }}>
+      Safely queued · sending {pending} photo{pending === 1 ? '' : 's'}…
     </div>
   );
 }

@@ -99,7 +99,12 @@ export default function HomeScreen({ recs, openRecs, onNewInspection, onOpenRech
             </div>
           );
         })}
-        {recs.length === 0 && <div className="empty-note">No inspections yet — start your first Final QC above.</div>}
+        {recs.length === 0 && (
+          <div className="empty-note">
+            <strong>Ready for the first Final QC.</strong>
+            Start a new inspection above, or search by stock number, VIN, or FQ number.
+          </div>
+        )}
       </div>
     </div>
   );

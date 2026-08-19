@@ -56,6 +56,20 @@
 .app-header .head-sub { font-size: 9px; letter-spacing: 1px; color: var(--muted); font-weight: 600; }
 .app-header .wordmark { font-family: 'Rye', serif; font-size: 11px; color: var(--brown); flex: 0 0 auto; }
 
+/* While a QC is in progress, identity and step context stay visible above
+   every screen. This prevents costly "which truck am I on?" mistakes. */
+.workflow-context {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 12px; padding: 8px 16px 9px;
+  color: #fff; background: var(--ink); border-bottom: 2px solid var(--red);
+}
+.workflow-context-copy { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 6px; overflow: hidden; }
+.workflow-context-kicker { flex: 0 0 auto; color: #d9d2c4; font-size: 8px; letter-spacing: .8px; font-weight: 700; text-transform: uppercase; }
+.workflow-context strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.workflow-context-vin { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #aaa092; font-family: 'IBM Plex Mono', monospace; font-size: 8px; }
+.workflow-steps { display: flex; gap: 4px; flex: 0 0 auto; }
+.workflow-step { width: 18px; height: 4px; border-radius: 4px; background: #615b53; }
+.workflow-step.done { background: var(--red); }
+
 /* ---------- screen shell ---------- */
 .screen { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .screen-topbar { flex: 0 0 auto; background: #fff; border-bottom: 1px solid var(--border); }
@@ -107,6 +121,23 @@
 .btn-outline-brown { background: #fff; border: 1.5px solid var(--brown); color: var(--brown); }
 .btn-outline-red { background: #fff; border: 1.5px solid var(--red); color: var(--red); }
 .btn-brown { background: var(--brown); color: #fff; }
+
+/* Keyboard support is intentionally visible: staff often use shared tablets
+   with a keyboard case, and focus must never be a guessing game. */
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(176, 122, 30, .45); outline-offset: 2px;
+}
+
+.today-queue { background: linear-gradient(135deg, #fff 0%, #faf7f2 100%); border-color: #ded6cc; }
+.today-queue-row {
+  width: 100%; min-height: 52px; display: flex; align-items: center; gap: 10px; text-align: left;
+  background: transparent; border: 0; border-top: 1px solid var(--border2); padding: 10px 0; cursor: pointer; color: var(--ink);
+}
+.today-queue-row:first-of-type { margin-top: 7px; }
+.today-queue-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.today-queue-row strong { display: block; font-size: 12px; }
+.today-queue-row span { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; }
+.today-queue-arrow { margin-left: auto; color: var(--muted); font-size: 17px; }
 
 /* ---------- pills / chips ---------- */
 .pill-btn {
@@ -180,6 +211,20 @@
 
 /* ---------- empty states ---------- */
 .empty-note { text-align: center; padding: 30px 10px; color: var(--muted); font-style: italic; font-size: 12px; border: 1px dashed var(--muted2); border-radius: 10px; }
+.empty-note strong { display: block; font-style: normal; color: var(--ink); margin-bottom: 4px; }
+
+@media (min-width: 900px) {
+  .app-frame { max-width: 1180px; }
+  .screen-body { padding: 18px 22px; gap: 12px; }
+  .screen-topbar { padding-inline: 6px; }
+  .bottom-nav { padding-inline: 28%; }
+  .workflow-context { padding-inline: 22px; }
+}
+
+@media (max-width: 390px) {
+  .workflow-context-vin { display: none; }
+  .workflow-context-copy { gap: 4px; }
+}
 
 /* Dialog close (✕) — padded out to a comfortable ~44px thumb target. */
 .dialog-close {

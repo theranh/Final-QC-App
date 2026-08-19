@@ -703,7 +703,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 
       <div className="screen-body">
         {!started && (
-          <div className="empty-note">Enter a VIN to start or resume an intake.</div>
+          <div className="empty-note">
+            <strong>Start where the truck is.</strong>
+            Enter or scan the VIN to begin a new intake or safely resume one already in progress.
+          </div>
         )}
 
         {started && (

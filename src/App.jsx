@@ -582,6 +582,14 @@ function AuthedApp({ me, onAuthRefresh }) {
   // ---------- nav ----------
   const openRecs = recs.filter((r) => r.status === 'open');
   const inFlow = stage != null;
+  const workflow = inFlow
+    ? {
+        stage,
+        stock: stage === 'recheck' ? recs.find((r) => r.id === recheckId)?.stock : draft.stock,
+        vehicle: stage === 'recheck' ? recs.find((r) => r.id === recheckId)?.vehicle : draft.vehicle,
+        vin: stage === 'recheck' ? recs.find((r) => r.id === recheckId)?.vin : draft.vin,
+      }
+    : null;
   const onNavChange = (k) => {
     setTab(k);
     setViewRec((prev) => (k === 'records' ? prev : null));
@@ -785,7 +793,7 @@ function AuthedApp({ me, onAuthRefresh }) {
             <span style={{ flex: '0 0 auto', textDecoration: 'underline' }}>Settings →</span>
           </div>
         )}
-        <Header tab={tab} onSettings={inFlow ? null : () => { setTab('settings'); setViewRec(null); setVehSel(null); }} />
+        <Header tab={tab} workflow={workflow} onSettings={inFlow ? null : () => { setTab('settings'); setViewRec(null); setVehSel(null); }} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />

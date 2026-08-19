@@ -99,8 +99,34 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
     );
   }
 
-  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, thisWeek, aiAccuracy } = dash;
+  const { kpi, tracker7, byStatus, blocked, activity, weekly, deptFailRate, thisWeek, aiAccuracy, aging } = dash;
   const maxWeek = Math.max(1, ...(weekly || []).map((w) => w.finalQcs));
+  const agingByKey = Object.fromEntries((aging?.stages || []).map((s) => [s.key, s]));
+  const firstBlocked = blocked[0];
+  const firstAwaiting = agingByKey.awaitingQc?.trucks?.[0];
+  const firstExportFailure = agingByKey.exportFailed?.trucks?.[0];
+  const actionItems = [
+    firstExportFailure && {
+      tone: 'var(--red)',
+      title: 'Resolve failed tracker export',
+      detail: `${firstExportFailure.stock || firstExportFailure.vin} · waiting ${firstExportFailure.days}d`,
+      onClick: () => firstExportFailure.qcNumber
+        ? onOpenVehicle(firstExportFailure.vin, firstExportFailure.qcNumber)
+        : onOpenStatus('frontlineReady'),
+    },
+    firstBlocked && {
+      tone: 'var(--amber)',
+      title: 'Complete an open re-check',
+      detail: `${firstBlocked.stock || firstBlocked.vin} · ${firstBlocked.daysOpen === 0 ? 'opened today' : `${firstBlocked.daysOpen}d open`}`,
+      onClick: () => onOpenVehicle(firstBlocked.vin, firstBlocked.qcNumber),
+    },
+    firstAwaiting && {
+      tone: 'var(--brown)',
+      title: 'Run a Final QC',
+      detail: `${firstAwaiting.stock || firstAwaiting.vin} · intake waiting ${firstAwaiting.days === 0 ? 'today' : `${firstAwaiting.days}d`}`,
+      onClick: () => onOpenStatus('awaitingFinalQc'),
+    },
+  ].filter(Boolean).slice(0, 3);
 
   return (
     <div className="screen">
@@ -127,6 +153,30 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
           <Tile label="QC FAIL RATE" value={pct(kpi.failRate)} accent={kpi.failRate > 0.25 ? 'var(--red)' : 'var(--green)'} sub="selected range" />
           <Tile label="AVG DAYS IN PRODUCTION" value={n1(kpi.avgDaysInProduction)} accent="var(--gold)" sub="range · trucks with tracker data" />
           <Tile label="OPEN RE-CHECKS" value={kpi.openRechecks} accent={kpi.openRechecks ? 'var(--amber)' : 'var(--muted)'} sub="right now — all time" />
+        </div>
+
+        {/* Make the first decision on shift obvious: action items come from
+            the same server-composed aging/blocked data as the other cards. */}
+        <div className="card today-queue">
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <div className="card-title" style={{ color: 'var(--ink)' }}>TODAY — NEXT ACTIONS</div>
+            <span style={{ fontSize: 9, color: 'var(--muted)', fontWeight: 600 }}>PRIORITIZED FOR THE TEAM</span>
+          </div>
+          {actionItems.length ? actionItems.map((item) => (
+            <button className="today-queue-row" key={item.title} onClick={item.onClick}>
+              <span className="today-queue-dot" style={{ background: item.tone }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <strong>{item.title}</strong>
+                <span>{item.detail}</span>
+              </span>
+              <span className="today-queue-arrow" aria-hidden="true">›</span>
+            </button>
+          )) : (
+            <div className="empty-note" style={{ padding: '14px 10px', marginTop: 8 }}>
+              <strong>Everything is moving.</strong>
+              No re-checks, failed exports, or waiting intakes need attention right now.
+            </div>
+          )}
         </div>
 
         {/* 1b — This week strip */}

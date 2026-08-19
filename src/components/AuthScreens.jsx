@@ -7,6 +7,7 @@ function Shell({ children }) {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', gap: 14 }}>
           <div style={{ fontFamily: 'Rye, serif', color: 'var(--brown)', fontSize: 26, lineHeight: 1.2 }}>TRUCK RANCH</div>
           <div className="oswald" style={{ fontWeight: 600, fontSize: 15, letterSpacing: 2, color: 'var(--ink)' }}>INTAKE · QC</div>
+          <div style={{ maxWidth: 260, fontSize: 10, color: 'var(--muted)', lineHeight: 1.45, letterSpacing: .2 }}>Move every truck forward with clear ownership, reliable saves, and field-ready workflows.</div>
           {children}
         </div>
       </div>

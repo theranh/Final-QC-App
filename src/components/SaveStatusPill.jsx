@@ -12,7 +12,7 @@ export default function SaveStatusPill({ status, pendingPhotos = 0, onRetry, sty
     error: { bg: '#fdecea', border: 'var(--red)', color: 'var(--red)', icon: '⚠', label: 'Save failed' },
   }[status] || null;
   if (!P) return null;
-  const photoNote = pendingPhotos > 0 ? ` · ${pendingPhotos} photo${pendingPhotos === 1 ? '' : 's'} queued` : '';
+  const photoNote = pendingPhotos > 0 ? ` · ${pendingPhotos} photo${pendingPhotos === 1 ? '' : 's'} safely queued` : '';
   return (
     <div
       role="status"
