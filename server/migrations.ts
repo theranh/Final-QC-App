@@ -190,6 +190,30 @@ export const MIGRATIONS: Migration[] = [
           WHERE status = 'failed'`,
     ],
   },
+  {
+    // Manager analytics is always date-bounded, but those bounded reads still
+    // need leading timestamp/expression indexes as operational history grows.
+    id: "0008_manager_analytics_indexes",
+    statements: [
+      sql`CREATE INDEX IF NOT EXISTS manager_intakes_completed_idx
+          ON intakes (completed_at)
+          WHERE completed_at IS NOT NULL`,
+      sql`CREATE INDEX IF NOT EXISTS manager_inspections_vin_created_idx
+          ON inspections ((upper(trim(vin))), created_at)
+          WHERE archived = false`,
+      sql`CREATE INDEX IF NOT EXISTS manager_tracker_vin_snapshot_idx
+          ON production_tracker ((upper(trim(vin))), snapshot_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS manager_quote_snapshots_created_idx
+          ON quote_snapshots (created_at)`,
+      sql`CREATE INDEX IF NOT EXISTS manager_pricing_corrections_created_idx
+          ON pricing_corrections (created_at)`,
+      sql`CREATE INDEX IF NOT EXISTS manager_ai_analyses_ts_idx
+          ON ai_analyses (ts)
+          WHERE analysis_id IS NOT NULL`,
+      sql`CREATE INDEX IF NOT EXISTS manager_corrections_ts_idx
+          ON corrections (ts)`,
+    ],
+  },
 ];
 
 /**

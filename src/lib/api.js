@@ -36,6 +36,12 @@ export const api = {
   bootstrap: () => request('GET', '/api/bootstrap'),
   dashboard: (from, to) =>
     request('GET', '/api/dashboard' + (from && to ? `?from=${from}&to=${to}` : '')),
+  managerAnalytics: ({ from, to, estimator = '', qcResult = '' }) => {
+    const params = new URLSearchParams({ from, to });
+    if (estimator) params.set('estimator', estimator);
+    if (qcResult) params.set('qcResult', qcResult);
+    return request('GET', `/api/admin/manager-analytics?${params.toString()}`);
+  },
   intakeByVin: (vin) => request('GET', `/api/intake/${encodeURIComponent(vin)}`),
   search: (q) => request('GET', `/api/search?q=${encodeURIComponent(q)}`),
   getIntake: (vin) => request('GET', `/api/quoter/intakes?vin=${encodeURIComponent(vin)}`),

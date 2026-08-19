@@ -6,11 +6,11 @@ import { savePendingCommit, loadPendingCommit, clearPendingCommit } from './lib/
 import { curPeriod } from './lib/stats';
 import { exportCsv, exportBackup, downloadServerBackup } from './lib/exports';
 import { compressImageFile } from './lib/photo';
-import { vinValid } from './lib/vin';
 import { useVinAutofill } from './hooks/useVinAutofill';
 import { api } from './lib/api';
 import { useAuth } from './hooks/useAuth';
 import useAppUpdate from './hooks/useAppUpdate';
+import { reportRangeForPeriod } from './lib/reportRange';
 
 import Header from './components/Header';
 import BottomNav from './components/BottomNav';
@@ -240,20 +240,66 @@ function AuthedApp({ me, onAuthRefresh }) {
 
   // Reports uses its own range so past months stay server-computed too.
   const [reportDash, setReportDash] = useState(null);
-  const periodObjForRange = useMemo(() => curPeriod(activeRecs, period), [activeRecs, period]);
+  const reportRange = useMemo(() => reportRangeForPeriod(period), [period]);
   useEffect(() => {
     if (tab !== 'reports') return;
-    const isoDay = (ts) => {
-      const d = new Date(ts);
-      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    };
-    const from = isoDay(periodObjForRange.start);
-    const to = isoDay(periodObjForRange.end === Infinity ? Date.now() : periodObjForRange.end - 1);
     let dead = false;
     setReportDash(null);
-    api.dashboard(from, to).then((d) => { if (!dead) setReportDash(d); }).catch(() => {});
+    api.dashboard(reportRange.from, reportRange.to).then((d) => { if (!dead) setReportDash(d); }).catch(() => {});
     return () => { dead = true; };
-  }, [tab, period, periodObjForRange.start, periodObjForRange.end]);
+  }, [tab, period, reportRange.from, reportRange.to]);
+
+  const [managerData, setManagerData] = useState(null);
+  const [managerLoading, setManagerLoading] = useState(false);
+  const [managerError, setManagerError] = useState(null);
+  const [managerFilters, setManagerFilters] = useState({ estimator: '', qcResult: '' });
+  const [managerRetryKey, setManagerRetryKey] = useState(0);
+  useEffect(() => {
+    if (tab !== 'reports' || !me.isAdmin) return;
+    let dead = false;
+    setManagerLoading(true);
+    setManagerError(null);
+    api.managerAnalytics({ ...reportRange, ...managerFilters })
+      .then((data) => {
+        if (!dead) setManagerData(data);
+      })
+      .catch((err) => {
+        if (!dead) {
+          setManagerData(null);
+          setManagerError(err?.message || 'Manager analytics could not be loaded.');
+        }
+      })
+      .finally(() => {
+        if (!dead) setManagerLoading(false);
+      });
+    return () => { dead = true; };
+  }, [tab, me.isAdmin, reportRange, managerFilters, managerRetryKey]);
+
+  const shareManagerSummary = useCallback(async () => {
+    if (!managerData?.daily) return;
+    const daily = managerData.daily;
+    const text = [
+      `Truck Ranch manager summary — ${daily.day}`,
+      `Completed intakes: ${daily.completedIntakes ?? 'unknown'}`,
+      `Final QC pass / fail: ${daily.qcsPassed ?? 'unknown'} / ${daily.qcsFailed ?? 'unknown'}`,
+      `Open re-checks: ${daily.openRechecks ?? 'unknown'}`,
+      `Export exceptions: ${daily.exportExceptions?.count ?? 'unknown'}`,
+      `Tracker source: ${daily.trackerSource || 'unknown'}`,
+      `Generated: ${new Date(daily.generatedAt || managerData.generatedAt).toLocaleString()}`,
+    ].join('\n');
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: `Truck Ranch manager summary — ${daily.day}`, text });
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        showToast('Manager summary copied');
+      } else {
+        throw new Error('Sharing is not supported by this browser');
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') showToast(err?.message || 'Could not share manager summary');
+    }
+  }, [managerData, showToast]);
 
   // ---------- draft persistence (device-local scratch space only) ----------
   useEffect(() => {
@@ -770,7 +816,29 @@ function AuthedApp({ me, onAuthRefresh }) {
       />
     );
   } else if (tab === 'reports') {
-    content = <ReportsScreen recs={activeRecs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} dash={reportDash} onOpenVehicle={openVehicle} />;
+    content = (
+      <ReportsScreen
+        recs={activeRecs}
+        period={period}
+        onPeriod={(next) => {
+          setPeriod(next);
+          setManagerFilters({ estimator: '', qcResult: '' });
+        }}
+        onExportCsv={onExportCsv}
+        onExportPdf={onExportPdf}
+        dash={reportDash}
+        onOpenVehicle={openVehicle}
+        isAdmin={!!me?.isAdmin}
+        managerData={managerData}
+        managerLoading={managerLoading}
+        managerError={managerError}
+        managerFilters={managerFilters}
+        onManagerFilters={setManagerFilters}
+        onManagerRetry={() => setManagerRetryKey((key) => key + 1)}
+        onManagerPrint={() => window.print()}
+        onManagerShare={shareManagerSummary}
+      />
+    );
   } else if (tab === 'settings') {
     content = (
       <SettingsScreen

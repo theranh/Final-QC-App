@@ -16,3 +16,4 @@
 - [Server-owned AI classify](server-ai-config.md) — classify prompt/model/cap/timeout live server-side; base prompt must stay byte-identical to client; SDK maxRetries must be 0 when a manual retry loop exists.
 - [Cycle-time timestamps](cycle-timestamps.md) — intakes.created_at is insert-only (omitted from ON CONFLICT SET); historical rows stay NULL by design; tracker ro_open is a verbatim sheet string, export never writes col B.
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.
+- [Manager analytics semantics](manager-analytics-semantics.md) — Chicago completed-intake cohorts; tracker stages are day-precision; AI telemetry stays separate from committed pricing.

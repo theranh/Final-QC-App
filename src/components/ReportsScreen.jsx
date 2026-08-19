@@ -2,12 +2,30 @@ import { useMemo } from 'react';
 import { CATS, chipStyle } from '../lib/constants';
 import { initials } from '../lib/format';
 import { curPeriod, periodDefs } from '../lib/stats';
+import ManagerAnalytics from './ManagerAnalytics';
 
 const usd = (v) => (v == null ? null : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 }));
 const unavailable = <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>unavailable</span>;
 const pctFmt = (v) => (v == null ? '—' : Math.round(v * 1000) / 10 + '%');
 
-export default function ReportsScreen({ recs, period, onPeriod, onExportCsv, onExportPdf, dash, onOpenVehicle }) {
+export default function ReportsScreen({
+  recs,
+  period,
+  onPeriod,
+  onExportCsv,
+  onExportPdf,
+  dash,
+  onOpenVehicle,
+  isAdmin,
+  managerData,
+  managerLoading,
+  managerError,
+  managerFilters,
+  onManagerFilters,
+  onManagerRetry,
+  onManagerPrint,
+  onManagerShare,
+}) {
   const defs = useMemo(() => periodDefs(recs), [recs]);
   const p = useMemo(() => curPeriod(recs, period), [recs, period]);
 
@@ -48,7 +66,7 @@ export default function ReportsScreen({ recs, period, onPeriod, onExportCsv, onE
       <div className="screen-topbar" style={{ padding: '8px 14px 10px' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
           <span className="screen-title">Reports</span>
-          <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>{p.rangeLabel}</span>
+          <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>{dash?.range ? `${dash.range.from} – ${dash.range.to}` : p.rangeLabel}</span>
         </div>
         <div style={{ display: 'flex', gap: 6, marginTop: 9, overflowX: 'auto', paddingBottom: 4 }}>
           {defs.map((pd) => (
@@ -59,6 +77,20 @@ export default function ReportsScreen({ recs, period, onPeriod, onExportCsv, onE
         </div>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>
+        {isAdmin && (
+          <ManagerAnalytics
+            data={managerData}
+            loading={managerLoading}
+            error={managerError}
+            filters={managerFilters}
+            onFilters={onManagerFilters}
+            onRetry={onManagerRetry}
+            onOpenVehicle={onOpenVehicle}
+            onPrint={onManagerPrint}
+            onShare={onManagerShare}
+          />
+        )}
+
         {/* Month summary — QC KPIs server-computed for this range; money figures
             read from the VPC Production Tracker sheet as typed, never recomputed.
             When the sheet is unreachable they show as unavailable, never $0. */}

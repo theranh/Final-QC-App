@@ -33,6 +33,7 @@ import { readJpegExifOrientation } from "./photoExif";
 
 // ---------- helpers ----------
 import { registerTrackerSyncAdminRoute } from "./trackerSyncAdmin";
+import { registerManagerAnalyticsRoute } from "./managerAnalytics";
 
 function toClientRecord(row: Inspection) {
   const data = (row.data as Record<string, unknown>) || {};
@@ -235,6 +236,7 @@ export function registerAppRoutes(app: Express) {
   registerAccuracyReportRoute(app);
   registerTrackerRoutes(app);
   registerSheetExportRoutes(app);
+  registerManagerAnalyticsRoute(app);
 
   app.get("/api/health", async (_req, res) => {
     try {
