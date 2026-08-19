@@ -78,7 +78,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [homeRows, setHomeRows] = useState([]);
   const [homeSearch, setHomeSearch] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [scanningStock, setScanningStock] = useState(null); // null | 'home' | 'intake'
   const [walkPreflight, setWalkPreflight] = useState(false); // show readiness dialog before walk-around
   const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
@@ -567,19 +566,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
               <div>
                 <div className="field-label">STOCK # <span style={{ color: 'var(--red)' }}>*</span></div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input className="input mono" style={{ flex: 1, minWidth: 0 }} value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
-                  <button
-                    className="btn btn-outline-brown"
-                    type="button"
-                    aria-label="Scan stock label"
-                    title="Scan stock label"
-                    style={{ flex: '0 0 44px', width: 44, height: 44, padding: 0, fontSize: 13 }}
-                    onClick={() => setScanningStock('home')}
-                  >
-                    📷
-                  </button>
-                </div>
+                <input className="input mono" value={homeStock} placeholder="T-0000" autoCapitalize="characters" onChange={(e) => setHomeStock(e.target.value.toUpperCase())} />
               </div>
               <div>
                 <div className="field-label">MILES <span style={{ color: 'var(--red)' }}>*</span></div>
@@ -596,14 +583,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               </div>
             </div>
           </div>
-
-          {scanningStock === 'home' && (
-            <VinScanner
-              mode="stock"
-              onDetected={(code) => { setScanningStock(null); setHomeStock(code); }}
-              onCancel={() => setScanningStock(null)}
-            />
-          )}
 
           {/* MDD tags */}
           <label className="card" style={{ display: 'flex', alignItems: 'center', gap: 11, cursor: 'pointer' }}>
@@ -757,27 +736,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
                 <div>
                   <div className="field-label">STOCK #</div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <input
-                      className="input"
-                      value={intake.stock}
-                      disabled={locked}
-                      onChange={(e) => saveIntake({ stock: e.target.value.trim().toUpperCase() })}
-                      style={{ flex: 1, minWidth: 0 }}
-                    />
-                    {!locked && (
-                      <button
-                        className="btn btn-outline-brown"
-                        style={{ flex: '0 0 44px', width: 44, height: 44, padding: 0, fontSize: 13 }}
-                        type="button"
-                        aria-label="Scan stock label"
-                        title="Scan stock label"
-                        onClick={() => setScanningStock('intake')}
-                      >
-                        📷
-                      </button>
-                    )}
-                  </div>
+                  <input
+                    className="input"
+                    value={intake.stock}
+                    disabled={locked}
+                    onChange={(e) => saveIntake({ stock: e.target.value.trim().toUpperCase() })}
+                  />
                 </div>
                 <div>
                   <div className="field-label">MILES</div>
@@ -958,13 +922,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       )}
       {walkOpen && (
         <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkMode('guided'); }} showToast={showToast} />
-      )}
-      {scanningStock === 'intake' && (
-        <VinScanner
-          mode="stock"
-          onDetected={(code) => { setScanningStock(null); saveIntake({ stock: code }); }}
-          onCancel={() => setScanningStock(null)}
-        />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>

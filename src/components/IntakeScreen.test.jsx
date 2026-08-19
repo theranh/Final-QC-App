@@ -85,13 +85,12 @@ const openScanner = async () => {
 };
 
 describe('IntakeScreen scan wiring', () => {
-  it('keeps the Stock # entry field usable beside a fixed-size scan button', () => {
+  it('keeps the Stock # entry field usable without a scanner control', () => {
     render(<IntakeScreen showToast={() => {}} />);
     const stock = screen.getByPlaceholderText('T-0000');
-    const scanStock = screen.getByRole('button', { name: 'Scan stock label' });
 
     expect(stock).toBeEnabled();
-    expect(scanStock).toHaveStyle({ width: '44px', flex: '0 0 44px' });
+    expect(screen.queryByRole('button', { name: 'Scan stock label' })).not.toBeInTheDocument();
     fireEvent.change(stock, { target: { value: 'bc23126' } });
     expect(stock).toHaveValue('BC23126');
   });
