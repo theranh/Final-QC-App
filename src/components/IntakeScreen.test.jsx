@@ -127,6 +127,7 @@ describe('IntakeScreen scan wiring', () => {
     // Landing screen is replaced by the intake checklist for this VIN.
     expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
+    expect(screen.getByRole('button', { name: 'SAVE' })).toBeInTheDocument();
   });
 
   it('cancelling the scanner returns to the landing screen untouched', async () => {

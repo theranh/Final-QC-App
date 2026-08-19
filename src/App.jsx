@@ -753,8 +753,6 @@ function AuthedApp({ me, onAuthRefresh }) {
         dash={dash}
         onOpenStatus={(k) => { setVehFilter(k); setVehSel(null); setTab('vehicles'); }}
         onOpenVehicle={openVehicle}
-        isAdmin={!!me?.isAdmin}
-        pendingCommit={pendingCommit}
       />
     );
   } else if (tab === 'vehicles') {

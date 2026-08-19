@@ -886,7 +886,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               ) : (
                 <>
                   <button className="btn btn-green" style={{ height: 46 }} onClick={() => setCommitConfirm(true)}>
-                    ✍ COMMIT &amp; LOCK
+                    SAVE
                   </button>
                   <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6, textAlign: 'center' }}>
                     Committing signs off the intake with your PIN and locks it. Photos, notes, and the quote stay visible for review.

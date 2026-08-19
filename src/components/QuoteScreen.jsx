@@ -1889,7 +1889,7 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
           </div>
         </div>
       ) : (
-        <button className="btn btn-outline-brown" onClick={onAddMore}>+ Add more damage photos</button>
+        <button className="btn btn-red" style={{ height: 60, marginTop: 4, fontSize: 15, letterSpacing: .3 }} onClick={onAddMore}>+ ADD MORE DAMAGE PHOTOS</button>
       )}
 
       {/* Export bar — COPY / IMAGE / PDF (dark, sticky) */}

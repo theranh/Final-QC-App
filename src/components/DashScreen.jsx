@@ -1,7 +1,4 @@
-import { useEffect, useState } from 'react';
 import { chipStyle, catByKey } from '../lib/constants';
-import { subscribePending } from '../lib/photoQueue';
-import HandoffWorkspace from './HandoffWorkspace';
 
 // Dash tab — every number here comes from /api/dashboard; nothing is recomputed
 // on the client. `dash` may be null while the first fetch is in flight.
@@ -93,10 +90,7 @@ function PairedBars({ days }) {
   );
 }
 
-export default function DashScreen({ dash, onOpenStatus, onOpenVehicle, isAdmin, pendingCommit }) {
-  const [pendingPhotoCount, setPendingPhotoCount] = useState(0);
-  useEffect(() => subscribePending(setPendingPhotoCount), []);
-
+export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
   if (!dash) {
     return (
       <div className="screen">
@@ -153,13 +147,6 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle, isAdmin,
         </div>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>
-        {/* 0 — Operations Handoff Workspace (collapsible) */}
-        <HandoffWorkspace
-          isAdmin={isAdmin}
-          pendingPhotoCount={pendingPhotoCount}
-          pendingCommit={!!pendingCommit}
-        />
-
         {/* 1 — KPI grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
           <Tile label="INSPECTIONS ON RECORD" value={kpi.inspections} accent="var(--brown)" sub="selected range" />
