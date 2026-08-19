@@ -574,7 +574,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                     type="button"
                     aria-label="Scan stock label"
                     title="Scan stock label"
-                    style={{ flex: '0 0 auto', height: 44, padding: '0 10px', fontSize: 13 }}
+                    style={{ flex: '0 0 44px', width: 44, height: 44, padding: 0, fontSize: 13 }}
                     onClick={() => setScanningStock('home')}
                   >
                     📷
@@ -768,7 +768,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                     {!locked && (
                       <button
                         className="btn btn-outline-brown"
-                        style={{ flex: '0 0 auto', height: 44, padding: '0 10px', fontSize: 13 }}
+                        style={{ flex: '0 0 44px', width: 44, height: 44, padding: 0, fontSize: 13 }}
                         type="button"
                         aria-label="Scan stock label"
                         title="Scan stock label"

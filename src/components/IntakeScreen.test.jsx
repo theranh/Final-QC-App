@@ -85,6 +85,17 @@ const openScanner = async () => {
 };
 
 describe('IntakeScreen scan wiring', () => {
+  it('keeps the Stock # entry field usable beside a fixed-size scan button', () => {
+    render(<IntakeScreen showToast={() => {}} />);
+    const stock = screen.getByPlaceholderText('T-0000');
+    const scanStock = screen.getByRole('button', { name: 'Scan stock label' });
+
+    expect(stock).toBeEnabled();
+    expect(scanStock).toHaveStyle({ width: '44px', flex: '0 0 44px' });
+    fireEvent.change(stock, { target: { value: 'bc23126' } });
+    expect(stock).toHaveValue('BC23126');
+  });
+
   it('blocks scanning until stock, miles, estimator, and MDD checkbox are filled', () => {
     render(<IntakeScreen showToast={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /scan vin/i }));
