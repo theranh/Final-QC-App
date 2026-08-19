@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CATS, chipStyle } from '../lib/constants';
 import { api } from '../lib/api';
+import ActivityTimeline from './ActivityTimeline';
 
 // Vehicle card — every record for one VIN on one screen: the TR-INTAKE-V2
 // intake (photos, steps, RO-Ready check, quote) from this app's local intakes
@@ -186,6 +187,9 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
             </div>
           )}
         </div>
+
+        {/* ---- Activity timeline and quick flags ---- */}
+        <ActivityTimeline vin={vehicle.vin} qcNumber={vehicle.qcNumber} />
 
         {/* ---- Production tracker ---- */}
         <div className="card">

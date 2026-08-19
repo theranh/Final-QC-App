@@ -322,8 +322,69 @@ export const deletedQuotes = pgTable("deleted_quotes", {
   deletedAt: timestamp("deleted_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ---------------------------------------------------------------------------
+// Operations Handoff Workspace — collaboration tables (task #106)
+// ---------------------------------------------------------------------------
+
+// Append-only activity event log per vehicle. No updates or deletes ever.
+export const vehicleActivityEvents = pgTable(
+  "vehicle_activity_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    vin: varchar("vin").notNull(), // normalized UPPERCASE
+    qcNumber: varchar("qc_number"), // optional
+    eventType: varchar("event_type").notNull(),
+    actorId: varchar("actor_id").notNull(),
+    actorEmail: varchar("actor_email").notNull(),
+    actorName: varchar("actor_name").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).defaultNow().notNull(),
+    details: jsonb("details"),
+  },
+  (t) => [
+    index("vehicle_activity_events_vin_idx").on(t.vin),
+    index("vehicle_activity_events_qc_idx").on(t.qcNumber),
+    index("vehicle_activity_events_occurred_idx").on(t.occurredAt),
+  ],
+);
+
+// Soft-clearable flags per vehicle. Allowed kinds are enforced in route logic.
+export const vehicleHandoffFlags = pgTable(
+  "vehicle_handoff_flags",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    vin: varchar("vin").notNull(), // normalized UPPERCASE
+    qcNumber: varchar("qc_number"),
+    kind: varchar("kind").notNull(), // needs_wash | waiting_parts | manager_review | customer_vehicle | other
+    note: varchar("note", { length: 300 }),
+    active: boolean("active").notNull().default(true),
+    creatorId: varchar("creator_id").notNull(),
+    creatorEmail: varchar("creator_email").notNull(),
+    creatorName: varchar("creator_name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    clearerId: varchar("clearer_id"),
+    clearerEmail: varchar("clearer_email"),
+    clearerName: varchar("clearer_name"),
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("vehicle_handoff_flags_vin_idx").on(t.vin),
+    index("vehicle_handoff_flags_active_idx").on(t.active, t.vin),
+  ],
+);
+
+// Per-employee UI preferences (saved views, etc.). One row per employee.
+export const employeePreferences = pgTable("employee_preferences", {
+  employeeId: integer("employee_id").primaryKey(),
+  data: jsonb("data").notNull().default(sql`'{}'::jsonb`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type Quote = typeof quotes.$inferSelect;
 export type Intake = typeof intakes.$inferSelect;
 
 export type Employee = typeof employees.$inferSelect;
 export type Inspection = typeof inspections.$inferSelect;
+
+export type VehicleActivityEvent = typeof vehicleActivityEvents.$inferSelect;
+export type VehicleHandoffFlag = typeof vehicleHandoffFlags.$inferSelect;
+export type EmployeePreferences = typeof employeePreferences.$inferSelect;

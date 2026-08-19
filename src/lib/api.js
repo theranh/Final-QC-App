@@ -83,4 +83,22 @@ export const api = {
   signers: () => request('GET', '/api/quoter/signers'),
   commitIntake: (payload) => request('POST', '/api/quoter/commit-intake', payload),
   commitQuote: (payload) => request('POST', '/api/quoter/commit-quote', payload),
+
+  // ---------- Collaboration / Operations Handoff ----------
+  /** GET /api/collaboration/timeline?vin=… => { events, flags } */
+  collabTimeline: (vin) => request('GET', `/api/collaboration/timeline?vin=${encodeURIComponent(vin)}`),
+  /** GET /api/collaboration/flags?vin=… */
+  collabFlags: (vin) => request('GET', `/api/collaboration/flags?vin=${encodeURIComponent(vin)}`),
+  /** POST /api/collaboration/flags { vin, qcNumber?, kind, note? } */
+  addCollabFlag: (payload) => request('POST', '/api/collaboration/flags', payload),
+  /** DELETE /api/collaboration/flags/:id */
+  deleteCollabFlag: (id) => request('DELETE', `/api/collaboration/flags/${encodeURIComponent(id)}`),
+  /** GET /api/collaboration/preferences => { savedViews } */
+  collabPreferences: () => request('GET', '/api/collaboration/preferences'),
+  /** PUT /api/collaboration/preferences { savedViews } */
+  saveCollabPreferences: (payload) => request('PUT', '/api/collaboration/preferences', payload),
+  /** GET /api/collaboration/handoff => { activeWork, attention, generatedAt } */
+  collabHandoff: () => request('GET', '/api/collaboration/handoff'),
+  /** POST /api/admin/bulk-archive { qcNumbers, archived } => per-record results */
+  bulkArchive: (qcNumbers, archived) => request('POST', '/api/admin/bulk-archive', { qcNumbers, archived }),
 };

@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RecentQuoteCard } from './IntakeScreen';
 import GlobalSearchResults from './GlobalSearch';
+import SavedViews from './SavedViews';
 
 const FILTERS = [
   ['awaitingFinalQc', 'In-Take Quotes'],
@@ -35,6 +36,13 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
   // from one bucket never leaks into the other (In-Take → estimator, Completed
   // QC's → inspector).
   const [person, setPerson] = useState('');
+
+  // Saved-view apply: update bucket, person, and q together
+  const handleApplyView = ({ bucket: b, person: p, q: newQ }) => {
+    if (b !== filter) { setPerson(''); onFilter(b); }
+    setPerson(p || '');
+    onQ(newQ || '');
+  };
   const vehicles = dash?.vehicles || [];
   const needle = q.trim().toUpperCase();
 
@@ -118,6 +126,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
           value={q}
           onChange={(e) => onQ(e.target.value.toUpperCase())}
         />
+        <SavedViews bucket={bucket} person={person} q={q} onApply={handleApplyView} />
       </div>
       <div className="screen-body">
         {!dash && <div className="empty-note">Loading vehicles…</div>}

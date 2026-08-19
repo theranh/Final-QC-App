@@ -1,6 +1,7 @@
 import { CATS, catByKey, chipStyle } from '../lib/constants';
 import { fmtDT } from '../lib/format';
 import { statusMeta } from '../lib/records';
+import ActivityTimeline from './ActivityTimeline';
 
 export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpenLightbox, isAdmin = false, onToggleArchive = null }) {
   const sm = statusMeta(r);
@@ -206,6 +207,9 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
             </div>
           </div>
         )}
+
+        {/* Activity timeline and quick flags — loaded on demand per VIN */}
+        {r.vin && <ActivityTimeline vin={r.vin} qcNumber={r.id} />}
       </div>
     </div>
   );

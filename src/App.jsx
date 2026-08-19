@@ -707,6 +707,8 @@ function AuthedApp({ me, onAuthRefresh }) {
         dash={dash}
         onOpenStatus={(k) => { setVehFilter(k); setVehSel(null); setTab('vehicles'); }}
         onOpenVehicle={openVehicle}
+        isAdmin={!!me?.isAdmin}
+        pendingCommit={pendingCommit}
       />
     );
   } else if (tab === 'vehicles') {
@@ -756,7 +758,16 @@ function AuthedApp({ me, onAuthRefresh }) {
         }
       />
     ) : (
-      <RecordsList recs={recs} q={q} onQ={setQ} fRes={fRes} onFRes={setFRes} fFrom={fFrom} onFFrom={setFFrom} fTo={fTo} onFTo={setFTo} onOpenRecord={setViewRec} />
+      <RecordsList
+        recs={recs}
+        q={q} onQ={setQ}
+        fRes={fRes} onFRes={setFRes}
+        fFrom={fFrom} onFFrom={setFFrom}
+        fTo={fTo} onFTo={setFTo}
+        onOpenRecord={setViewRec}
+        isAdmin={!!me?.isAdmin}
+        onBulkDone={() => { refreshData(); refreshDash(); }}
+      />
     );
   } else if (tab === 'reports') {
     content = <ReportsScreen recs={activeRecs} period={period} onPeriod={setPeriod} onExportCsv={onExportCsv} onExportPdf={onExportPdf} dash={reportDash} onOpenVehicle={openVehicle} />;

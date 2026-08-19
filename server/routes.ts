@@ -6,12 +6,15 @@ import {
   auditLog,
   corrections,
   employees,
+  employeePreferences,
   inspections,
   intakes,
   photos,
   productionTracker,
   qcCounter,
   quotes,
+  vehicleActivityEvents,
+  vehicleHandoffFlags,
   type Employee,
   type Inspection,
 } from "@shared/schema";
@@ -1205,6 +1208,803 @@ export function registerAppRoutes(app: Express) {
       });
       invalidateDashboardCache();
       res.json({ qcNumber, archived });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- admin: bulk archive/unarchive inspections ----------
+  // Max 100 qcNumbers per call, transactional. Never deletes. Never touches
+  // completion/PIN/pricing fields. Per-record results for not-found / already
+  // in the desired state. Writes audit_log + vehicle_activity_events per changed record.
+  const bulkArchiveSchema = z.object({
+    qcNumbers: z.array(z.string().min(1).max(20)).min(1).max(100),
+    archived: z.boolean(),
+  });
+
+  app.post("/api/admin/bulk-archive", requireAdmin, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const body = bulkArchiveSchema.parse(req.body);
+
+      const results: { qcNumber: string; result: "changed" | "already" | "not_found" }[] = [];
+
+      await db.transaction(async (tx) => {
+        for (const qcNumber of body.qcNumbers) {
+          const [row] = await tx
+            .select({ id: inspections.id, archived: inspections.archived, vin: inspections.vin })
+            .from(inspections)
+            .where(eq(inspections.qcNumber, qcNumber))
+            .for("update");
+
+          if (!row) {
+            results.push({ qcNumber, result: "not_found" });
+            continue;
+          }
+          if (row.archived === body.archived) {
+            results.push({ qcNumber, result: "already" });
+            continue;
+          }
+
+          await tx
+            .update(inspections)
+            .set({
+              archived: body.archived,
+              updatedById: emp.userId || String(emp.id),
+              updatedByEmail: emp.email,
+              updatedByName: emp.name,
+              updatedAt: new Date(),
+            })
+            .where(eq(inspections.id, row.id));
+
+          await audit(tx as any, emp, body.archived ? "archived" : "unarchived", {
+            inspectionId: row.id,
+            qcNumber,
+          });
+
+          // Also write a vehicle_activity_event for team visibility
+          const vinNorm = String(row.vin || "").trim().toUpperCase();
+          if (vinNorm) {
+            await tx.insert(vehicleActivityEvents).values({
+              vin: vinNorm,
+              qcNumber,
+              eventType: body.archived ? "bulk_archived" : "bulk_unarchived",
+              actorId: emp.userId || String(emp.id),
+              actorEmail: emp.email,
+              actorName: emp.name,
+              details: { source: "bulk_archive" },
+            });
+          }
+
+          results.push({ qcNumber, result: "changed" });
+        }
+      });
+
+      const changed = results.filter((r) => r.result === "changed").length;
+      if (changed > 0) invalidateDashboardCache();
+      res.json({ results, changed });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ==========================================================================
+  // Operations Handoff Workspace (task #106) — collaboration routes
+  // ==========================================================================
+
+  // Allowed flag kinds (enforced in both POST and returned in GET).
+  const ALLOWED_FLAG_KINDS = ["needs_wash", "waiting_parts", "manager_review", "customer_vehicle", "other"] as const;
+  type FlagKind = (typeof ALLOWED_FLAG_KINDS)[number];
+
+  // Helper: write a vehicle activity event (fire-and-forget in non-transactional contexts,
+  // or pass a tx for transactional use).
+  async function writeVehicleEvent(
+    txOrDb: typeof db,
+    emp: Employee,
+    vin: string,
+    eventType: string,
+    opts: { qcNumber?: string; details?: unknown } = {}
+  ) {
+    const vinNorm = String(vin || "").trim().toUpperCase();
+    if (!vinNorm) return;
+    await txOrDb.insert(vehicleActivityEvents).values({
+      vin: vinNorm,
+      qcNumber: opts.qcNumber ?? null,
+      eventType,
+      actorId: emp.userId || String(emp.id),
+      actorEmail: emp.email,
+      actorName: emp.name,
+      details: (opts.details as any) ?? null,
+    });
+  }
+
+  // ---------- GET /api/collaboration/timeline ----------
+  // Returns merged timeline of authoritative facts + vehicle_activity_events.
+  // Never writes. Never fabricates missing times.
+  app.get("/api/collaboration/timeline", requireEmployee, async (req: any, res, next) => {
+    try {
+      const vin = String(req.query.vin || "").trim().toUpperCase();
+      const qcNumber = String(req.query.qcNumber || "").trim();
+      if (!vin && !qcNumber) {
+        return res.status(400).json({ message: "vin or qcNumber required" });
+      }
+
+      // Resolve VIN from qcNumber when vin not supplied
+      let resolvedVin = vin;
+      if (!resolvedVin && qcNumber) {
+        const [insp] = await db
+          .select({ vin: inspections.vin })
+          .from(inspections)
+          .where(eq(inspections.qcNumber, qcNumber));
+        if (insp?.vin) resolvedVin = String(insp.vin).trim().toUpperCase();
+      }
+
+      // Collect timeline events from authoritative sources (no writes/backfill)
+      const events: {
+        occurredAt: string | null;
+        eventType: string;
+        source: string;
+        actor?: string;
+        details?: unknown;
+        qcNumber?: string | null;
+      }[] = [];
+
+      // 1. Inspection facts
+      const inspRows = await db
+        .select()
+        .from(inspections)
+        .where(resolvedVin ? sql`upper(trim(${inspections.vin})) = ${resolvedVin}` : eq(inspections.qcNumber, qcNumber));
+
+      for (const insp of inspRows) {
+        // Inspection created
+        if (insp.createdAt) {
+          events.push({
+            occurredAt: insp.createdAt.toISOString(),
+            eventType: "inspection_created",
+            source: "inspections",
+            actor: insp.createdByName,
+            qcNumber: insp.qcNumber,
+            details: { result: insp.result, status: insp.status },
+          });
+        }
+        // Inspection cleared (recheck completed)
+        const data = (insp.data as any) || {};
+        if (insp.status === "cleared" && data.clearedTs) {
+          events.push({
+            occurredAt: new Date(Number(data.clearedTs)).toISOString(),
+            eventType: "inspection_cleared",
+            source: "inspections",
+            actor: insp.updatedByName,
+            qcNumber: insp.qcNumber,
+            details: { status: "cleared" },
+          });
+        }
+        // Individual recheck cycles
+        const rechecks: any[] = Array.isArray(data.rechecks) ? data.rechecks : [];
+        for (const rc of rechecks) {
+          if (rc?.ts) {
+            events.push({
+              occurredAt: new Date(Number(rc.ts)).toISOString(),
+              eventType: "recheck_committed",
+              source: "inspections",
+              actor: rc.inspector,
+              qcNumber: insp.qcNumber,
+              details: { inspector: rc.inspector },
+            });
+          }
+        }
+      }
+
+      // 2. Intake facts (created/completed)
+      if (resolvedVin) {
+        const intakeRows = await db
+          .select()
+          .from(intakes)
+          .where(sql`upper(trim(${intakes.vin})) = ${resolvedVin}`);
+        for (const intake of intakeRows) {
+          // Historical rows predating created_at remain useful facts, but their
+          // date must be shown as unknown rather than inferred from updated_at.
+          events.push({
+            occurredAt: intake.createdAt ? intake.createdAt.toISOString() : null,
+            eventType: "intake_created",
+            source: "intakes",
+            actor: intake.estimator || undefined,
+            details: { stock: intake.stock, vehicle: intake.vehicle, dateKnown: !!intake.createdAt },
+          });
+          if (intake.completedAt) {
+            events.push({
+              occurredAt: intake.completedAt.toISOString(),
+              eventType: "intake_completed",
+              source: "intakes",
+              actor: intake.committedBy || intake.estimator || undefined,
+              details: { stock: intake.stock },
+            });
+          }
+        }
+
+        // 3. Quote facts. Open quotes use their authoritative updated_at.
+        // Committed milestones come from immutable Phase 1A snapshots below;
+        // quotes.updated_at is not a defensible commit timestamp because the
+        // PIN commit deliberately does not rewrite it.
+        const quoteRows = await db.execute(
+          sql`SELECT id, updated_at, committed_by
+              FROM quotes
+              WHERE upper(data->>'vin') = ${resolvedVin}
+              ORDER BY updated_at DESC NULLS LAST
+              LIMIT 20`
+        );
+        for (const q of ((quoteRows as any).rows ?? []) as any[]) {
+          if (q.updated_at && !q.committed_by) {
+            events.push({
+              occurredAt: new Date(q.updated_at).toISOString(),
+              eventType: "quote_updated",
+              source: "quotes",
+              actor: q.committed_by || undefined,
+              details: { quoteId: q.id },
+            });
+          }
+        }
+
+        const quoteCommitRows = await db.execute(
+          sql`SELECT quote_id, committed_by,
+                     extract(epoch from created_at) * 1000 AS created_ms
+              FROM quote_snapshots
+              WHERE upper(trim(vin)) = ${resolvedVin}
+              ORDER BY created_at DESC
+              LIMIT 20`
+        );
+        const snapshotQuoteIds = new Set<string>();
+        for (const q of ((quoteCommitRows as any).rows ?? []) as any[]) {
+          snapshotQuoteIds.add(String(q.quote_id));
+          events.push({
+            occurredAt: q.created_ms ? new Date(Number(q.created_ms)).toISOString() : null,
+            eventType: "quote_committed",
+            source: "quote_snapshots",
+            actor: q.committed_by || undefined,
+            details: { quoteId: q.quote_id },
+          });
+        }
+        // Quotes committed before immutable snapshots were introduced still
+        // belong in the history, but their commit date is genuinely unknown.
+        for (const q of ((quoteRows as any).rows ?? []) as any[]) {
+          if (q.committed_by && !snapshotQuoteIds.has(String(q.id))) {
+            events.push({
+              occurredAt: null,
+              eventType: "quote_committed",
+              source: "quotes",
+              actor: q.committed_by,
+              details: { quoteId: q.id, dateKnown: false },
+            });
+          }
+        }
+
+        // A server-side photo row is an authoritative upload/sync fact. Summarize
+        // the latest stored photo rather than emitting hundreds of noisy events.
+        const photoRows = await db.execute(
+          sql`SELECT count(*)::int AS count, max(p.ts)::bigint AS latest_ts
+              FROM photos p
+              JOIN quotes q ON q.id = p.quote_id
+              WHERE upper(q.data->>'vin') = ${resolvedVin}`
+        );
+        const photoSummary = (((photoRows as any).rows ?? photoRows) as any[])[0];
+        if (Number(photoSummary?.count) > 0 && Number.isFinite(Number(photoSummary?.latest_ts))) {
+          events.push({
+            occurredAt: new Date(Number(photoSummary.latest_ts)).toISOString(),
+            eventType: "photos_uploaded",
+            source: "photos",
+            details: { count: Number(photoSummary.count) },
+          });
+        }
+      }
+
+      // 4. Audit log events
+      const auditFilter = resolvedVin
+        ? sql`(upper(trim(i.vin)) = ${resolvedVin} OR a.qc_number = ANY(
+            SELECT qc_number FROM inspections WHERE upper(trim(vin)) = ${resolvedVin}
+          ))`
+        : sql`a.qc_number = ${qcNumber}`;
+
+      const auditRows = await db.execute(
+        sql`SELECT a.qc_number, a.action, a.actor_name, a.details,
+                   extract(epoch from a.at) * 1000 AS at_ms
+            FROM audit_log a
+            LEFT JOIN inspections i ON i.qc_number = a.qc_number
+            WHERE ${auditFilter}
+            ORDER BY a.at DESC
+            LIMIT 200`
+      );
+      for (const a of ((auditRows as any).rows ?? []) as any[]) {
+        events.push({
+          occurredAt: a.at_ms ? new Date(Number(a.at_ms)).toISOString() : null,
+          eventType: `audit_${a.action}`,
+          source: "audit_log",
+          actor: a.actor_name,
+          qcNumber: a.qc_number,
+          details: a.details,
+        });
+      }
+
+      // 5. Sheet export job status
+      if (resolvedVin || qcNumber) {
+        const exportFilter = resolvedVin
+          ? sql`upper(trim(i.vin)) = ${resolvedVin}`
+          : sql`j.qc_number = ${qcNumber}`;
+        const exportRows = await db.execute(
+          sql`SELECT j.qc_number, j.status, j.attempts, j.last_error,
+                     extract(epoch from j.updated_at) * 1000 AS updated_ms
+              FROM sheet_export_jobs j
+              JOIN inspections i ON i.id = j.inspection_id
+              WHERE ${exportFilter}
+              ORDER BY j.updated_at DESC
+              LIMIT 10`
+        );
+        for (const e of ((exportRows as any).rows ?? []) as any[]) {
+          events.push({
+            occurredAt: e.updated_ms ? new Date(Number(e.updated_ms)).toISOString() : null,
+            eventType: `export_${e.status}`,
+            source: "sheet_export_jobs",
+            qcNumber: e.qc_number,
+            details: { attempts: e.attempts, lastError: e.last_error },
+          });
+        }
+      }
+
+      // 6. vehicle_activity_events (our own append-only log)
+      const actFilter = resolvedVin
+        ? eq(vehicleActivityEvents.vin, resolvedVin)
+        : eq(vehicleActivityEvents.qcNumber, qcNumber);
+      const actRows = await db
+        .select()
+        .from(vehicleActivityEvents)
+        .where(actFilter)
+        .orderBy(desc(vehicleActivityEvents.occurredAt))
+        .limit(200);
+      for (const ev of actRows) {
+        events.push({
+          occurredAt: ev.occurredAt.toISOString(),
+          eventType: ev.eventType,
+          source: "vehicle_activity_events",
+          actor: ev.actorName,
+          qcNumber: ev.qcNumber,
+          details: ev.details,
+        });
+      }
+
+      // Deduplicate: for quote_updated+committed at the same time, prefer committed.
+      // For audit events that duplicate inspection facts, keep both (different sources).
+      const deduped = new Map<string, (typeof events)[0]>();
+      for (const ev of events) {
+        const key = `${ev.eventType}|${ev.occurredAt}|${ev.qcNumber ?? ""}`;
+        if (!deduped.has(key)) deduped.set(key, ev);
+      }
+
+      // Sort newest first; events with null occurredAt sink to the end.
+      const sorted = [...deduped.values()].sort((a, b) => {
+        if (!a.occurredAt && !b.occurredAt) return 0;
+        if (!a.occurredAt) return 1;
+        if (!b.occurredAt) return -1;
+        return b.occurredAt.localeCompare(a.occurredAt);
+      });
+
+      // Active flags
+      const flagFilter = resolvedVin
+        ? and(eq(vehicleHandoffFlags.vin, resolvedVin), eq(vehicleHandoffFlags.active, true))
+        : and(eq(vehicleHandoffFlags.qcNumber, qcNumber), eq(vehicleHandoffFlags.active, true));
+      const flags = await db
+        .select()
+        .from(vehicleHandoffFlags)
+        .where(flagFilter)
+        .orderBy(desc(vehicleHandoffFlags.createdAt));
+
+      res.json({ events: sorted.slice(0, 500), flags });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- GET /api/collaboration/flags ----------
+  app.get("/api/collaboration/flags", requireEmployee, async (req: any, res, next) => {
+    try {
+      const vin = String(req.query.vin || "").trim().toUpperCase();
+      if (!vin) return res.status(400).json({ message: "vin required" });
+
+      const flags = await db
+        .select()
+        .from(vehicleHandoffFlags)
+        .where(and(eq(vehicleHandoffFlags.vin, vin), eq(vehicleHandoffFlags.active, true)))
+        .orderBy(desc(vehicleHandoffFlags.createdAt));
+
+      res.json({ flags });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- POST /api/collaboration/flags ----------
+  const createFlagSchema = z.object({
+    vin: z.string().trim().min(1).max(17).transform((v) => v.toUpperCase()),
+    qcNumber: z.string().trim().max(20).optional(),
+    kind: z.enum(ALLOWED_FLAG_KINDS),
+    note: z.string().max(300).optional(),
+  });
+
+  app.post("/api/collaboration/flags", requireEmployee, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const body = createFlagSchema.parse(req.body);
+
+      const outcome = await db.transaction(async (tx) => {
+        // A client-supplied QC number is only accepted when it belongs to this
+        // VIN. This prevents misleading cross-truck timeline/audit associations.
+        if (body.qcNumber) {
+          const [inspection] = await tx
+            .select({ qcNumber: inspections.qcNumber, vin: inspections.vin })
+            .from(inspections)
+            .where(eq(inspections.qcNumber, body.qcNumber))
+            .for("share");
+          if (!inspection) {
+            return { error: { status: 404, message: "Final QC record not found" } } as const;
+          }
+          const inspectionVin = String(inspection.vin || "").trim().toUpperCase();
+          if (inspectionVin !== body.vin) {
+            return { error: { status: 409, message: "Final QC record does not belong to this VIN" } } as const;
+          }
+        }
+
+        const [created] = await tx
+          .insert(vehicleHandoffFlags)
+          .values({
+            vin: body.vin,
+            qcNumber: body.qcNumber ?? null,
+            kind: body.kind,
+            note: body.note ?? null,
+            active: true,
+            creatorId: emp.userId || String(emp.id),
+            creatorEmail: emp.email,
+            creatorName: emp.name,
+          })
+          .returning();
+
+        await writeVehicleEvent(tx as any, emp, body.vin, "flag_added", {
+          qcNumber: body.qcNumber,
+          details: { flagId: created.id, kind: body.kind },
+        });
+        await audit(tx as any, emp, "handoff_flag_added", {
+          qcNumber: body.qcNumber,
+          details: { vin: body.vin, flagId: created.id, kind: body.kind },
+        });
+        return { flag: created } as const;
+      });
+
+      if ("error" in outcome && outcome.error) {
+        const { status, message } = outcome.error;
+        return res.status(status).json({ message });
+      }
+      invalidateDashboardCache();
+      res.status(201).json({ flag: outcome.flag });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- DELETE /api/collaboration/flags/:id (soft-clear) ----------
+  app.delete("/api/collaboration/flags/:id", requireEmployee, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const flagId = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(flagId)) return res.status(400).json({ message: "Invalid flag id" });
+
+      const outcome = await db.transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(vehicleHandoffFlags)
+          .where(eq(vehicleHandoffFlags.id, flagId))
+          .for("update");
+
+        if (!existing) return { error: { status: 404, message: "Flag not found" } } as const;
+        if (!existing.active) return { error: { status: 409, message: "Flag is already cleared" } } as const;
+
+        const actorId = emp.userId || String(emp.id);
+        const isCreator = existing.creatorId === actorId || existing.creatorEmail === emp.email;
+        if (!isCreator && !emp.isAdmin) {
+          return { error: { status: 403, message: "Only the creator or an admin may clear this flag." } } as const;
+        }
+
+        const [cleared] = await tx
+          .update(vehicleHandoffFlags)
+          .set({
+            active: false,
+            clearerId: actorId,
+            clearerEmail: emp.email,
+            clearerName: emp.name,
+            clearedAt: new Date(),
+          })
+          .where(and(eq(vehicleHandoffFlags.id, flagId), eq(vehicleHandoffFlags.active, true)))
+          .returning();
+
+        if (!cleared) {
+          return { error: { status: 409, message: "Flag was cleared by another user" } } as const;
+        }
+
+        await writeVehicleEvent(tx as any, emp, cleared.vin, "flag_cleared", {
+          qcNumber: cleared.qcNumber ?? undefined,
+          details: { flagId: cleared.id, kind: cleared.kind },
+        });
+        await audit(tx as any, emp, "handoff_flag_cleared", {
+          qcNumber: cleared.qcNumber,
+          details: { vin: cleared.vin, flagId: cleared.id, kind: cleared.kind },
+        });
+        return { cleared } as const;
+      });
+
+      if ("error" in outcome && outcome.error) {
+        const { status, message } = outcome.error;
+        return res.status(status).json({ message });
+      }
+      invalidateDashboardCache();
+      res.json({ flag: outcome.cleared });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- GET /api/collaboration/preferences ----------
+  app.get("/api/collaboration/preferences", requireEmployee, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const [row] = await db
+        .select()
+        .from(employeePreferences)
+        .where(eq(employeePreferences.employeeId, emp.id));
+
+      res.json({
+        preferences: row ? row.data : {},
+        revision: row?.updatedAt ? row.updatedAt.toISOString() : null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- PUT /api/collaboration/preferences ----------
+  const savedViewSchema = z.object({
+    id: z.string().min(1).max(80),
+    name: z.string().min(1).max(120),
+    bucket: z.string().min(1).max(80),
+    person: z.string().max(120).optional(),
+    query: z.string().max(200).optional(),
+    flag: z.enum(ALLOWED_FLAG_KINDS).optional(),
+  });
+
+  const preferencesSchema = z.object({
+    savedViews: z.array(savedViewSchema).max(50),
+    revision: z.string().datetime().nullable().optional(),
+  });
+
+  app.put("/api/collaboration/preferences", requireEmployee, async (req: any, res, next) => {
+    try {
+      const emp: Employee = req.employee;
+      const body = preferencesSchema.parse(req.body);
+      const preferences = { savedViews: body.savedViews };
+      const outcome = await db.transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(employeePreferences)
+          .where(eq(employeePreferences.employeeId, emp.id))
+          .for("update");
+
+        if (existing) {
+          const currentRevision = existing.updatedAt.toISOString();
+          if (!body.revision || body.revision !== currentRevision) {
+            return {
+              conflict: true,
+              preferences: existing.data,
+              revision: currentRevision,
+            } as const;
+          }
+          const nextUpdatedAt = new Date();
+          const [updated] = await tx
+            .update(employeePreferences)
+            .set({ data: preferences as any, updatedAt: nextUpdatedAt })
+            .where(eq(employeePreferences.employeeId, emp.id))
+            .returning();
+          return { row: updated } as const;
+        }
+
+        const [created] = await tx
+          .insert(employeePreferences)
+          .values({ employeeId: emp.id, data: preferences as any, updatedAt: new Date() })
+          .onConflictDoNothing()
+          .returning();
+        if (created) return { row: created } as const;
+
+        // A concurrent first save won the unique-key race. Return its current
+        // state as an explicit conflict instead of silently overwriting it.
+        const [winner] = await tx
+          .select()
+          .from(employeePreferences)
+          .where(eq(employeePreferences.employeeId, emp.id));
+        return {
+          conflict: true,
+          preferences: winner?.data || {},
+          revision: winner?.updatedAt?.toISOString() || null,
+        } as const;
+      });
+
+      if ("conflict" in outcome) {
+        return res.status(409).json({
+          message: "Saved views changed in another session. Latest views returned.",
+          preferences: outcome.preferences,
+          revision: outcome.revision,
+        });
+      }
+      res.json({
+        preferences: outcome.row.data,
+        revision: outcome.row.updatedAt.toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---------- GET /api/collaboration/handoff ----------
+  // Server-synthesized "attention needed" list from authoritative data.
+  // Excludes archived inspections. Caps each list. Never fabricates data.
+  const HANDOFF_CAP = 30;
+  const STALE_INTAKE_HOURS = 48; // in-progress intake considered stale after N hours
+
+  app.get("/api/collaboration/handoff", requireEmployee, async (req: any, res, next) => {
+    try {
+      const nowMs = Date.now();
+      const ageDays = (timestamp: unknown) => {
+        const ms = Number(timestamp);
+        return Number.isFinite(ms) ? Math.max(0, Math.floor((nowMs - ms) / 86_400_000)) : null;
+      };
+
+      // 1. Completed intakes waiting for their first Final QC. One current card
+      // per VIN, matching the dashboard's no-duplicate operational view.
+      const awaitingRows = await db.execute(
+        sql`SELECT *
+            FROM (
+              SELECT i.vin, i.stock, i.vehicle, i.estimator, i.committed_by,
+                     extract(epoch from i.completed_at) * 1000 AS completed_ms,
+                     row_number() OVER (
+                       PARTITION BY upper(trim(i.vin))
+                       ORDER BY i.completed_at DESC
+                     ) AS rn
+              FROM intakes i
+              WHERE i.completed_at IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM inspections fq
+                  WHERE upper(trim(fq.vin)) = upper(trim(i.vin))
+                )
+            ) awaiting
+            WHERE rn = 1
+            ORDER BY completed_ms ASC
+            LIMIT ${sql.raw(String(HANDOFF_CAP))}`
+      );
+      const awaitingFinalQc = (((awaitingRows as any).rows ?? awaitingRows) as any[]).map((r) => ({
+        source: "intakes",
+        kind: "awaiting_final_qc",
+        vin: String(r.vin || "").trim().toUpperCase(),
+        stock: String(r.stock || ""),
+        vehicle: String(r.vehicle || ""),
+        lastActor: r.committed_by || r.estimator || null,
+        lastActorAt: r.completed_ms ? new Date(Number(r.completed_ms)).toISOString() : null,
+        ageDays: ageDays(r.completed_ms),
+        nextAction: "Complete Final QC",
+      }));
+
+      // 2. Stale in-progress intakes (started but not committed, older than threshold)
+      const staleIntakeRows = await db.execute(
+        sql`SELECT i.id, i.vin, i.stock, i.vehicle, i.estimator,
+                   extract(epoch from i.updated_at) * 1000 AS updated_ms,
+                   extract(epoch from i.created_at) * 1000 AS created_ms
+            FROM intakes i
+            WHERE i.completed_at IS NULL
+              AND i.updated_at < now() - interval '${sql.raw(String(STALE_INTAKE_HOURS))} hours'
+            ORDER BY i.updated_at ASC
+            LIMIT ${sql.raw(String(HANDOFF_CAP))}`
+      );
+      const staleIntakes = (((staleIntakeRows as any).rows ?? staleIntakeRows) as any[]).map((r) => ({
+        source: "intakes",
+        kind: "stale_intake",
+        vin: String(r.vin || "").trim().toUpperCase(),
+        stock: String(r.stock || ""),
+        vehicle: String(r.vehicle || ""),
+        lastActor: r.estimator || null,
+        lastActorAt: r.updated_ms ? new Date(Number(r.updated_ms)).toISOString() : null,
+        ageDays: ageDays(r.updated_ms),
+        nextAction: "Follow up on in-progress intake",
+      }));
+
+      // 3. Open re-checks (inspections with status='open', not archived)
+      const openRecheckRows = await db.execute(
+        sql`SELECT qc_number, vin, stock, vehicle,
+                   updated_by_name,
+                   extract(epoch from updated_at) * 1000 AS updated_ms,
+                   extract(epoch from created_at) * 1000 AS created_ms
+            FROM inspections
+            WHERE status = 'open' AND archived = false
+            ORDER BY created_at ASC
+            LIMIT ${sql.raw(String(HANDOFF_CAP))}`
+      );
+      const openRechecks = (((openRecheckRows as any).rows ?? openRecheckRows) as any[]).map((r) => ({
+        source: "inspections",
+        kind: "open_recheck",
+        qcNumber: String(r.qc_number || ""),
+        vin: String(r.vin || "").trim().toUpperCase(),
+        stock: String(r.stock || ""),
+        vehicle: String(r.vehicle || ""),
+        lastActor: r.updated_by_name || null,
+        lastActorAt: r.updated_ms ? new Date(Number(r.updated_ms)).toISOString() : null,
+        ageDays: ageDays(r.created_ms),
+        nextAction: "Complete re-check",
+      }));
+
+      // 4. Failed sheet exports
+      const failedExportRows = await db.execute(
+        sql`SELECT j.qc_number, i.vin, i.stock, i.vehicle,
+                   j.attempts, j.last_error,
+                   extract(epoch from j.updated_at) * 1000 AS updated_ms
+            FROM sheet_export_jobs j
+            JOIN inspections i ON i.id = j.inspection_id
+            WHERE j.status = 'failed' AND NOT i.archived
+            ORDER BY j.updated_at ASC
+            LIMIT ${sql.raw(String(HANDOFF_CAP))}`
+      );
+      const failedExports = (((failedExportRows as any).rows ?? failedExportRows) as any[]).map((r) => ({
+        source: "sheet_export_jobs",
+        kind: "export_failed",
+        qcNumber: String(r.qc_number || ""),
+        vin: String(r.vin || "").trim().toUpperCase(),
+        stock: String(r.stock || ""),
+        vehicle: String(r.vehicle || ""),
+        lastActor: null,
+        lastActorAt: r.updated_ms ? new Date(Number(r.updated_ms)).toISOString() : null,
+        ageDays: ageDays(r.updated_ms),
+        nextAction: "Retry or manually export to Tracker sheet",
+        details: { attempts: r.attempts, lastError: r.last_error },
+      }));
+
+      // 5. Active handoff flags (team-visible)
+      const activeFlagRows = await db
+        .select()
+        .from(vehicleHandoffFlags)
+        .where(eq(vehicleHandoffFlags.active, true))
+        .orderBy(desc(vehicleHandoffFlags.createdAt))
+        .limit(HANDOFF_CAP);
+      const activeFlags = activeFlagRows.map((f) => ({
+        source: "vehicle_handoff_flags",
+        kind: "active_flag",
+        flagKind: f.kind,
+        flagId: f.id,
+        vin: f.vin,
+        qcNumber: f.qcNumber,
+        note: f.note,
+        lastActor: f.creatorName,
+        lastActorAt: f.createdAt.toISOString(),
+        ageDays: ageDays(f.createdAt.getTime()),
+        nextAction:
+          f.kind === "manager_review"
+            ? "Manager review required"
+            : f.kind === "needs_wash"
+            ? "Schedule wash"
+            : f.kind === "waiting_parts"
+            ? "Follow up on parts"
+            : f.kind === "customer_vehicle"
+            ? "Customer vehicle — coordinate with owner"
+            : "Review flag",
+      }));
+
+      res.json({
+        awaitingFinalQc,
+        staleIntakes,
+        openRechecks,
+        failedExports,
+        activeFlags,
+        generatedAt: new Date().toISOString(),
+      });
     } catch (err) {
       next(err);
     }

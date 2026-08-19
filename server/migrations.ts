@@ -107,6 +107,89 @@ export const MIGRATIONS: Migration[] = [
       sql`ALTER TABLE production_tracker_archive ADD COLUMN IF NOT EXISTS ro_open text`,
     ],
   },
+  {
+    // Operations Handoff Workspace (task #106):
+    // - vehicle_activity_events: append-only event log per vehicle
+    // - vehicle_handoff_flags: soft-clearable flags per vehicle
+    // - employee_preferences: per-employee UI preferences
+    // No historical backfill — rows from before this migration are left as-is.
+    id: "0006_handoff_workspace",
+    statements: [
+      sql`CREATE TABLE IF NOT EXISTS vehicle_activity_events (
+        id bigserial PRIMARY KEY,
+        vin varchar NOT NULL,
+        qc_number varchar,
+        event_type varchar NOT NULL,
+        actor_id varchar NOT NULL,
+        actor_email varchar NOT NULL,
+        actor_name varchar NOT NULL,
+        occurred_at timestamptz NOT NULL DEFAULT now(),
+        details jsonb
+      )`,
+      sql`CREATE INDEX IF NOT EXISTS vehicle_activity_events_vin_idx
+          ON vehicle_activity_events (vin)`,
+      sql`CREATE INDEX IF NOT EXISTS vehicle_activity_events_qc_idx
+          ON vehicle_activity_events (qc_number)`,
+      sql`CREATE INDEX IF NOT EXISTS vehicle_activity_events_occurred_idx
+          ON vehicle_activity_events (occurred_at)`,
+      sql`CREATE TABLE IF NOT EXISTS vehicle_handoff_flags (
+        id bigserial PRIMARY KEY,
+        vin varchar NOT NULL,
+        qc_number varchar,
+        kind varchar NOT NULL,
+        note varchar(300),
+        active boolean NOT NULL DEFAULT true,
+        creator_id varchar NOT NULL,
+        creator_email varchar NOT NULL,
+        creator_name varchar NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        clearer_id varchar,
+        clearer_email varchar,
+        clearer_name varchar,
+        cleared_at timestamptz
+      )`,
+      sql`CREATE INDEX IF NOT EXISTS vehicle_handoff_flags_vin_idx
+          ON vehicle_handoff_flags (vin)`,
+      sql`CREATE INDEX IF NOT EXISTS vehicle_handoff_flags_active_idx
+          ON vehicle_handoff_flags (active, vin)`,
+      sql`CREATE TABLE IF NOT EXISTS employee_preferences (
+        employee_id integer PRIMARY KEY,
+        data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    // Collaboration read paths poll frequently and merge records by normalized
+    // VIN. These indexes keep those bounded queries from degrading into table
+    // scans as operational history grows. Separate migration because 0006 may
+    // already be applied before these access patterns are enabled.
+    id: "0007_handoff_query_indexes",
+    statements: [
+      sql`CREATE INDEX IF NOT EXISTS collab_inspections_vin_norm_idx
+          ON inspections ((upper(trim(vin))))`,
+      sql`CREATE INDEX IF NOT EXISTS collab_inspections_open_idx
+          ON inspections (created_at)
+          WHERE status = 'open' AND archived = false`,
+      sql`CREATE INDEX IF NOT EXISTS collab_intakes_vin_norm_idx
+          ON intakes ((upper(trim(vin))))`,
+      sql`CREATE INDEX IF NOT EXISTS collab_intakes_stale_idx
+          ON intakes (updated_at)
+          WHERE completed_at IS NULL`,
+      sql`CREATE INDEX IF NOT EXISTS collab_intakes_completed_vin_idx
+          ON intakes ((upper(trim(vin))), completed_at DESC)
+          WHERE completed_at IS NOT NULL`,
+      sql`CREATE INDEX IF NOT EXISTS collab_quotes_vin_norm_idx
+          ON quotes ((upper(data->>'vin')))`,
+      sql`CREATE INDEX IF NOT EXISTS collab_quote_snapshots_vin_norm_idx
+          ON quote_snapshots ((upper(trim(vin))))`,
+      sql`CREATE INDEX IF NOT EXISTS collab_audit_qc_at_idx
+          ON audit_log (qc_number, at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS collab_export_failed_idx
+          ON sheet_export_jobs (updated_at, inspection_id)
+          WHERE status = 'failed'`,
+    ],
+  },
 ];
 
 /**
