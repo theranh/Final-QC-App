@@ -9,7 +9,6 @@ import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 import { subscribePending, subscribePersistence, queueServerDelete, attemptServerDelete } from '../lib/photoQueue';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
-import FieldReadiness from './FieldReadiness';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -78,7 +77,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [homeRows, setHomeRows] = useState([]);
   const [homeSearch, setHomeSearch] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [walkPreflight, setWalkPreflight] = useState(false); // show readiness dialog before walk-around
   const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
   const [walkOpen, setWalkOpen] = useState(false);
@@ -807,11 +805,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   ))}
                 </div>
               )}
-              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkPreflight(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
               {/* Saved trucks can always ADD new photos after the fact —
                   each one is a brand-new picture; nothing saved is touched. */}
               {locked && intake.quoteId && !quoteRowRef.current?.committedBy && (
-                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkPreflight(true); }}>+ ADD PHOTOS</button>
+                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD PHOTOS</button>
               )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
@@ -912,12 +910,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           subtitle={intake ? `${intake.vin} · ${intake.vehicle || 'vehicle'}` : ''}
           onCommit={doCommit}
           onClose={() => setPinOpen(false)}
-        />
-      )}
-      {walkPreflight && (
-        <FieldReadiness
-          onContinue={() => { setWalkPreflight(false); setWalkOpen(true); }}
-          onCancel={() => setWalkPreflight(false)}
         />
       )}
       {walkOpen && (

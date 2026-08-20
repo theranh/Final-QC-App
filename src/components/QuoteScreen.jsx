@@ -7,7 +7,6 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { SignatureBadge } from './PinDialog';
-import FieldReadiness from './FieldReadiness';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
 import { subscribePending, subscribePersistence } from '../lib/photoQueue';
@@ -587,7 +586,6 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [step, setStep] = useState('vin'); // vin | confirm | photos | analyze | quote
   const [scanning, setScanning] = useState(false);
   const [scanningStock, setScanningStock] = useState(false);
-  const [walkPreflight, setWalkPreflight] = useState(false); // preflight before walk-around camera
 
   const [vin, setVin] = useState(() => String(prefill?.vin || '').toUpperCase());
   const [vinOverridden, setVinOverridden] = useState(false);
@@ -1349,8 +1347,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             committed={!!committed}
             armedDelete={armedDelete}
             onAdd={() => fileRef.current && fileRef.current.click()}
-            onWalk={() => { ensureQuoteId(); setWalkInitialMode('guided'); setWalkPreflight(true); }}
-            onDamage={() => { ensureQuoteId(); setWalkInitialMode('damage'); setWalkPreflight(true); }}
+            onWalk={() => { ensureQuoteId(); setWalkInitialMode('guided'); setWalkOpen(true); }}
+            onDamage={() => { ensureQuoteId(); setWalkInitialMode('damage'); setWalkOpen(true); }}
             onRemove={removePhoto}
             onAnalyze={startAnalyze}
             onBack={() => setStep('confirm')}
@@ -1480,12 +1478,6 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
           mode="stock"
           onDetected={(code) => { setScanningStock(false); setStock(code); }}
           onCancel={() => setScanningStock(false)}
-        />
-      )}
-      {walkPreflight && (
-        <FieldReadiness
-          onContinue={() => { setWalkPreflight(false); setWalkOpen(true); }}
-          onCancel={() => setWalkPreflight(false)}
         />
       )}
       {lightbox && (

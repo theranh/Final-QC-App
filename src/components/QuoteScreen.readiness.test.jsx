@@ -58,15 +58,6 @@ vi.mock('./PinDialog', () => ({
   SignatureBadge: () => <span />,
 }));
 
-vi.mock('./FieldReadiness', () => ({
-  default: ({ onContinue, onCancel }) => (
-    <div data-testid="readiness-dialog">
-      <button onClick={onContinue}>Continue readiness</button>
-      <button onClick={onCancel}>Cancel readiness</button>
-    </div>
-  ),
-}));
-
 vi.mock('./WalkAroundCamera', () => ({
   default: ({ initialMode, onClose }) => (
     <div data-testid="walk-camera" data-mode={initialMode}>
@@ -79,8 +70,8 @@ import QuoteScreen from './QuoteScreen';
 
 afterEach(cleanup);
 
-describe('QuoteScreen photo readiness navigation', () => {
-  it('shows readiness before both guided and damage camera launches', async () => {
+describe('QuoteScreen camera navigation', () => {
+  it('opens both guided and damage camera modes immediately', async () => {
     render(
       <QuoteScreen
         prefill={{
@@ -99,20 +90,12 @@ describe('QuoteScreen photo readiness navigation', () => {
 
     const guided = await screen.findByRole('button', { name: /TAKE PHOTOS/i });
     fireEvent.click(guided);
-    expect(screen.getByTestId('readiness-dialog')).toBeInTheDocument();
-    expect(screen.queryByTestId('walk-camera')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /Continue readiness/i }));
     const guidedCamera = await screen.findByTestId('walk-camera');
     expect(guidedCamera).toHaveAttribute('data-mode', 'guided');
     fireEvent.click(screen.getByRole('button', { name: /Close camera/i }));
     await waitFor(() => expect(screen.queryByTestId('walk-camera')).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: /ADD DAMAGE CLOSE-UP/i }));
-    expect(screen.getByTestId('readiness-dialog')).toBeInTheDocument();
-    expect(screen.queryByTestId('walk-camera')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /Continue readiness/i }));
     const damageCamera = await screen.findByTestId('walk-camera');
     expect(damageCamera).toHaveAttribute('data-mode', 'damage');
   });
