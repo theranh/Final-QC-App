@@ -13,6 +13,7 @@ const putIntake = vi.fn(() => Promise.resolve({}));
 const linkIntakeQuote = vi.fn(() => Promise.resolve({}));
 const getIntake = vi.fn(() => Promise.resolve({ found: false }));
 const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
+const intakePhotos = vi.fn(() => Promise.resolve({ quoteId: null, photos: [] }));
 const commitIntake = vi.fn(() => Promise.resolve({}));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
@@ -25,6 +26,7 @@ vi.mock('../lib/api', () => ({
     signers: () => Promise.resolve({ signers: [] }),
     getIntake: (...args) => getIntake(...args),
     quotePhotos: (...args) => quotePhotos(...args),
+    intakePhotos: (...args) => intakePhotos(...args),
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
     commitIntake: (...args) => commitIntake(...args),
@@ -76,6 +78,8 @@ beforeEach(() => {
   getIntake.mockResolvedValue({ found: false });
   quotePhotos.mockReset();
   quotePhotos.mockResolvedValue({ photos: [] });
+  intakePhotos.mockReset();
+  intakePhotos.mockResolvedValue({ quoteId: null, photos: [] });
   commitIntake.mockReset();
   commitIntake.mockResolvedValue({});
   decodeVinInfo.mockReset();
@@ -217,7 +221,7 @@ describe('IntakeScreen scan wiring', () => {
     expect(await screen.findByText('WALK-AROUND PHOTOS · 0')).toBeInTheDocument();
     expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
     expect(getIntake).toHaveBeenCalledWith(VALID_VIN);
-    await waitFor(() => expect(quotePhotos).toHaveBeenCalledWith('q-completed'));
+    await waitFor(() => expect(intakePhotos).toHaveBeenCalledWith('in-completed'));
   });
 
   it('hydrates a Vehicles-tab VIN with all saved details and separates walk-around from damage photos', async () => {
@@ -231,6 +235,17 @@ describe('IntakeScreen scan wiring', () => {
       ts: 1700000000000,
       lines: [{ id: 'line-1', cls: { panel: 'Door' } }],
       totals: { hrs: 2.5, usd: 375 },
+      notes: 'CANONICAL QUOTE',
+    }, {
+      // Same VIN, newer timestamp, deliberately different content. The intake
+      // must still use its exact canonical quoteId rather than this row.
+      id: 'q-wrong-newer',
+      vin: VALID_VIN,
+      stock: 'WRONG',
+      ts: 1800000000000,
+      lines: Array.from({ length: 5 }, (_, i) => ({ id: `wrong-${i}`, cls: { panel: 'Hood' } })),
+      totals: { hrs: 99, usd: 9999 },
+      notes: 'WRONG QUOTE',
     }];
     getIntake.mockResolvedValue({
       found: true,
@@ -246,11 +261,11 @@ describe('IntakeScreen scan wiring', () => {
       data: { notes: 'Saved intake note', mddTags: true, roReady: Array(9).fill(true) },
       updatedAt: 1700000000000,
     });
-    quotePhotos.mockResolvedValue({
+    intakePhotos.mockResolvedValue({
+      quoteId: 'q-vehicle-tab',
       photos: [
-        { id: 'p-front', slot: 'front' },
-        { id: 'p-extra', slot: 'xtra_1' },
-        { id: 'p-damage', slot: 'dmg_door' },
+        ...Array.from({ length: 29 }, (_, i) => ({ id: `p-walk-${i}`, slot: `xtra_${i}`, role: 'walk', ts: i + 1 })),
+        ...Array.from({ length: 3 }, (_, i) => ({ id: `p-damage-${i}`, slot: `dmg_${i}`, role: 'damage', ts: i + 40 })),
       ],
     });
 
@@ -260,10 +275,12 @@ describe('IntakeScreen scan wiring', () => {
     expect(screen.getByDisplayValue('2022 Honda Accord')).toBeDisabled();
     expect(screen.getByDisplayValue('38250')).toBeDisabled();
     expect(screen.getByDisplayValue('Jamie Lee')).toBeDisabled();
-    expect(await screen.findByText('WALK-AROUND PHOTOS · 2')).toBeInTheDocument();
-    expect(screen.getByText('DAMAGE PHOTOS · 1')).toBeInTheDocument();
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 29')).toBeInTheDocument();
+    expect(screen.getByText('DAMAGE PHOTOS · 3')).toBeInTheDocument();
+    expect(screen.getAllByText('CANONICAL QUOTE')).toHaveLength(2);
+    expect(screen.queryByText('WRONG QUOTE')).not.toBeInTheDocument();
     expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
-    expect(quotePhotos).toHaveBeenCalledWith('q-vehicle-tab');
+    expect(intakePhotos).toHaveBeenCalledWith('in-vehicle-tab');
   });
 
   it('still opens the damage quoter for a true quote-only record', async () => {
@@ -468,6 +485,72 @@ describe('IntakeScreen cache and request ordering', () => {
 
     await waitFor(() => expect(screen.getByDisplayValue('NEWEST')).toBeInTheDocument());
     expect(screen.queryByDisplayValue('STALE')).not.toBeInTheDocument();
+  });
+
+  it('preserves a known canonical quoteId when a partial server response omits the field', async () => {
+    const local = {
+      ...serverRow(VALID_VIN, 'LOCAL-LINK', 500),
+      id: 'in-local-link',
+      quoteId: 'q-known',
+      ts: 500,
+    };
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({ [VALID_VIN]: local }));
+    const partial = { ...serverRow(VALID_VIN, 'SERVER-PARTIAL', 100), id: 'in-local-link' };
+    delete partial.quoteId;
+    getIntake.mockResolvedValue(partial);
+    intakePhotos.mockResolvedValue({
+      intakeId: 'in-local-link',
+      quoteId: 'q-known',
+      photos: [{ id: 'walk-known', slot: 'ext_front', role: 'walk', ts: 1 }],
+    });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 1')).toBeInTheDocument();
+    expect(intakePhotos).toHaveBeenCalledWith('in-local-link');
+    const cache = JSON.parse(localStorage.getItem('trqc.intake.cache.v2'));
+    expect(cache[VALID_VIN].quoteId).toBe('q-known');
+  });
+
+  it('an older photo response cannot overwrite the gallery after switching vehicles', async () => {
+    const intakeA = { ...serverRow(VALID_VIN, 'A-STOCK', 100), id: 'in-a', quoteId: 'q-a', ts: 100 };
+    const intakeB = { ...serverRow(VIN_B, 'B-STOCK', 200), id: 'in-b', quoteId: 'q-b', ts: 200 };
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({
+      [VALID_VIN]: intakeA,
+      [VIN_B]: intakeB,
+    }));
+    const photoRequests = [];
+    intakePhotos.mockImplementation((intakeId) => new Promise((resolve) => photoRequests.push({ intakeId, resolve })));
+
+    const view = render(
+      <IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />,
+    );
+    await waitFor(() => expect(photoRequests.some((r) => r.intakeId === 'in-a')).toBe(true));
+
+    view.rerender(
+      <IntakeScreen showToast={() => {}} openVin={VIN_B} onOpenVinConsumed={() => {}} />,
+    );
+    await waitFor(() => expect(photoRequests.some((r) => r.intakeId === 'in-b')).toBe(true));
+    const requestB = photoRequests.find((r) => r.intakeId === 'in-b');
+    requestB.resolve({
+      quoteId: 'q-b',
+      photos: [
+        ...Array.from({ length: 29 }, (_, i) => ({ id: `b-walk-${i}`, slot: `xtra_${i}`, role: 'walk' })),
+        ...Array.from({ length: 3 }, (_, i) => ({ id: `b-dmg-${i}`, slot: `dmg_${i}`, role: 'damage' })),
+      ],
+    });
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 29')).toBeInTheDocument();
+    expect(screen.getByText('DAMAGE PHOTOS · 3')).toBeInTheDocument();
+
+    const requestA = photoRequests.find((r) => r.intakeId === 'in-a');
+    requestA.resolve({
+      quoteId: 'q-a',
+      photos: [{ id: 'stale-a', slot: 'ext_front', role: 'walk' }],
+    });
+
+    await waitFor(() => expect(screen.getByText('WALK-AROUND PHOTOS · 29')).toBeInTheDocument());
+    expect(screen.getByText('DAMAGE PHOTOS · 3')).toBeInTheDocument();
+    expect(screen.queryByAltText('ext_front')).not.toBeInTheDocument();
   });
 
   it('does not apply a VIN decode after the inspector has switched trucks', async () => {

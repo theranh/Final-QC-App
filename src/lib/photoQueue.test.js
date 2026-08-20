@@ -5,11 +5,11 @@ import 'fake-indexeddb/auto';
 
 vi.mock('./api', () => ({ api: { putQuotePhoto: vi.fn(), deleteQuotePhoto: vi.fn() } }));
 import { api } from './api';
-import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, flushQueue, subscribePending, setCameraOpen, markPhotoDeleted } from './photoQueue';
+import { clearQueueFailure, persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, flushQueue, subscribePending, subscribeQueueFailure, setCameraOpen, markPhotoDeleted } from './photoQueue';
 
 let seq = 0;
 const job = (id, quoteId = 'Q1', dataUrl = 'data:image/jpeg;base64,AAA') =>
-  ({ key: `${id}:k${++seq}`, id, quoteId, slotKey: 'front', dataUrl });
+  ({ key: `${id}:k${++seq}`, id, quoteId, slotKey: 'ext_front', role: 'walk', dataUrl });
 const httpErr = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -21,6 +21,7 @@ describe('photoQueue', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     setCameraOpen(false);
+    clearQueueFailure();
     await clearAll();
   });
 
@@ -42,7 +43,7 @@ describe('photoQueue', () => {
     api.putQuotePhoto.mockResolvedValue({});
     await persistJob(job('a'));
     await flushQueue();
-    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'a', quoteId: 'Q1', slot: 'front', dataUrl: 'data:image/jpeg;base64,AAA' });
+    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'a', quoteId: 'Q1', slot: 'ext_front', role: 'walk', dataUrl: 'data:image/jpeg;base64,AAA' });
     expect(await pendingJobs()).toEqual([]);
   });
 
@@ -57,14 +58,36 @@ describe('photoQueue', () => {
     expect((await pendingJobs()).map((j) => j.id)).toEqual(['net']); // survives sign-out
   });
 
-  it('drops jobs on permanent rejections (413/409/403)', async () => {
-    for (const [id, status] of [['big', 413], ['locked', 409], ['forbid', 403]]) {
+  it('drops jobs on permanent rejections (400/413/409/403)', async () => {
+    for (const [id, status] of [['invalid', 400], ['big', 413], ['locked', 409], ['forbid', 403]]) {
       await clearAll();
       await persistJob(job(id));
       api.putQuotePhoto.mockRejectedValueOnce(httpErr(status));
       await flushQueue();
       expect(await pendingJobs()).toEqual([]);
     }
+  });
+
+  it('uploads a genuinely old unknown slot as isolated unclassified metadata', async () => {
+    api.putQuotePhoto.mockResolvedValue({});
+    await persistJob({ ...job('old-front'), slotKey: 'front', role: undefined });
+    await flushQueue();
+    expect(api.putQuotePhoto).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'old-front',
+      slot: 'front',
+      role: 'unclassified',
+    }));
+    expect(await pendingJobs()).toEqual([]);
+  });
+
+  it('surfaces a retake warning when a queued photo is permanently rejected', async () => {
+    const failures = [];
+    const unsubscribe = subscribeQueueFailure((failure) => failures.push(failure));
+    await persistJob(job('invalid'));
+    api.putQuotePhoto.mockRejectedValueOnce(httpErr(400));
+    await flushQueue();
+    expect(failures.at(-1)).toEqual({ id: 'invalid', status: 400 });
+    unsubscribe();
   });
 
   it('leaves camera slots alone while the camera is open, resumes on close', async () => {
@@ -90,7 +113,7 @@ describe('photoQueue', () => {
     await flushQueue();
     // Only the damage close-up went out; the walk slot stays for the camera.
     expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
-    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'closeup', quoteId: 'Q1', slot: 'dmg1712', dataUrl: 'data:image/jpeg;base64,AAA' });
+    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'closeup', quoteId: 'Q1', slot: 'dmg1712', role: 'damage', dataUrl: 'data:image/jpeg;base64,AAA' });
     expect((await pendingJobs()).map((j) => j.id)).toEqual(['walkshot']);
     setCameraOpen(false);
     await vi.waitFor(async () => expect(await pendingJobs()).toEqual([]));
@@ -155,7 +178,7 @@ describe('photoQueue', () => {
 
     // Retake: persist B (unique key), purge records superseded by B.
     // Note: markPhotoDeleted is NOT called — this is a retake, not a deletion.
-    const B = { key: newJobKey('Q1_front'), id: 'Q1_front', quoteId: 'Q1', slotKey: 'front', dataUrl: 'data:B' };
+    const B = { key: newJobKey('Q1_front'), id: 'Q1_front', quoteId: 'Q1', slotKey: 'ext_front', role: 'walk', dataUrl: 'data:B' };
     await sleep(2); // ensure B's addedAt is strictly newer than A's
     await persistJob(B);
     await removeJobsForPhoto('Q1_front', B.key);
@@ -174,7 +197,7 @@ describe('photoQueue', () => {
 
     api.putQuotePhoto.mockResolvedValue({});
     await flushQueue();
-    expect(api.putQuotePhoto).toHaveBeenLastCalledWith({ id: 'Q1_front', quoteId: 'Q1', slot: 'front', dataUrl: 'data:B' });
+    expect(api.putQuotePhoto).toHaveBeenLastCalledWith({ id: 'Q1_front', quoteId: 'Q1', slot: 'ext_front', role: 'walk', dataUrl: 'data:B' });
     expect(await pendingJobs()).toEqual([]);
   });
 });

@@ -18,6 +18,7 @@ import {
   type Employee,
   type Inspection,
 } from "@shared/schema";
+import { inferPhotoRole, isPhotoRole, validPhotoRoleForSlot } from "@shared/photoRoles";
 import { isAuthenticated } from "./replit_integrations/auth";
 import { requireAdmin, requireEmployee, resolveAccess } from "./access";
 import { enqueueSheetExport, registerSheetExportRoutes } from "./sheetExports";
@@ -183,6 +184,7 @@ const backupPhoto = z.object({
   id: z.string().min(1).max(200),
   quoteId: z.string().min(1).max(200),
   slot: z.string().max(100).nullable().optional(),
+  role: z.enum(["walk", "damage", "damage_wide", "unclassified"]).optional(),
   mime: z.string().max(100),
   ts: z.number().int().positive(),
   b64: z.string().max(30_000_000),
@@ -561,12 +563,13 @@ export function registerAppRoutes(app: Express) {
       const trackerRows = await db.select().from(productionTracker);
       // Metadata only — never pull the bytea column for the whole table.
       const photoMetaRes = await db.execute(
-        sql`SELECT id, quote_id, slot, mime, ts, length(data) AS bytes FROM photos ORDER BY ts`
+        sql`SELECT id, quote_id, slot, role, mime, ts, length(data) AS bytes FROM photos ORDER BY ts`
       );
       const photosMeta = (photoMetaRes.rows as any[]).map((p) => ({
         id: String(p.id),
         quoteId: String(p.quote_id),
         slot: p.slot ?? null,
+        role: isPhotoRole(p.role) ? p.role : inferPhotoRole(p.slot),
         mime: String(p.mime),
         ts: Number(p.ts),
         bytes: Number(p.bytes),
@@ -656,7 +659,7 @@ export function registerAppRoutes(app: Express) {
         const buf = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
         const chunk =
           (first ? "" : ",") +
-          JSON.stringify({ id: m.id, quoteId: m.quoteId, slot: m.slot, mime: m.mime, ts: m.ts, b64: buf.toString("base64") });
+          JSON.stringify({ id: m.id, quoteId: m.quoteId, slot: m.slot, role: m.role, mime: m.mime, ts: m.ts, b64: buf.toString("base64") });
         first = false;
         // Respect backpressure so a slow client can't balloon server memory.
         if (!res.write(chunk)) await new Promise((r) => res.once("drain", r));
@@ -852,12 +855,17 @@ export function registerAppRoutes(app: Express) {
           else qc.trackerRowsSkipped++;
         }
         for (const p of body.quoterPhotos || []) {
+          const inferredRole = inferPhotoRole(p.slot);
+          const restoredRole = p.role && validPhotoRoleForSlot(p.role, p.slot)
+            ? p.role
+            : inferredRole;
           const [row] = await tx
             .insert(photos)
             .values({
               id: p.id,
               quoteId: p.quoteId,
               slot: p.slot ?? null,
+              role: restoredRole,
               mime: p.mime,
               ts: p.ts,
               data: Buffer.from(p.b64, "base64"),

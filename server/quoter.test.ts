@@ -170,7 +170,25 @@ const H = vi.hoisted(() => {
       if (/FROM deleted_quotes/i.test(text)) {
         return { rows: deletedQuoteRows.includes(params[0]) ? [{ "?column?": 1 }] : [] };
       }
-      if (/FROM photos WHERE quote_id/i.test(text)) {
+      if (/SELECT quote_id FROM intakes WHERE id/i.test(text)) {
+        const row = intakeRows.find((r) => r.id === params[0]);
+        return { rows: row ? [{ quote_id: row.quote_id || null }] : [] };
+      }
+      if (/SELECT id, slot, role, ts, LENGTH\(data\) AS bytes/i.test(text)) {
+        const quoteId = params[0];
+        return {
+          rows: photoRows
+            .filter((r) => r.quoteId === quoteId)
+            .map((r) => ({
+              id: r.id,
+              slot: r.slot,
+              role: r.role,
+              ts: r.ts,
+              bytes: r.data?.length || 0,
+            })),
+        };
+      }
+      if (/COUNT\(\*\).*FROM photos WHERE quote_id/is.test(text)) {
         // params[0] = quoteId, params[1] = excluded photo id
         const quoteId = params[0];
         const excludeId = params[1];
@@ -318,7 +336,7 @@ describe("quote delete integrity (no orphans, tombstoned uploads)", () => {
     const r = await req("POST", "/api/quoter/photos", {
       id: "late1",
       quoteId: "gone",
-      slot: "front",
+      slot: "ext_front",
       dataUrl: PNG_DATAURL,
     });
     expect(r.status).toBe(410);
@@ -333,7 +351,7 @@ describe("quote delete integrity (no orphans, tombstoned uploads)", () => {
     const up = await req("POST", "/api/quoter/photos", {
       id: "np1",
       quoteId: "reborn",
-      slot: "front",
+      slot: "ext_front",
       dataUrl: PNG_DATAURL,
     });
     expect(up.status).toBe(200);
@@ -347,7 +365,7 @@ describe("photo mutations blocked once owning quote committed", () => {
     const r = await req("POST", "/api/quoter/photos", {
       id: "p1",
       quoteId: "cq",
-      slot: "front",
+      slot: "ext_front",
       dataUrl: PNG_DATAURL,
     });
     expect(r.status).toBe(409);
@@ -360,7 +378,7 @@ describe("photo mutations blocked once owning quote committed", () => {
     const r = await req("POST", "/api/quoter/photos", {
       id: "pr",
       quoteId: "cqr",
-      slot: "front",
+      slot: "ext_front",
       dataUrl: PNG_DATAURL,
     });
     expect(r.status).toBe(200);
@@ -373,11 +391,59 @@ describe("photo mutations blocked once owning quote committed", () => {
     const r = await req("POST", "/api/quoter/photos", {
       id: "ph-owned",
       quoteId: "qa",
-      slot: "front",
+      slot: "ext_front",
       dataUrl: PNG_DATAURL,
     });
     expect(r.status).toBe(409);
     expect(r.body.error).toBe("Photo belongs to another quote");
+  });
+
+  it("persists a validated server-owned role and rejects a mismatched role", async () => {
+    quoteRows.push({ id: "role-q", data: {}, committedBy: null, overriddenBy: null });
+    const ok = await req("POST", "/api/quoter/photos", {
+      id: "role-ok",
+      quoteId: "role-q",
+      slot: "dmg_door",
+      role: "damage",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(ok.status).toBe(200);
+    expect(photoRows.find((p) => p.id === "role-ok")?.role).toBe("damage");
+
+    const bad = await req("POST", "/api/quoter/photos", {
+      id: "role-bad",
+      quoteId: "role-q",
+      slot: "ext_front",
+      role: "damage",
+      dataUrl: PNG_DATAURL,
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toMatch(/role or slot/i);
+    expect(photoRows.some((p) => p.id === "role-bad")).toBe(false);
+  });
+
+  it("the intake manifest reads only its exact linked quote, even when the VIN has another quote", async () => {
+    intakeRows.push({
+      id: "in-canonical",
+      vin: "SAMEVIN",
+      quote_id: "q-canonical",
+      committedBy: null,
+    });
+    quoteRows.push(
+      { id: "q-canonical", data: { vin: "SAMEVIN" }, committedBy: null },
+      { id: "q-newer-wrong", data: { vin: "SAMEVIN", ts: 999 }, committedBy: null },
+    );
+    photoRows.push(
+      { id: "walk-right", quoteId: "q-canonical", slot: "ext_front", role: "walk", data: Buffer.from("1"), ts: 1 },
+      { id: "damage-right", quoteId: "q-canonical", slot: "dmg_door", role: "damage", data: Buffer.from("2"), ts: 2 },
+      { id: "wrong-owner", quoteId: "q-newer-wrong", slot: "ext_rear", role: "walk", data: Buffer.from("3"), ts: 3 },
+    );
+
+    const manifest = await req("GET", "/api/quoter/intakes/in-canonical/photos");
+    expect(manifest.status).toBe(200);
+    expect(manifest.body.quoteId).toBe("q-canonical");
+    expect(manifest.body.photos.map((p: any) => p.id)).toEqual(["walk-right", "damage-right"]);
+    expect(manifest.body.photos.map((p: any) => p.role)).toEqual(["walk", "damage"]);
   });
 
   it("DELETE /api/quoter/photos by quoteId 409s when quote committed", async () => {

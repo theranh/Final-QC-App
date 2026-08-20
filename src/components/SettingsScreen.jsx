@@ -4,6 +4,7 @@ import { initials, fmtDT } from '../lib/format';
 import { loadLegacyData, hasLegacyData, markLegacyImported, legacyImportDone } from '../lib/storage';
 import { parseBackupFile, convertOldReconBackup } from '../lib/exports';
 import { api } from '../lib/api';
+import { photoRoleOf } from '../../shared/photoRoles';
 import { orientedJpegDataUrl } from '../lib/photo';
 
 // ---------------------------------------------------------------------------
@@ -12,7 +13,7 @@ import { orientedJpegDataUrl } from '../lib/photo';
 export const FLEET_SCAN_KEY = 'fleetScanProgress_v1';
 
 export const saveFleetProgress = (offset, accumulated, totalScanned) => {
-  try { localStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch {}
+  try { localStorage.setItem(FLEET_SCAN_KEY, JSON.stringify({ offset, accumulated, totalScanned })); } catch { /* storage unavailable */ }
 };
 export const loadFleetProgress = () => {
   try {
@@ -21,7 +22,7 @@ export const loadFleetProgress = () => {
   } catch { return null; }
 };
 export const removeFleetProgress = () => {
-  try { localStorage.removeItem(FLEET_SCAN_KEY); } catch {}
+  try { localStorage.removeItem(FLEET_SCAN_KEY); } catch { /* storage unavailable */ }
 };
 
 /**
@@ -281,7 +282,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         // Re-encode upright: createImageBitmap with imageOrientation:'from-image' bakes
         // the EXIF rotation into pixels, then the canvas produces an orientation-1 JPEG.
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
-        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', role: photoRoleOf(ph), dataUrl });
         setProgress(i + 1, list.length);
       }
       setDone();
@@ -383,7 +384,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
         const blob = await resp.blob();
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
-        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', role: photoRoleOf(ph), dataUrl });
         // Remove this photo immediately after it's confirmed uploaded so an
         // interruption leaves only unprocessed photos in fleetCandidates.
         setFleetCandidates((prev) => prev.filter((c) => c.id !== ph.id));
@@ -422,7 +423,7 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
         const blob = await resp.blob();
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
-        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', dataUrl });
+        await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', role: photoRoleOf(ph), dataUrl });
         // Remove this specific photo immediately after it's confirmed uploaded.
         // On an interruption the remaining photos stay in fleetCandidates so
         // the truck row persists and the admin can resume without redundant work.

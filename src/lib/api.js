@@ -78,6 +78,7 @@ export const api = {
   deleteQuote: (id) => request('DELETE', `/api/quoter/quotes?id=${encodeURIComponent(id)}`),
   putQuotePhoto: (payload) => request('POST', '/api/quoter/photos', payload),
   quotePhotos: (quoteId) => request('GET', `/api/quoter/photos?quote=${encodeURIComponent(quoteId)}`),
+  intakePhotos: (intakeId) => request('GET', `/api/quoter/intakes/${encodeURIComponent(intakeId)}/photos`),
   deleteQuotePhoto: (payload) => request('DELETE', '/api/quoter/photos', payload),
   postCorrection: (payload) => request('POST', '/api/quoter/corrections', payload),
   classify: (payload) => request('POST', '/api/quoter/classify', payload),

@@ -22,6 +22,7 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import pg from "pg";
+import { LEGACY_PHOTO_INSERT_SQL, legacyPhotoInsertParams } from "./migrate-quoter-photo";
 
 const { Pool } = pg;
 
@@ -249,10 +250,8 @@ async function migratePhotos() {
       await client.query("BEGIN");
       for (const p of batch) {
         const res = await client.query(
-          `INSERT INTO photos (id, quote_id, slot, mime, data, ts)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (id) DO NOTHING`,
-          [p.id, p.quote_id, p.slot, p.mime, p.data, p.ts],
+          LEGACY_PHOTO_INSERT_SQL,
+          legacyPhotoInsertParams(p),
         );
         if (res.rowCount && res.rowCount > 0) inserted++;
       }

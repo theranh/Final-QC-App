@@ -32,7 +32,7 @@ describe('damage close-up durability (uploadDamagePhotoDurably)', () => {
   it('uploads immediately when the signal is good and leaves nothing queued', async () => {
     api.putQuotePhoto.mockResolvedValue({});
     await uploadDamagePhotoDurably({ id: 'w1', quoteId: QUOTE, slot: 'dmg', dataUrl: DATA_URL }, showToast);
-    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'w1', quoteId: QUOTE, slot: 'dmg', dataUrl: DATA_URL });
+    expect(api.putQuotePhoto).toHaveBeenCalledWith({ id: 'w1', quoteId: QUOTE, slot: 'dmg', role: 'damage', dataUrl: DATA_URL });
     await vi.waitFor(async () => expect(await pendingJobs()).toEqual([]));
     expect(showToast).not.toHaveBeenCalled();
   });

@@ -398,7 +398,7 @@ describe("GET /api/export", () => {
     expect(b.quoter.intakes[0]).toMatchObject({ id: "i1", vin: "VINQ0000000000001", quoteId: "q1" });
     expect(b.quoter.corrections[0]).toMatchObject({ id: 7, ts: 3000 });
     expect(b.quoter.productionTracker[0]).toMatchObject({ vin: "VINQ0000000000001", month: "Jul 2026", daysToClose: 4 });
-    expect(b.quoter.photos[0]).toEqual({ id: "p1", quoteId: "q1", slot: "front", mime: "image/jpeg", ts: 5000, bytes: 17 });
+    expect(b.quoter.photos[0]).toEqual({ id: "p1", quoteId: "q1", slot: "front", role: "unclassified", mime: "image/jpeg", ts: 5000, bytes: 17 });
     expect(b.quoterPhotos).toBeUndefined();
     expect(JSON.stringify(b)).not.toContain(Buffer.from("hello-photo-bytes").toString("base64"));
 
@@ -519,7 +519,7 @@ describe("POST /api/import", () => {
       },
       quoterPhotos: [
         { id: "p1", quoteId: "q1", mime: "image/jpeg", ts: 1, b64: Buffer.from("dupe").toString("base64") },
-        { id: "p2", quoteId: "q2", slot: "rear", mime: "image/png", ts: 2, b64: Buffer.from("new-bytes").toString("base64") },
+        { id: "p2", quoteId: "q2", slot: "rear", role: "damage", mime: "image/png", ts: 2, b64: Buffer.from("new-bytes").toString("base64") },
       ],
     });
     expect(r.status).toBe(200);
@@ -536,6 +536,7 @@ describe("POST /api/import", () => {
     expect(H.photos.find((p) => p.id === "p1")!.data.toString()).toBe("orig");
     // New photo decoded back to binary.
     expect(H.photos.find((p) => p.id === "p2")!.data.toString()).toBe("new-bytes");
+    expect(H.photos.find((p) => p.id === "p2")!.role).toBe("unclassified");
     const summary = H.audits.find((a) => a.action === "import_summary");
     expect(summary?.details).toMatchObject({ quotesAdded: 1, photosAdded: 1 });
   });

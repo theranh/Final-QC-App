@@ -214,6 +214,67 @@ export const MIGRATIONS: Migration[] = [
           ON corrections (ts)`,
     ],
   },
+  {
+    // Keep photo category with the image itself. Existing rows are classified
+    // conservatively: unknown legacy slot names are isolated rather than being
+    // accidentally shown in either the walk-around or damage gallery.
+    id: "0009_photo_roles",
+    statements: [
+      sql`ALTER TABLE photos ADD COLUMN IF NOT EXISTS role text`,
+      sql`UPDATE photos
+          SET role = CASE
+            WHEN lower(coalesce(slot, '')) ~ '^dmg_wide_[a-z0-9_-]+$' THEN 'damage_wide'
+            WHEN lower(coalesce(slot, '')) ~ '^dmg($|[_-]|[0-9])'
+              OR lower(coalesce(slot, '')) ~ '^(ext_fd_corner|ext_driver|ext_rd_corner|ext_rear|ext_bed|ext_rp_corner|ext_passenger|ext_fp_corner|ext_front|ext_roof)_dmg$'
+              THEN 'damage'
+            WHEN lower(coalesce(slot, '')) ~ '^(ext_fd_corner|ext_driver|ext_rd_corner|ext_rear|ext_bed|ext_rp_corner|ext_passenger|ext_fp_corner|ext_front|ext_roof|int_driver|int_dash|int_console|int_rear_d|int_rear_p|int_passenger|whl_lf|trd_lf|whl_lr|trd_lr|whl_rr|trd_rr|whl_rf|trd_rf)$'
+              OR lower(coalesce(slot, '')) ~ '^xtra_[a-z0-9]+$'
+              OR lower(coalesce(slot, '')) ~ '^wa[0-9]+_[0-9]+$'
+              THEN 'walk'
+            ELSE 'unclassified'
+          END
+          WHERE role IS NULL OR role NOT IN ('walk', 'damage', 'damage_wide', 'unclassified')`,
+      sql`ALTER TABLE photos ALTER COLUMN role SET DEFAULT 'unclassified'`,
+      sql`ALTER TABLE photos ALTER COLUMN role SET NOT NULL`,
+      sql`DO $$ BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint WHERE conname = 'photos_role_allowed'
+            ) THEN
+              ALTER TABLE photos ADD CONSTRAINT photos_role_allowed
+                CHECK (role IN ('walk', 'damage', 'damage_wide', 'unclassified'));
+            END IF;
+          END $$`,
+    ],
+  },
+  {
+    // 0009 briefly shipped in development with an over-broad walk prefix.
+    // Re-run the exact classifier in every environment so near-miss legacy
+    // names are isolated and known old Recon slots remain recoverable.
+    id: "0010_photo_role_reclassification",
+    statements: [
+      sql`UPDATE photos
+          SET role = CASE
+            WHEN lower(coalesce(slot, '')) ~ '^dmg_wide_[a-z0-9_-]+$' THEN 'damage_wide'
+            WHEN lower(coalesce(slot, '')) ~ '^dmg($|[_-]|[0-9])'
+              OR lower(coalesce(slot, '')) ~ '^(ext_fd_corner|ext_driver|ext_rd_corner|ext_rear|ext_bed|ext_rp_corner|ext_passenger|ext_fp_corner|ext_front|ext_roof)_dmg$'
+              THEN 'damage'
+            WHEN lower(coalesce(slot, '')) ~ '^(ext_fd_corner|ext_driver|ext_rd_corner|ext_rear|ext_bed|ext_rp_corner|ext_passenger|ext_fp_corner|ext_front|ext_roof|int_driver|int_dash|int_console|int_rear_d|int_rear_p|int_passenger|whl_lf|trd_lf|whl_lr|trd_lr|whl_rr|trd_rr|whl_rf|trd_rf)$'
+              OR lower(coalesce(slot, '')) ~ '^xtra_[a-z0-9]+$'
+              OR lower(coalesce(slot, '')) ~ '^wa[0-9]+_[0-9]+$'
+              THEN 'walk'
+            ELSE 'unclassified'
+          END`,
+    ],
+  },
+  {
+    // Omitted-role writers must fail safe. Active capture/import paths provide
+    // an explicit role, while any overlooked legacy writer is isolated rather
+    // than silently contaminating the walk gallery.
+    id: "0011_photo_role_fail_safe_default",
+    statements: [
+      sql`ALTER TABLE photos ALTER COLUMN role SET DEFAULT 'unclassified'`,
+    ],
+  },
 ];
 
 /**

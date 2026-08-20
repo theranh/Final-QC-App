@@ -155,7 +155,7 @@ describe('QuoteScreen camera navigation', () => {
     expect(screen.getByText('DAMAGE PHOTOS · 1')).toBeInTheDocument();
     expect(screen.getByAltText('ext_front')).toHaveAttribute(
       'src',
-      '/api/quoter/photo?id=walk-1',
+      '/api/quoter/photo?id=walk-1&v=1',
     );
   });
 });

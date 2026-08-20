@@ -7,6 +7,7 @@ import { requireEmployee, requireAdmin } from "./access";
 import { aiAnalyses, corrections, deletedQuotes, intakes, photos, quotes, settings } from "@shared/schema";
 import { validateRates } from "./ratesValidation";
 import { bestWalkPhotoIds } from "./localQuote";
+import { inferPhotoRole, isPhotoRole, validPhotoRoleForSlot } from "@shared/photoRoles";
 
 // ---------------------------------------------------------------------------
 // Body Quoter API, ported from the old standalone server (attached_assets/
@@ -461,11 +462,20 @@ export function registerQuoterRoutes(app: Express) {
       const id = String(body.id || "").slice(0, 60);
       const quoteId = String(body.quoteId || "").slice(0, 60);
       const slot = String(body.slot || "").slice(0, 40);
+      // Role is persisted by the server and validated against the established
+      // slot convention. Missing role remains compatible with an older PWA,
+      // but is inferred here once and then stored as authoritative metadata.
+      const role = body.role == null
+        ? inferPhotoRole(slot)
+        : (isPhotoRole(body.role) ? body.role : null);
       const mDU = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(
         String(body.dataUrl || ""),
       );
       if (!id || !quoteId || !mDU) {
         return res.status(400).json({ error: "Missing id, quoteId, or image" });
+      }
+      if (!role || !validPhotoRoleForSlot(role, slot)) {
+        return res.status(400).json({ error: "Invalid photo role or slot" });
       }
       const buf = Buffer.from(mDU[2], "base64");
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
@@ -525,10 +535,10 @@ export function registerQuoterRoutes(app: Express) {
         const ts = Date.now();
         await tx
           .insert(photos)
-          .values({ id, quoteId, slot, mime: mDU[1], data: buf, ts })
+          .values({ id, quoteId, slot, role, mime: mDU[1], data: buf, ts })
           .onConflictDoUpdate({
             target: photos.id,
-            set: { slot, mime: mDU[1], data: buf, ts },
+            set: { slot, role, mime: mDU[1], data: buf, ts },
           });
       });
       if (wrongOwner) {
@@ -555,10 +565,38 @@ export function registerQuoterRoutes(app: Express) {
       const quoteId = String(req.query.quote || "");
       if (!quoteId) return res.status(400).json({ error: "Missing quote" });
       const r = await db.execute(
-        sql`SELECT id, slot, ts, LENGTH(data) AS bytes FROM photos WHERE quote_id = ${quoteId} ORDER BY ts`,
+        sql`SELECT id, slot, role, ts, LENGTH(data) AS bytes FROM photos WHERE quote_id = ${quoteId} ORDER BY ts, id`,
       );
       res.set("Cache-Control", "no-store");
-      res.json({ photos: r.rows });
+      res.json({ quoteId, photos: r.rows });
+    }),
+  );
+
+  // ----- GET /api/quoter/intakes/:id/photos (canonical intake manifest) -----
+  // The intake's exact quote_id is the only owner used here. There is
+  // intentionally no VIN/newest-quote fallback: a vehicle can legitimately
+  // have multiple quote rows, and guessing would mix their galleries.
+  app.get(
+    "/api/quoter/intakes/:id/photos",
+    requireEmployee,
+    guard(async (req, res) => {
+      const intakeId = String(req.params.id || "").slice(0, 100);
+      if (!intakeId) return res.status(400).json({ error: "Missing intake id" });
+      const owner = await db.execute(
+        sql`SELECT quote_id FROM intakes WHERE id = ${intakeId} LIMIT 1`,
+      );
+      if (!owner.rows.length) return res.status(404).json({ error: "Intake not found" });
+      const quoteId = String((owner.rows[0] as any).quote_id || "");
+      if (!quoteId) {
+        res.set("Cache-Control", "no-store");
+        return res.json({ intakeId, quoteId: null, photos: [] });
+      }
+      const manifest = await db.execute(
+        sql`SELECT id, slot, role, ts, LENGTH(data) AS bytes
+            FROM photos WHERE quote_id = ${quoteId} ORDER BY ts, id`,
+      );
+      res.set("Cache-Control", "no-store");
+      res.json({ intakeId, quoteId, photos: manifest.rows });
     }),
   );
 
@@ -609,10 +647,19 @@ export function registerQuoterRoutes(app: Express) {
     guard(async (req, res) => {
       const id = String(req.query.id || "");
       if (!id) return res.status(400).json({ error: "Missing id" });
-      const [row] = await db.select({ mime: photos.mime, data: photos.data }).from(photos).where(eq(photos.id, id));
+      const [row] = await db
+        .select({ mime: photos.mime, data: photos.data, ts: photos.ts })
+        .from(photos)
+        .where(eq(photos.id, id));
       if (!row) return res.status(404).json({ error: "Not found" });
+      const etag = `W/"${row.ts}-${row.data.length}"`;
+      if (req.header("if-none-match") === etag) return res.status(304).end();
       res.set("Content-Type", row.mime);
-      res.set("Cache-Control", "private, max-age=86400");
+      res.set("ETag", etag);
+      res.set("X-Content-Type-Options", "nosniff");
+      // A photo id may be overwritten by the rotate action. Revalidate every
+      // time so even stale clients cannot keep yesterday's bytes for a day.
+      res.set("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
       res.end(row.data);
     }),
   );

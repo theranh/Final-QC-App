@@ -5,6 +5,7 @@ import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, setC
 import { orientedJpegDataUrl } from '../lib/photo';
 import { analyzeDataUrl } from '../lib/photoQuality';
 import PhotoQualityReview from './PhotoQualityReview';
+import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
 
 const MAX = 1600;
 // iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
@@ -64,9 +65,9 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       const walkKeys = new Set(WALK_SLOTS.map((s) => s.key));
       const takenMap = {}; const photoMap = {};
       for (const p of j?.photos || []) {
-        if (!walkKeys.has(p.slot)) continue;
+        if (photoRoleOf(p) !== 'walk' || !walkKeys.has(p.slot)) continue;
         takenMap[p.slot] = true;
-        photoMap[p.slot] = { id: p.id, thumb: `/api/quoter/photo?id=${encodeURIComponent(p.id)}` };
+        photoMap[p.slot] = { id: p.id, thumb: photoUrl(p) };
       }
       if (Object.keys(takenMap).length) {
         setTaken((prev) => ({ ...takenMap, ...prev }));
@@ -172,7 +173,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // surfaced and the slot is rolled back so the tech can react.
   const uploadPhoto = useCallback(async (job, { fromRetry = false } = {}) => {
     try {
-      await api.putQuotePhoto({ id: job.id, quoteId, slot: job.slotKey, dataUrl: job.dataUrl });
+      await api.putQuotePhoto({ id: job.id, quoteId, slot: job.slotKey, role: 'walk', dataUrl: job.dataUrl });
       queueRef.current = queueRef.current.filter((j) => j.id !== job.id);
       setPendingCount(queueRef.current.length);
       // Clear only THIS capture's on-disk copy: a retake of the same slot may
@@ -232,7 +233,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     // Same durable path as guided shots: persist to disk before the upload
     // attempt so a force-close or dead battery can't lose an extra photo.
     const key = newJobKey(id);
-    await persistJob({ key, id, quoteId, slotKey, dataUrl });
+    await persistJob({ key, id, quoteId, slotKey, role: 'walk', dataUrl });
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
     await uploadPhoto({ key, id, slotKey, dataUrl });
   };
@@ -260,7 +261,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     // so an in-flight older upload for this slot can only ever delete its
     // own record, never this one.
     const key = newJobKey(id);
-    await persistJob({ key, id, quoteId, slotKey, dataUrl });
+    await persistJob({ key, id, quoteId, slotKey, role: 'walk', dataUrl });
     // This shot supersedes any earlier queued capture of the same slot —
     // purge them (disk + memory) so a stale retry can't overwrite it.
     await removeJobsForPhoto(id, key);

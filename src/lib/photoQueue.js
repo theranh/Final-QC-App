@@ -14,6 +14,7 @@
 // stale and are dropped.
 
 import { api } from './api';
+import { inferPhotoRole, photoRoleOf, validPhotoRoleForSlot } from '../../shared/photoRoles';
 
 const DB_NAME = 'fqPhotoQueue';
 const STORE = 'photos';
@@ -170,6 +171,20 @@ export function subscribePending(fn) {
   fn(lastCount);
   return () => listeners.delete(fn);
 }
+const failureListeners = new Set();
+let permanentFailure = null;
+function notifyFailure(failure) {
+  permanentFailure = failure;
+  failureListeners.forEach((fn) => { try { fn(failure); } catch { /* listener error */ } });
+}
+export function subscribeQueueFailure(fn) {
+  failureListeners.add(fn);
+  fn(permanentFailure);
+  return () => failureListeners.delete(fn);
+}
+export function clearQueueFailure() {
+  notifyFailure(null);
+}
 async function refreshCount() {
   try {
     const all = await getAllRecords();
@@ -186,7 +201,8 @@ export function newJobKey(id) {
 }
 export async function persistJob(job) {
   try {
-    await tx('readwrite', (store) => store.put({ key: job.key, id: job.id, quoteId: job.quoteId, slotKey: job.slotKey, dataUrl: job.dataUrl, addedAt: Date.now() }));
+    const role = validPhotoRoleForSlot(job.role, job.slotKey) ? job.role : inferPhotoRole(job.slotKey);
+    await tx('readwrite', (store) => store.put({ key: job.key, id: job.id, quoteId: job.quoteId, slotKey: job.slotKey, role, dataUrl: job.dataUrl, addedAt: Date.now() }));
     await refreshCount();
   } catch { /* private mode / quota — in-memory retry still covers the session */ }
 }
@@ -259,8 +275,9 @@ export async function pendingJobs(quoteId) {
 let cameraOpen = false;
 export function setCameraOpen(open) { cameraOpen = open; if (!open) flushQueue(); }
 
-// Damage close-ups get 'dmg…' slot keys; everything else is a camera slot.
-const isDamageJob = (job) => String(job.slotKey || '').startsWith('dmg');
+// Server-owned role controls queue ownership. Legacy queue records that predate
+// the role field are inferred once from their established slot convention.
+const isDamageJob = (job) => ['damage', 'damage_wide'].includes(photoRoleOf({ role: job.role, slot: job.slotKey }));
 
 let flushing = false;
 export async function flushQueue() {
@@ -284,7 +301,13 @@ export async function flushQueue() {
       if (cameraOpen && !isDamageJob(job)) continue;
       try {
          
-        await api.putQuotePhoto({ id: job.id, quoteId: job.quoteId, slot: job.slotKey, dataUrl: job.dataUrl });
+        await api.putQuotePhoto({
+          id: job.id,
+          quoteId: job.quoteId,
+          slot: job.slotKey,
+          role: photoRoleOf({ role: job.role, slot: job.slotKey }),
+          dataUrl: job.dataUrl,
+        });
         // Check whether the inspector deleted this photo while the PUT was
         // in flight. We consult the explicit deletedPhotoIds registry rather
         // than the queue — the registry is only set by purgeDeletedDamagePhoto,
@@ -311,7 +334,12 @@ export async function flushQueue() {
          
         // 410 = the owning quote was deleted (tombstoned) — the upload can
         // never attach; drop it instead of retrying forever.
-        if (e.status === 413 || e.status === 409 || e.status === 403 || e.status === 410) await removeJob(job.key);
+        if ([400, 403, 409, 410, 413].includes(e.status)) {
+          await removeJob(job.key);
+          // A deleted quote (410) is deliberate. Other permanent rejections
+          // need a visible retake warning instead of silently disappearing.
+          if (e.status !== 410) notifyFailure({ id: job.id, status: e.status });
+        }
         // Transient (offline / 5xx / 401): leave it for the next flush pass.
       }
     }

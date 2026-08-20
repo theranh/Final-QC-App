@@ -19,6 +19,7 @@ import {
   panelLabel, sysPrompt, parseCls, correctionDiffs, pickBetterCls,
   CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, CLASSIFY_PROMPT_PAIR, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
+import { inferPhotoRole, photoRoleOf, photoUrl } from '../../shared/photoRoles';
 
 // Stable UUID generator for analysis tracking.  Uses the Web Crypto API when
 // available (all modern browsers / React Native); falls back to Math.random()
@@ -86,12 +87,13 @@ export function quoteExtras(snapshot) {
 // lets the caller cancel a capture the inspector deleted while it was still
 // queued or in flight — a deleted photo must never be (re)sent later.
 // Exported for tests.
-export async function uploadDamagePhotoDurably({ id, quoteId, slot, dataUrl }, showToast, isDeleted) {
+export async function uploadDamagePhotoDurably({ id, quoteId, slot, role, dataUrl }, showToast, isDeleted) {
+  const canonicalRole = role || inferPhotoRole(slot);
   const key = newJobKey(id);
-  await persistJob({ key, id, quoteId, slotKey: slot, dataUrl });
+  await persistJob({ key, id, quoteId, slotKey: slot, role: canonicalRole, dataUrl });
   if (isDeleted && isDeleted(id)) { removeJob(key); return; }
   try {
-    await api.putQuotePhoto({ id, quoteId, slot, dataUrl });
+    await api.putQuotePhoto({ id, quoteId, slot, role: canonicalRole, dataUrl });
     removeJob(key);
     // Deleted while the upload was in flight: the server copy that just landed
     // must go away too — the inspector's delete wins.
@@ -613,13 +615,31 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   const [lightbox, setLightbox] = useState(null);
   const [photosLoadError, setPhotosLoadError] = useState(false);
   const [photosLoadAttempt, setPhotosLoadAttempt] = useState(0); // bumped by RETRY
+  const photoRequestRef = useRef(0);
   useEffect(() => {
-    if (!quoteId || walkOpen) return;
+    const effectToken = ++photoRequestRef.current;
+    if (!quoteId || walkOpen) {
+      if (!quoteId) setServerPhotos([]);
+      return;
+    }
     let live = true;
+    const requestToken = ++photoRequestRef.current;
     api.quotePhotos(quoteId)
-      .then((j) => { if (live) { setServerPhotos(j?.photos || []); setPhotosLoadError(false); } })
-      .catch(() => { if (live) setPhotosLoadError(true); });
-    return () => { live = false; };
+      .then((j) => {
+        if (
+          live &&
+          effectToken < requestToken &&
+          requestToken === photoRequestRef.current &&
+          (j?.quoteId == null || j.quoteId === quoteId)
+        ) {
+          setServerPhotos(j?.photos || []);
+          setPhotosLoadError(false);
+        }
+      })
+      .catch(() => {
+        if (live && requestToken === photoRequestRef.current) setPhotosLoadError(true);
+      });
+    return () => { live = false; photoRequestRef.current += 1; };
   }, [quoteId, walkOpen, photos.length, photosLoadAttempt]);
   // Recover orphaned damage close-ups: a photo can reach the server and then
   // vanish from local state (screen reload, PWA restart) before it was ever
@@ -631,14 +651,13 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   useEffect(() => {
     if (committed || walkOpen || !hydratedRef.current) return;
     const orphans = serverPhotos.filter((p) =>
-      String(p.slot || '').startsWith('dmg') &&
+      photoRoleOf(p) === 'damage' &&
       // Wide shots are always owned by a specific line (slot = dmg_wide_<lineId>).
       // Excluding them here means a server-side wide photo can NEVER be pulled
       // back as a standalone damage photo — even if its companion line was deleted
       // offline and purgeDeletedDamagePhoto couldn't reach the server. The only
       // other re-attachment path (wide-shot hydration below) only runs for lines
       // that still exist in q.lines, so a deleted line's wide photo is doubly safe.
-      !String(p.slot || '').startsWith('dmg_wide') &&
       !linesRef.current.some((l) => l.id === p.id) &&
       !photos.some((lp) => lp.id === p.id) &&
       !deletedPhotoIdsRef.current.has(p.id) &&
@@ -652,7 +671,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     (async () => {
       for (const p of orphans) {
         try {
-          const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`, { credentials: 'include' });
+          const resp = await fetch(photoUrl(p), { credentials: 'include' });
           if (!resp.ok) throw new Error('fetch failed');
           const blob = await resp.blob();
           const dataUrl = await new Promise((resolve, reject) => {
@@ -937,7 +956,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         const id = newId('p');
         setPhotos((prev) => [...prev, { id, thumb, base64: big.split(',')[1], dataUrl: big }]);
         // Each damage photo becomes a quote line — upload it tied to the quote.
-        uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg' + Date.now(), dataUrl: big });
+        uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg' + Date.now(), role: 'damage', dataUrl: big });
       } catch {
         showToast && showToast('Could not read that image');
       }
@@ -980,10 +999,10 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
     // Wide shot gets its own server record so it survives a page reload.
     const widePhotoId = wideDataUrl ? id + '_w' : undefined;
     setPhotos((prev) => [...prev, { id, thumb, base64: dataUrl.split(',')[1], dataUrl, wideBase64, wideThumb, widePhotoId }]);
-    const uploads = [uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', dataUrl })];
+    const uploads = [uploadDamagePhoto({ id, quoteId: qid, slot: 'dmg', role: 'damage', dataUrl })];
     if (wideDataUrl && widePhotoId) {
       // Slot name encodes the owning close-up id so recovery can re-link them.
-      uploads.push(uploadDamagePhoto({ id: widePhotoId, quoteId: qid, slot: 'dmg_wide_' + id, dataUrl: wideDataUrl }));
+      uploads.push(uploadDamagePhoto({ id: widePhotoId, quoteId: qid, slot: 'dmg_wide_' + id, role: 'damage_wide', dataUrl: wideDataUrl }));
     }
     await Promise.all(uploads);
   };
@@ -1416,7 +1435,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onAddMore={() => setStep('photos')}
             onViewPhotos={() => { setViewingAllSavedPhotos(true); setStep('photos'); }}
             savedPhotoCount={serverPhotos.length}
-            walkPhotoCount={serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg')).length}
+            walkPhotoCount={serverPhotos.filter((p) => photoRoleOf(p) === 'walk').length}
             flags={flags}
             keep={keep}
             notes={notes}
@@ -1679,9 +1698,10 @@ const PHOTO_CAP = 160;
 const PHOTO_WARN_THRESHOLD = 20; // warn when remaining slots drop below this
 
 function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUploads = 0, onEnlarge, lineCount, committed, armedDelete, onAdd, onWalk, onDamage, onRemove, onAnalyze, onBack, onSeeQuote }) {
-  // All non-damage shots — guided slots and after-the-fact extras — are one
-  // walk-around set; only damage close-ups ('dmg…') are shown apart.
-  const walkShots = serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
+  const walkShots = serverPhotos.filter((p) => photoRoleOf(p) === 'walk');
+  const damageShots = serverPhotos.filter((p) => photoRoleOf(p) === 'damage');
+  const damageWideShots = serverPhotos.filter((p) => photoRoleOf(p) === 'damage_wide');
+  const unclassifiedShots = serverPhotos.filter((p) => photoRoleOf(p) === 'unclassified');
   // Count photos still uploading toward the cap too — otherwise 30 queued
   // shots on weak signal make the warning read 30 slots too optimistic, and
   // the server rejects (413-style surprise) once they land.
@@ -1701,10 +1721,10 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
             {walkShots.map((p) => (
               <img
                 key={p.id}
-                src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                src={photoUrl(p)}
                 alt={p.slot || 'walk-around photo'}
                 loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
                 style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
               />
             ))}
@@ -1713,7 +1733,7 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
         {!committed && <button className="btn btn-dark" style={{ marginTop: 10 }} onClick={onWalk}>📷 TAKE PHOTOS</button>}
       </div>}
       <div className="card">
-        <div className="card-title">DAMAGE PHOTOS · {Math.max(serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg')).length, photos.length)}</div>
+        <div className="card-title">DAMAGE PHOTOS · {Math.max(damageShots.length, photos.length)}</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
           Take a close-up of each damage spot — these go to the AI for the body quote.
         </div>
@@ -1734,15 +1754,15 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
               : `⚠ Only ${remaining} photo slot${remaining === 1 ? '' : 's'} remaining — this truck is ${totalServerCount} of ${PHOTO_CAP}${pendingUploads ? ` (${pendingUploads} still sending)` : ''}. Prioritize the most important damage close-ups.`}
           </div>
         )}
-        {serverPhotos.some((p) => String(p.slot || '').startsWith('dmg')) && (
+        {damageShots.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
-            {serverPhotos.filter((p) => String(p.slot || '').startsWith('dmg') && !photos.some((lp) => lp.id === p.id)).map((p) => (
+            {damageShots.filter((p) => !photos.some((lp) => lp.id === p.id)).map((p) => (
               <img
                 key={p.id}
-                src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}`}
+                src={photoUrl(p)}
                 alt="damage close-up"
                 loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(`/api/quoter/photo?id=${encodeURIComponent(p.id)}`)}
+                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
                 style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
               />
             ))}
@@ -1766,6 +1786,48 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
           </div>
         )}
       </div>
+
+      {!damageFocus && damageWideShots.length > 0 && (
+        <div className="card">
+          <div className="card-title">DAMAGE CONTEXT PHOTOS · {damageWideShots.length}</div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginTop: 6 }}>
+            Wide views showing where each close-up sits on the vehicle.
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+            {damageWideShots.map((p) => (
+              <img
+                key={p.id}
+                src={photoUrl(p)}
+                alt="damage context"
+                loading="lazy"
+                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
+                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!damageFocus && unclassifiedShots.length > 0 && (
+        <div className="card" style={{ borderLeft: '4px solid var(--amber)' }}>
+          <div className="card-title">LEGACY PHOTOS TO REVIEW · {unclassifiedShots.length}</div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+            These photos are intentionally kept out of the walk-around and damage areas because their older slot name has no safe category.
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+            {unclassifiedShots.map((p) => (
+              <img
+                key={p.id}
+                src={photoUrl(p)}
+                alt="legacy unclassified"
+                loading="lazy"
+                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
+                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {photos.length > 0 ? (
         <button className="btn btn-red" onClick={onAnalyze}>

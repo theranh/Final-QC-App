@@ -9,6 +9,7 @@ import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 import { subscribePending, subscribePersistence, queueServerDelete, attemptServerDelete } from '../lib/photoQueue';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
+import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -114,13 +115,16 @@ function intakeFromServerRow(j) {
 }
 
 function mergeCanonicalServerFields(local, server) {
+  const hasQuoteId = Object.prototype.hasOwnProperty.call(server || {}, 'quoteId');
   return {
     ...local,
     id: server.id || local.id,
     completedAt: server.completedAt || null,
     committedBy: server.committedBy || null,
     overriddenBy: server.overriddenBy || null,
-    quoteId: server.quoteId || null,
+    // A deliberately returned null is authoritative, but a partial response
+    // that omitted quoteId must never erase a known canonical link.
+    quoteId: hasQuoteId ? (server.quoteId || null) : (local.quoteId || null),
   };
 }
 
@@ -193,13 +197,22 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   }, [intakeVin, makeSaveTracker]);
   useEffect(() => {
     if (intakeVin == null) { setQuoteSummary(null); return; }
+    // An intake owns photos through its exact canonical quote link. Never pick
+    // "the newest quote for this VIN" when that link is absent: two legitimate
+    // quote rows for one VIN must remain separate.
+    if (!intakeQuoteId) {
+      quoteRowRef.current = null;
+      setQuoteNotes('');
+      setQuoteSummary(null);
+      return;
+    }
     let live = true;
     api.quoterSync().then((j) => {
       if (!live) return;
       // Remember which rates version this quote view was built from — sent
       // back at commit so a rate change mid-quote can't silently reprice.
       if (j && j.ratesVersion != null) ratesVersionRef.current = Number(j.ratesVersion);
-      const qs = (j?.quotes || []).filter((q) => q && (intakeQuoteId ? q.id === intakeQuoteId : String(q.vin || '').toUpperCase() === intakeVin));
+      const qs = (j?.quotes || []).filter((q) => q && q.id === intakeQuoteId);
       const q = qs.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
       if (!q) { quoteRowRef.current = null; setQuoteNotes(''); return setQuoteSummary(null); }
       quoteRowRef.current = q;
@@ -633,14 +646,16 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   // Walk-around photos for the opened intake (thumbnails shown inline).
   // Refreshed when the camera closes so new shots appear immediately.
   const [intakePhotos, setIntakePhotos] = useState([]);
-  // Damage close-ups (slots starting with "dmg") are shown apart from the
-  // walk-around set so reviewers see truck condition vs. quoted damage.
-  // Everything else is ONE walk-around set — guided-slot shots and any
-  // additional pictures are all just photos; no separation shown anywhere.
-  const walkPhotos = intakePhotos.filter((p) => !String(p.slot || '').startsWith('dmg'));
-  const damagePhotos = intakePhotos.filter((p) => String(p.slot || '').startsWith('dmg'));
+  // Persisted roles are authoritative. Legacy mocked/offline metadata without
+  // a role falls back to conservative slot inference, with unknown rows kept
+  // out of both primary galleries.
+  const walkPhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'walk');
+  const damagePhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'damage');
+  const damageWidePhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'damage_wide');
+  const unclassifiedPhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'unclassified');
   const [lightbox, setLightbox] = useState(null); // { url, id } of enlarged photo
   const photoQuoteId = intake?.quoteId ?? null;
+  const photoIntakeId = intake?.id ?? null;
   // Photos can still be uploading in the background (weak signal) when the
   // grid first loads — track the retry queue and refresh the list as shots
   // land, so a saved intake never looks like photos went missing.
@@ -651,18 +666,48 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   useEffect(() => subscribePersistence(setPersistenceOk), []);
   const [photoLoadError, setPhotoLoadError] = useState(false);
   const [photoLoadAttempt, setPhotoLoadAttempt] = useState(0); // bumped by RETRY
+  const photoRequestRef = useRef(0);
   useEffect(() => {
-    if (!photoQuoteId || walkOpen) { if (!photoQuoteId) setIntakePhotos([]); return; }
+    const effectToken = ++photoRequestRef.current;
+    if (!photoIntakeId || !photoQuoteId || walkOpen) {
+      if (!photoIntakeId || !photoQuoteId) setIntakePhotos([]);
+      return;
+    }
     let live = true;
-    const load = () => api.quotePhotos(photoQuoteId)
-      .then((j) => { if (live) { setIntakePhotos(j?.photos || []); setPhotoLoadError(false); } })
-      .catch(() => { if (live) setPhotoLoadError(true); });
+    const load = () => {
+      const requestToken = ++photoRequestRef.current;
+      return api.intakePhotos(photoIntakeId)
+        .then((j) => {
+          if (
+            live &&
+            effectToken < requestToken &&
+            requestToken === photoRequestRef.current &&
+            intakeRef.current?.id === photoIntakeId
+          ) {
+            setIntakePhotos(j?.photos || []);
+            setPhotoLoadError(false);
+            // The manifest is server-resolved through this intake row. Repair a
+            // stale local link without issuing another save that could race it.
+            if (j?.quoteId && intakeRef.current?.quoteId !== j.quoteId) {
+              const linked = { ...intakeRef.current, quoteId: j.quoteId };
+              intakeRef.current = linked;
+              setIntake(linked);
+              saveToCache(linked);
+            }
+          }
+        })
+        .catch(() => {
+          if (live && requestToken === photoRequestRef.current && intakeRef.current?.id === photoIntakeId) {
+            setPhotoLoadError(true);
+          }
+        });
+    };
     load();
     // While uploads are draining, poll so each arriving shot appears; the
     // pendingUploads dependency triggers a final refresh when it hits zero.
     const t = pendingUploads > 0 ? setInterval(load, 4000) : null;
-    return () => { live = false; if (t) clearInterval(t); };
-  }, [photoQuoteId, walkOpen, quoting, pendingUploads, photoLoadAttempt]);
+    return () => { live = false; photoRequestRef.current += 1; if (t) clearInterval(t); };
+  }, [photoIntakeId, photoQuoteId, walkOpen, quoting, pendingUploads, photoLoadAttempt]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -962,10 +1007,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   {walkPhotos.map((p) => (
                     <img
                       key={p.id}
-                      src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}${p.bust ? `&t=${p.bust}` : ''}`}
+                      src={p.bust ? `${photoUrl(p)}&b=${p.bust}` : photoUrl(p)}
                       alt={p.slot || 'walk-around photo'}
                       loading="lazy"
-                      onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
+                      onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
                       style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
                     />
                   ))}
@@ -988,6 +1033,59 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 }}>+ ADD PHOTOS</button>
               )}
             </div>
+            {(damagePhotos.length > 0 || damageWidePhotos.length > 0 || unclassifiedPhotos.length > 0) && (
+              <div className="card" style={{ borderLeft: '4px solid var(--red)' }}>
+                <div className="card-title">DAMAGE PHOTOS · {damagePhotos.length}</div>
+                {damagePhotos.length > 0 && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
+                    {damagePhotos.map((p) => (
+                      <img
+                        key={p.id}
+                        src={p.bust ? `${photoUrl(p)}&b=${p.bust}` : photoUrl(p)}
+                        alt="damage photo"
+                        loading="lazy"
+                        onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
+                        style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--red)', cursor: 'pointer' }}
+                      />
+                    ))}
+                  </div>
+                )}
+                {damageWidePhotos.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 12 }}>DAMAGE CONTEXT PHOTOS · {damageWidePhotos.length}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
+                      {damageWidePhotos.map((p) => (
+                        <img
+                          key={p.id}
+                          src={photoUrl(p)}
+                          alt="damage context photo"
+                          loading="lazy"
+                          onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
+                          style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
+                {unclassifiedPhotos.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 9.5, color: 'var(--amber)', letterSpacing: 0.8, fontWeight: 700, marginTop: 12 }}>LEGACY PHOTOS TO REVIEW · {unclassifiedPhotos.length}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
+                      {unclassifiedPhotos.map((p) => (
+                        <img
+                          key={p.id}
+                          src={photoUrl(p)}
+                          alt="legacy unclassified photo"
+                          loading="lazy"
+                          onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
+                          style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             {/* Notes — its own card so it stands apart from the photo grid. */}
             <div className="card" ref={notesCardRef} style={{ borderLeft: '4px solid var(--amber)' }}>
               <div className="card-title">NOTES</div>
@@ -1018,23 +1116,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 <>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 12, fontWeight: 700 }}><span>{quoteSummary.lineCount} lines</span><span>{quoteSummary.hrs} hr of work</span><span>{quoteSummary.photoCount} photos</span></div>
                   {(quoteSummary.notes || '').trim() && <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: 'var(--panel)', fontSize: 11.5, color: 'var(--brown)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}><b style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8 }}>NOTES</b><br />{quoteSummary.notes.trim()}</div>}
-                  {damagePhotos.length > 0 && (
-                    <>
-                      <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 10 }}>DAMAGE PHOTOS · {damagePhotos.length}</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
-                        {damagePhotos.map((p) => (
-                          <img
-                            key={p.id}
-                            src={`/api/quoter/photo?id=${encodeURIComponent(p.id)}${p.bust ? `&t=${p.bust}` : ''}`}
-                            alt="damage photo"
-                            loading="lazy"
-                            onClick={() => setLightbox({ url: `/api/quoter/photo?id=${encodeURIComponent(p.id)}`, id: p.id })}
-                            style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--red)', cursor: 'pointer' }}
-                          />
-                        ))}
-                      </div>
-                    </>
-                  )}
                   <button className="btn btn-outline-red" style={{ marginTop: 9 }} onClick={() => { setQuoting(true); }}>{locked ? 'REVIEW QUOTE' : 'REOPEN QUOTE'}</button>
                 </>
               ) : (
@@ -1120,13 +1201,13 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   ctx.drawImage(img, -w / 2, -h / 2, w, h);
                   const dataUrl = c.toDataURL('image/jpeg', 0.8);
                   const meta = intakePhotos.find((p) => p.id === lightbox.id);
-                  await api.putQuotePhoto({ id: lightbox.id, quoteId: photoQuoteId, slot: meta?.slot || '', dataUrl });
+                  await api.putQuotePhoto({ id: lightbox.id, quoteId: photoQuoteId, slot: meta?.slot || '', role: photoRoleOf(meta || {}), dataUrl });
                   // Cache-bust so the fresh rotation shows immediately.
                   const bust = `/api/quoter/photo?id=${encodeURIComponent(lightbox.id)}&t=${Date.now()}`;
                   setLightbox({ ...lightbox, url: bust });
                   setIntakePhotos((prev) => prev.map((p) => (p.id === lightbox.id ? { ...p, bust: Date.now() } : p)));
                   showToast?.('Photo rotated ✓');
-                } catch (err) {
+                } catch {
                   showToast?.('Couldn’t rotate the photo — check your connection and try again.');
                 }
               }}

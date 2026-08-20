@@ -31,6 +31,7 @@ import { timingSafeEqual } from "node:crypto";
 import pg from "pg";
 import { pool } from "./db";
 import { snapshotMonth } from "./tracker";
+import { inferPhotoRole } from "@shared/photoRoles";
 
 const { Pool } = pg;
 const PHOTO_BATCH = 25;
@@ -157,9 +158,9 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           await client.query("BEGIN");
           for (const p of batch) {
             const q = await client.query(
-              `INSERT INTO photos (id, quote_id, slot, mime, data, ts)
-               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING`,
-              [p.id, p.quote_id, p.slot, p.mime, p.data, p.ts],
+              `INSERT INTO photos (id, quote_id, slot, role, mime, data, ts)
+               VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`,
+              [p.id, p.quote_id, p.slot, inferPhotoRole(p.slot), p.mime, p.data, p.ts],
             );
             if (q.rowCount) inserted++;
           }

@@ -18,3 +18,4 @@
 - [Body Quoter link](quoter-link.md) — Part A endpoints + limits: intakes-completed enumerates VINs for the awaiting-QC list; never write to the Quoter.
 - [Manager analytics semantics](manager-analytics-semantics.md) — Chicago completed-intake cohorts; tracker stages are day-precision; AI telemetry stays separate from committed pricing.
 - [VIN scanner reliability](vin-scanner-reliability.md) — keep ZXing bundled; native barcode APIs are optional, bounded accelerators and must never block/callback after close.
+- [Photo ownership and roles](photo-ownership-roles.md) — reopen through the intake’s exact quote link; persist photo roles and isolate unknown legacy slots rather than guessing.

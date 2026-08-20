@@ -138,6 +138,9 @@ export const photos = pgTable(
     id: text("id").primaryKey(),
     quoteId: text("quote_id").notNull(),
     slot: text("slot"),
+    // Server-owned category: galleries must never infer a walk-around vs.
+    // damage photo from a client-controlled free-form slot name alone.
+    role: text("role").notNull().default("unclassified"),
     mime: text("mime").notNull(),
     data: bytea("data").notNull(),
     ts: bigint("ts", { mode: "number" }).notNull(),
