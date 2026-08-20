@@ -22,6 +22,8 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
   const busyRef = useRef(false);
   const doneRef = useRef(false);
   const passRef = useRef(0);
+  const frameFailuresRef = useRef(0);
+  const unreadyFramesRef = useRef(0);
   const [status, setStatus] = useState('Starting camera…');
   const [torchOn, setTorchOn] = useState(false);
   const [torchAvailable, setTorchAvailable] = useState(false);
@@ -51,25 +53,47 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-        });
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
+            audio: false,
+          });
+        } catch (cameraError) {
+          // Some older browsers reject the rear-camera constraint even though
+          // they have a usable camera. Never retry a denied permission.
+          if (cancelled) return;
+          if (cameraError?.name === 'NotAllowedError' || cameraError?.name === 'SecurityError') throw cameraError;
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+            audio: false,
+          });
+        }
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
         const video = videoRef.current;
-        if (!video) return;
+        if (!video) {
+          stream.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+          return;
+        }
         video.srcObject = stream;
         try {
           await video.play();
         } catch {
           // autoplay can reject silently on some browsers; frames still flow
+        }
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+          return;
         }
 
         // Torch (flashlight) support — big help on dark door jambs.
@@ -85,29 +109,38 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
           // capabilities probing is best-effort
         }
 
-        // Native detector where available (filtered to supported formats).
-        let detector = null;
-        if (window.BarcodeDetector) {
-          try {
-            let formats = NATIVE_FORMATS;
-            if (window.BarcodeDetector.getSupportedFormats) {
-              const supported = await window.BarcodeDetector.getSupportedFormats();
-              formats = NATIVE_FORMATS.filter((f) => supported.includes(f));
-            }
-            if (formats.length) detector = new window.BarcodeDetector({ formats });
-          } catch {
-            detector = null;
-          }
-        }
-        detectorRef.current = detector;
+        // Start the ZXing loop immediately. Native BarcodeDetector capability
+        // discovery is optional and has hung on some mobile browsers; it must
+        // never prevent the software decoder from reading a VIN.
+        void configureNativeDetector();
         setStatus('Scanning… line the code up in the frame');
         timerRef.current = setInterval(scanFrame, 250);
       } catch {
-        setStatus(
-          isStock
-            ? 'Camera unavailable or permission denied — type the stock number manually'
-            : 'Camera unavailable or permission denied — type the VIN manually'
-        );
+        if (!cancelled) {
+          setStatus(
+            isStock
+              ? 'Camera unavailable or permission denied — type the stock number manually'
+              : 'Camera unavailable or permission denied — type the VIN manually'
+          );
+        }
+      }
+    }
+
+    async function configureNativeDetector() {
+      if (!window.BarcodeDetector) return;
+      try {
+        let formats = NATIVE_FORMATS;
+        if (window.BarcodeDetector.getSupportedFormats) {
+          const supported = await Promise.race([
+            window.BarcodeDetector.getSupportedFormats(),
+            new Promise((resolve) => setTimeout(() => resolve(null), 750)),
+          ]);
+          if (Array.isArray(supported)) formats = NATIVE_FORMATS.filter((f) => supported.includes(f));
+        }
+        if (!cancelled && formats.length) detectorRef.current = new window.BarcodeDetector({ formats });
+      } catch {
+        // ZXing remains active when native detector creation is unavailable.
+        detectorRef.current = null;
       }
     }
 
@@ -124,25 +157,60 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
       return ctx.getImageData(0, 0, W, H);
     }
 
+    function detectNative(detector, video) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          settled = true;
+          resolve({ codes: null, timedOut: true });
+        }, 120);
+        try {
+          Promise.resolve(detector.detect(video)).then(
+            (codes) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve({ codes, timedOut: false });
+            },
+            () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve({ codes: null, timedOut: false });
+            }
+          );
+        } catch {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ codes: null, timedOut: false });
+        }
+      });
+    }
+
     async function scanFrame() {
       if (busyRef.current || doneRef.current) return;
       busyRef.current = true;
       try {
         const v = videoRef.current;
         if (!v || v.readyState < 2 || !v.videoWidth) {
-          busyRef.current = false;
+          unreadyFramesRef.current += 1;
+          if (!cancelled && unreadyFramesRef.current >= 8) {
+            setStatus('Camera started, but no frames are available — close and try again');
+          }
           return;
         }
+        unreadyFramesRef.current = 0;
         let text = null;
 
         // 1) Native hardware-accelerated detector (fastest, most tolerant).
         if (detectorRef.current) {
-          try {
-            const codes = await detectorRef.current.detect(v);
-            if (codes && codes.length) text = codes[0].rawValue;
-          } catch {
-            // detector hiccup — fall through to ZXing this pass
-          }
+          const detector = detectorRef.current;
+          const { codes, timedOut } = await detectNative(detector, v);
+          if (cancelled || doneRef.current) return;
+          // A hanging native detector must not hold busyRef forever. Disable it
+          // for this scanner session and let the bundled ZXing reader take over.
+          if (timedOut && detectorRef.current === detector) detectorRef.current = null;
+          if (codes && codes.length) text = codes[0].rawValue;
         }
 
         // 2) ZXing multi-format decode. Alternate between the center band
@@ -166,9 +234,13 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
 
         if (text) handleText(text);
       } catch {
-        // ignore transient frame errors
+        frameFailuresRef.current += 1;
+        if (!cancelled && frameFailuresRef.current >= 4) {
+          setStatus('Camera is on, but frames cannot be read — close and try again');
+        }
+      } finally {
+        busyRef.current = false;
       }
-      busyRef.current = false;
     }
 
     function handleText(text) {
@@ -192,13 +264,16 @@ export default function VinScanner({ onDetected, onCancel, mode = 'vin' }) {
     begin();
     return () => {
       cancelled = true;
+      doneRef.current = true;
       if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = null;
       if (streamRef.current) {
         try {
           streamRef.current.getTracks().forEach((t) => t.stop());
         } catch {
           // stream may already be stopped
         }
+        streamRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
