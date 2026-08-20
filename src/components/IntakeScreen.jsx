@@ -748,21 +748,27 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Are both Key &amp; Vehicle MDD tags present? <span style={{ color: 'var(--red)' }}>*</span></span>
           </label>
 
-          {/* SCAN VIN — only once the quote details above are filled in */}
-          <button
-            className="btn btn-red"
-            style={{ height: 60, fontSize: 20, letterSpacing: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, opacity: homeReady ? 1 : 0.45 }}
-            aria-disabled={!homeReady}
-            onClick={() => {
-              if (!homeReady) { showToast?.(`Fill in first: ${missing.join(', ')}`); return; }
-              setScanning(true);
-            }}
-          >
-            <span aria-hidden="true">📷</span> SCAN VIN
-          </button>
-
-          {/* ENTER VIN MANUALLY — right under the scan button */}
-          <button className="btn btn-outline-brown" style={{ height: 50, fontSize: 16, letterSpacing: 1 }} onClick={() => setManualOpen((v) => !v)}>ENTER VIN MANUALLY</button>
+          {/* VIN entry actions share a generous, side-by-side tap area. */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <button
+              className="btn btn-red"
+              style={{ minHeight: 64, fontSize: 16, letterSpacing: 0.8, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: homeReady ? 1 : 0.45 }}
+              aria-disabled={!homeReady}
+              onClick={() => {
+                if (!homeReady) { showToast?.(`Fill in first: ${missing.join(', ')}`); return; }
+                setScanning(true);
+              }}
+            >
+              <span aria-hidden="true">📷</span> SCAN VIN
+            </button>
+            <button
+              className="btn btn-outline-brown"
+              style={{ minHeight: 64, fontSize: 13, letterSpacing: 0.6, lineHeight: 1.15, whiteSpace: 'normal' }}
+              onClick={() => setManualOpen((v) => !v)}
+            >
+              ENTER VIN MANUALLY
+            </button>
+          </div>
           {manualOpen && (
             <div className="card">
               <div className="field-label">17-CHARACTER VIN</div>
