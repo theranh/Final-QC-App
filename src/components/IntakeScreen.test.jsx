@@ -13,6 +13,7 @@ const putIntake = vi.fn(() => Promise.resolve({}));
 const linkIntakeQuote = vi.fn(() => Promise.resolve({}));
 const getIntake = vi.fn(() => Promise.resolve({ found: false }));
 const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
+const commitIntake = vi.fn(() => Promise.resolve({}));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
 let serverIntakes = [];
@@ -26,7 +27,7 @@ vi.mock('../lib/api', () => ({
     quotePhotos: (...args) => quotePhotos(...args),
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
-    commitIntake: () => Promise.resolve({}),
+    commitIntake: (...args) => commitIntake(...args),
   },
 }));
 
@@ -64,6 +65,7 @@ vi.mock('./PinDialog', () => ({
 }));
 
 import IntakeScreen from './IntakeScreen';
+import { decodeVinInfo } from '../lib/vin';
 
 beforeEach(() => {
   localStorage.clear();
@@ -74,6 +76,10 @@ beforeEach(() => {
   getIntake.mockResolvedValue({ found: false });
   quotePhotos.mockReset();
   quotePhotos.mockResolvedValue({ photos: [] });
+  commitIntake.mockReset();
+  commitIntake.mockResolvedValue({});
+  decodeVinInfo.mockReset();
+  decodeVinInfo.mockResolvedValue(null);
   serverIntakes = [];
   serverQuotes = [];
 });
@@ -408,5 +414,162 @@ describe('IntakeScreen duplicate-VIN guard', () => {
     expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
     expect(putIntake).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /scan vin/i })).toBeInTheDocument();
+  });
+});
+
+describe('IntakeScreen cache and request ordering', () => {
+  const VIN_B = '1FTFW1E55MFA00001';
+  const serverRow = (vin, stock, updatedAt) => ({
+    found: true,
+    id: `in-${stock}`,
+    vin,
+    stock,
+    vehicle: `${stock} vehicle`,
+    miles: '100',
+    estimator: 'Estimator',
+    quoteId: null,
+    completedAt: null,
+    committedBy: null,
+    data: {},
+    updatedAt,
+  });
+
+  it('uses strictly increasing timestamps for edits made in the same millisecond', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    await screen.findByText('TRUCK');
+    const stockInput = screen.getByText('STOCK #').parentElement.querySelector('input');
+
+    fireEvent.change(stockInput, { target: { value: 'FIRST' } });
+    fireEvent.change(stockInput, { target: { value: 'SECOND' } });
+
+    await waitFor(() => expect(putIntake).toHaveBeenCalledTimes(2));
+    const firstTs = putIntake.mock.calls[0][0].ts;
+    const secondTs = putIntake.mock.calls[1][0].ts;
+    expect(secondTs).toBeGreaterThan(firstTs);
+    now.mockRestore();
+  });
+
+  it('ignores an older response from a previous A→B→A visit', async () => {
+    const requests = [];
+    getIntake.mockImplementation((vin) => new Promise((resolve) => requests.push({ vin, resolve })));
+    const view = render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    view.rerender(<IntakeScreen showToast={() => {}} openVin={VIN_B} onOpenVinConsumed={() => {}} />);
+    await waitFor(() => expect(requests).toHaveLength(2));
+    view.rerender(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    await waitFor(() => expect(requests).toHaveLength(3));
+
+    requests[2].resolve(serverRow(VALID_VIN, 'NEWEST', 300));
+    expect(await screen.findByDisplayValue('NEWEST')).toBeInTheDocument();
+    requests[0].resolve(serverRow(VALID_VIN, 'STALE', 100));
+    requests[1].resolve({ found: false });
+
+    await waitFor(() => expect(screen.getByDisplayValue('NEWEST')).toBeInTheDocument());
+    expect(screen.queryByDisplayValue('STALE')).not.toBeInTheDocument();
+  });
+
+  it('does not apply a VIN decode after the inspector has switched trucks', async () => {
+    let resolveFirstDecode;
+    decodeVinInfo.mockImplementation((vin) => {
+      if (vin === VALID_VIN) return new Promise((resolve) => { resolveFirstDecode = resolve; });
+      return Promise.resolve(null);
+    });
+    const view = render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    await waitFor(() => expect(decodeVinInfo).toHaveBeenCalledWith(VALID_VIN));
+
+    view.rerender(<IntakeScreen showToast={() => {}} openVin={VIN_B} onOpenVinConsumed={() => {}} />);
+    await waitFor(() => expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VIN_B));
+    resolveFirstDecode('WRONG TRUCK DESCRIPTION');
+
+    await waitFor(() => expect(screen.queryByDisplayValue('WRONG TRUCK DESCRIPTION')).not.toBeInTheDocument());
+    const vehicleInput = screen.getByText('VEHICLE').parentElement.querySelector('input');
+    expect(vehicleInput).toHaveValue('');
+  });
+
+  it('ignores a valid-JSON but malformed cache instead of crashing', async () => {
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify('not-an-intake-map'));
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByText('TRUCK')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
+  });
+
+  it('does not attach an in-flight quote link to a different VIN', async () => {
+    let resolveLink;
+    linkIntakeQuote.mockImplementation(() => new Promise((resolve) => { resolveLink = resolve; }));
+    const intakeA = serverRow(VALID_VIN, 'A-STOCK', 100);
+    const intakeB = serverRow(VIN_B, 'B-STOCK', 200);
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({
+      [VALID_VIN]: { ...intakeA, ts: 100 },
+      [VIN_B]: { ...intakeB, ts: 200 },
+    }));
+    const view = render(
+      <IntakeScreen
+        showToast={() => {}}
+        openVin={VALID_VIN}
+        onOpenVinConsumed={() => {}}
+      />,
+    );
+    await screen.findByDisplayValue('A-STOCK');
+    fireEvent.click(screen.getByRole('button', { name: 'TAKE WALK-AROUND PHOTOS' }));
+    await waitFor(() => expect(linkIntakeQuote).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <IntakeScreen
+        showToast={() => {}}
+        openVin={VIN_B}
+        onOpenVinConsumed={() => {}}
+      />,
+    );
+    expect(await screen.findByDisplayValue('B-STOCK')).toBeInTheDocument();
+    resolveLink({ quoteId: 'quote-for-a' });
+
+    await waitFor(() => expect(screen.getByDisplayValue('B-STOCK')).toBeInTheDocument());
+    const cache = JSON.parse(localStorage.getItem('trqc.intake.cache.v2'));
+    expect(cache[VIN_B].id).toBe(intakeB.id);
+    expect(cache[VIN_B].quoteId).toBeNull();
+  });
+
+  it('abandons 409 link repair when the open VIN changes', async () => {
+    let resolveRepairLookup;
+    linkIntakeQuote.mockRejectedValueOnce(Object.assign(new Error('Conflict'), { status: 409 }));
+    getIntake
+      .mockResolvedValueOnce({ found: false })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRepairLookup = resolve; }));
+    const intakeA = serverRow(VALID_VIN, 'A-STOCK', 100);
+    const intakeB = serverRow(VIN_B, 'B-STOCK', 200);
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({
+      [VALID_VIN]: { ...intakeA, ts: 100 },
+      [VIN_B]: { ...intakeB, ts: 200 },
+    }));
+    const view = render(
+      <IntakeScreen
+        showToast={() => {}}
+        openVin={VALID_VIN}
+        onOpenVinConsumed={() => {}}
+      />,
+    );
+    await screen.findByDisplayValue('A-STOCK');
+    fireEvent.click(screen.getByRole('button', { name: 'TAKE WALK-AROUND PHOTOS' }));
+    await waitFor(() => expect(getIntake).toHaveBeenCalledTimes(2));
+
+    view.rerender(
+      <IntakeScreen
+        showToast={() => {}}
+        openVin={VIN_B}
+        onOpenVinConsumed={() => {}}
+      />,
+    );
+    expect(await screen.findByDisplayValue('B-STOCK')).toBeInTheDocument();
+    resolveRepairLookup({ ...intakeA, found: true, quoteId: null });
+
+    await waitFor(() => expect(screen.getByDisplayValue('B-STOCK')).toBeInTheDocument());
+    expect(linkIntakeQuote).toHaveBeenCalledTimes(1);
+    const cache = JSON.parse(localStorage.getItem('trqc.intake.cache.v2'));
+    expect(cache[VIN_B].id).toBe(intakeB.id);
+    expect(cache[VIN_B].quoteId).toBeNull();
   });
 });

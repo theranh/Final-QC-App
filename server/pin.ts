@@ -255,11 +255,11 @@ export function registerPinRoutes(app: Express) {
       // audit INSERT share one transaction, so a commit never lands without
       // its audit row (and a failed audit rolls the commit back).
       let ratesConflict: { current?: number } | null = null;
-      const committed = await db.transaction(async (tx) => {
+      const committedRow = await db.transaction(async (tx) => {
         const rv = await ratesVersionConflict(tx, req.body);
         if (rv.conflict) {
           ratesConflict = { current: rv.current };
-          return false;
+          return null;
         }
         // Immutability guard: only write when committed_by is still NULL.
         const [saved] = await tx
@@ -269,7 +269,7 @@ export function registerPinRoutes(app: Express) {
           .set({ committedBy: sig.committedBy, overriddenBy: sig.overriddenBy, completedAt: sql`COALESCE(${intakes.completedAt}, NOW())` })
           .where(sql`${intakes.id} = ${id} AND ${intakes.committedBy} IS NULL`)
           .returning();
-        if (!saved) return false;
+        if (!saved) return null;
         await auditCommit(tx, sig.overriddenBy ? "intake_committed_override" : "intake_committed", sig.signer, {
           intakeId: id,
           vin: row.vin,
@@ -296,19 +296,25 @@ export function registerPinRoutes(app: Express) {
             });
           }
         }
-        return true;
+        return saved;
       });
       if (ratesConflict) {
         return res.status(409).json({ ...RATES_CHANGED_409, currentRatesVersion: (ratesConflict as any).current });
       }
-      if (!committed) {
+      if (!committedRow) {
         return res.status(409).json({ error: "This intake was just committed by someone else." });
       }
       // Committing marks the intake complete, which moves it into the
       // awaiting-Final-QC list — refresh the cached dashboard right away.
       invalidateDashboardCache();
+      const completedMs = new Date(committedRow.completedAt as any).getTime();
 
-      res.json({ ok: true, committedBy: sig.committedBy, overriddenBy: sig.overriddenBy });
+      res.json({
+        ok: true,
+        committedBy: sig.committedBy,
+        overriddenBy: sig.overriddenBy,
+        completedAt: Number.isFinite(completedMs) ? completedMs : Date.now(),
+      });
     }),
   );
 

@@ -121,6 +121,10 @@ function AuthedApp({ me, onAuthRefresh }) {
   const photoKeyRef = useRef(null);
   const toastTimerRef = useRef(null);
   const persistTimerRef = useRef(null);
+  // React state updates are asynchronous; this synchronous guard prevents two
+  // rapid taps from starting duplicate create/re-check/retry requests before
+  // the disabled button has rendered.
+  const commitInFlightRef = useRef(false);
 
   const showToast = useCallback((msg) => {
     clearTimeout(toastTimerRef.current);
@@ -389,7 +393,7 @@ function AuthedApp({ me, onAuthRefresh }) {
 
   // ---------- commit original inspection ----------
   const commit = () => {
-    if (!sigSigned || saving) return;
+    if (!sigSigned || saving || commitInFlightRef.current) return;
     const items = {};
     let checked = 0;
     let failCount = 0;
@@ -424,6 +428,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     const entry = { type: 'create', payload };
     savePendingCommit(entry);
     setPendingCommit(entry);
+    commitInFlightRef.current = true;
     setSaving(true);
     api
       .createInspection(payload)
@@ -448,22 +453,41 @@ function AuthedApp({ me, onAuthRefresh }) {
       .catch((err) => {
         if (err.status === 401) window.location.href = '/api/login';
         else if (err.status === 409) {
-          // Server says this VIN already has a Final QC — the work IS saved
-          // (e.g. a retry after an ambiguous timeout). Don't keep a stale
-          // pending copy around.
+          // The VIN already has a committed QC (often an ambiguous timeout
+          // where this request landed). Retire the stale draft and open the
+          // authoritative record instead of leaving a duplicate-ready form.
+          const existingId = err.data?.qcNumber || null;
           clearPendingCommit();
           setPendingCommit(null);
+          saveLS('draft', null);
+          setDraft(newDraft('me'));
+          setMarks({});
+          setNotes({});
+          setPhotosMap({});
+          setOptOut({});
+          setSigSigned(false);
+          setStage(null);
+          setRecheckId(null);
+          setVehSel(null);
+          setIntakeOpenVin(null);
+          setIntakeOpenQuote(null);
+          setTab('records');
+          setViewRec(existingId);
           showToast(err.message);
           loadData();
         } else showToast('NOT SAVED — ' + err.message + '. Your inspection is kept on this device; use RETRY below.');
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        commitInFlightRef.current = false;
+        setSaving(false);
+      });
   };
 
   // Retry a durable pending commit (create or re-check) kept on this device.
   const retryPendingCommit = () => {
     const p = pendingCommit || loadPendingCommit();
-    if (!p || saving) return;
+    if (!p || saving || commitInFlightRef.current) return;
+    commitInFlightRef.current = true;
     setSaving(true);
     const done = () => {
       clearPendingCommit();
@@ -472,23 +496,80 @@ function AuthedApp({ me, onAuthRefresh }) {
     const call =
       p.type === 'recheck' ? api.commitRecheck(p.qc, p.payload) : api.createInspection(p.payload);
     call
-      .then(() => {
+      .then((result) => {
         done();
-        showToast('Saved to the server ✓');
-        loadData();
+        dataGenRef.current++;
+        if (p.type === 'create' && result?.record) {
+          setRecs((prev) => [result.record, ...prev.filter((r) => r.id !== result.record.id)]);
+          if (result.nextQc != null) setNextQc(result.nextQc);
+          saveLS('draft', null);
+          setDraft(newDraft('me'));
+          setMarks({});
+          setNotes({});
+          setPhotosMap({});
+          setOptOut({});
+          setSigSigned(false);
+          setStage(null);
+          setRecheckId(null);
+          setVehSel(null);
+          setTab('records');
+          setViewRec(result.record.id);
+          showToast(`${result.record.id} saved to the server ✓`);
+        } else if (p.type === 'recheck' && result?.record) {
+          setRecs((prev) => prev.some((r) => r.id === result.record.id)
+            ? prev.map((r) => (r.id === result.record.id ? result.record : r))
+            : [result.record, ...prev]);
+          closeRecheck();
+          setVehSel(null);
+          setIntakeOpenVin(null);
+          setIntakeOpenQuote(null);
+          setTab('records');
+          setViewRec(result.record.id);
+          showToast(`${result.record.id} re-check saved to the server ✓`);
+        } else {
+          showToast('Saved to the server ✓');
+          loadData();
+        }
+        refreshDash();
       })
       .catch((err) => {
         if (err.status === 401) window.location.href = '/api/login';
-        else if (err.status === 409 || err.status === 400) {
-          // 409: already saved / already updated. 400 on a pending re-check:
-          // the open items no longer match (a retry of a re-check that DID
-          // land). Either way the server state is authoritative — reload.
+        else if (err.status === 409) {
+          // The server confirms a record for this VIN/QC is already committed.
+          // The duplicate is not retryable; reload the authoritative record.
           done();
+          if (p.type === 'create') {
+            saveLS('draft', null);
+            setDraft(newDraft('me'));
+            setMarks({});
+            setNotes({});
+            setPhotosMap({});
+            setOptOut({});
+            setSigSigned(false);
+            setStage(null);
+            setRecheckId(null);
+            setTab('records');
+            setViewRec(err.data?.qcNumber || null);
+          } else {
+            closeRecheck();
+            setTab('records');
+            setViewRec(p.qc);
+          }
+          setVehSel(null);
+          setIntakeOpenVin(null);
+          setIntakeOpenQuote(null);
           showToast('Already saved on the server — reloading');
           loadData();
-        } else showToast('Still NOT SAVED — ' + err.message);
+        } else {
+          // A 400 is a validation/mismatch error, not proof that the pending
+          // payload landed. Keep the only durable copy so it cannot disappear.
+          showToast('Still NOT SAVED — ' + err.message);
+        }
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        commitInFlightRef.current = false;
+        setSaving(false);
+      });
   };
   const discardPendingCommit = () => {
     if (!window.confirm('Discard the unsaved inspection kept on this device? This cannot be undone.')) return;
@@ -516,7 +597,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     setRepairs({});
   };
   const commitRecheck = () => {
-    if (!sigSigned || saving) return;
+    if (!sigSigned || saving || commitInFlightRef.current) return;
     const r = recs.find((x) => x.id === recheckId);
     if (!r || r.status !== 'open') return;
     const open = r.openItems || [];
@@ -544,6 +625,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     const entry = { type: 'recheck', qc: r.id, payload: rcPayload };
     savePendingCommit(entry);
     setPendingCommit(entry);
+    commitInFlightRef.current = true;
     setSaving(true);
     api
       .commitRecheck(r.id, rcPayload)
@@ -567,7 +649,10 @@ function AuthedApp({ me, onAuthRefresh }) {
           closeRecheck();
         } else showToast('NOT SAVED — ' + err.message + '. Your re-check is kept on this device; use RETRY below.');
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        commitInFlightRef.current = false;
+        setSaving(false);
+      });
   };
 
   // ---------- reports ----------
@@ -640,17 +725,32 @@ function AuthedApp({ me, onAuthRefresh }) {
     setTab(k);
     setViewRec((prev) => (k === 'records' ? prev : null));
     if (k !== 'vehicles') setVehSel(null);
+    if (k !== 'intake') {
+      setIntakeOpenVin(null);
+      setIntakeOpenQuote(null);
+    }
     if (k === 'dash' || k === 'vehicles') refreshDash();
+  };
+  const openRecord = (id) => {
+    setVehSel(null);
+    setIntakeOpenVin(null);
+    setIntakeOpenQuote(null);
+    setTab('records');
+    setViewRec(id || null);
   };
   // Open the intake (walk-around photos + details) for an awaiting-QC unit.
   const openIntakeFor = (v) => {
     if (!v?.vin) return;
+    setViewRec(null);
     setVehSel(null);
     setIntakeOpenQuote(null);
     setIntakeOpenVin(v.vin);
     setTab('intake');
   };
   const openVehicle = (vin, qcNumber) => {
+    setViewRec(null);
+    setIntakeOpenVin(null);
+    setIntakeOpenQuote(null);
     setTab('vehicles');
     setVehSel({ vin, qcNumber });
   };
@@ -684,7 +784,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         onRemovePhoto={removePhoto}
         onScanVin={() => setScanning(true)}
         onClose={() => setStage(null)}
-        onGoSettings={() => { setTab('settings'); setStage(null); }}
+        onGoSettings={() => { onNavChange('settings'); setStage(null); }}
         onStart={() => setStage('sheet')}
         nextId={nextId}
         openRecs={openRecs}
@@ -754,7 +854,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     content = (
       <DashScreen
         dash={dash}
-        onOpenStatus={(k) => { setVehFilter(k); setVehSel(null); setTab('vehicles'); }}
+        onOpenStatus={(k) => { setVehFilter(k); setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(null); setTab('vehicles'); }}
         onOpenVehicle={openVehicle}
       />
     );
@@ -765,11 +865,11 @@ function AuthedApp({ me, onAuthRefresh }) {
         vehicle={selVehicle}
         record={recs.find((r) => r.id === selVehicle.qcNumber) || null}
         onBack={() => setVehSel(null)}
-        onOpenRecord={(id) => { setTab('records'); setViewRec(id); }}
+        onOpenRecord={openRecord}
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenIntake={openIntakeFor} onOpenRecord={(id) => { setTab('records'); setViewRec(id); }} onOpenQuote={(q) => { setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }} />
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenIntake={openIntakeFor} onOpenRecord={openRecord} onOpenQuote={(q) => { setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }} />
     );
   } else if (tab === 'intake') {
     content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} openQuote={intakeOpenQuote} onOpenQuoteConsumed={() => setIntakeOpenQuote(null)} />;
@@ -780,8 +880,8 @@ function AuthedApp({ me, onAuthRefresh }) {
         openRecs={openRecs}
         onNewInspection={() => setStage('form')}
         onOpenRecheck={openRecheck}
-        onOpenRecord={(id) => { setTab('records'); setViewRec(id); }}
-        onGoRecords={() => { setTab('records'); setViewRec(null); }}
+        onOpenRecord={openRecord}
+        onGoRecords={() => openRecord(null)}
       />
     );
   } else if (tab === 'records') {
@@ -863,7 +963,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         {backupNudge && !inFlow && tab !== 'settings' && (
           <div
             style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--amber)', color: '#fff', fontSize: 10.5, fontWeight: 700, padding: '8px 14px', cursor: 'pointer' }}
-            onClick={() => { setTab('settings'); setViewRec(null); setVehSel(null); }}
+            onClick={() => onNavChange('settings')}
           >
             <span style={{ flex: 1, lineHeight: 1.4 }}>
               {serverBackupAt == null
@@ -873,7 +973,7 @@ function AuthedApp({ me, onAuthRefresh }) {
             <span style={{ flex: '0 0 auto', textDecoration: 'underline' }}>Settings →</span>
           </div>
         )}
-        <Header tab={tab} workflow={workflow} onSettings={inFlow ? null : () => { setTab('settings'); setViewRec(null); setVehSel(null); }} />
+        <Header tab={tab} workflow={workflow} onSettings={inFlow ? null : () => onNavChange('settings')} />
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />

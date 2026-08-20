@@ -21,7 +21,8 @@ const LS_INTAKE = 'trqc.intake.cache.v2';
 
 function loadCache() {
   try {
-    return JSON.parse(localStorage.getItem(LS_INTAKE) || '{}') || {};
+    const parsed = JSON.parse(localStorage.getItem(LS_INTAKE) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -66,6 +67,23 @@ function blankIntake(vin) {
     overriddenBy: null,
     quoteId: null,
     mddTags: false,
+  };
+}
+
+function intakeFromCache(raw, vin) {
+  const blank = blankIntake(vin);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return blank;
+  return {
+    ...blank,
+    ...raw,
+    vin,
+    steps: {
+      1: Array.isArray(raw.steps?.[1]) ? raw.steps[1] : blank.steps[1],
+      2: Array.isArray(raw.steps?.[2]) ? raw.steps[2] : blank.steps[2],
+      3: Array.isArray(raw.steps?.[3]) ? raw.steps[3] : blank.steps[3],
+      4: Array.isArray(raw.steps?.[4]) ? raw.steps[4] : blank.steps[4],
+    },
+    roReady: Array.isArray(raw.roReady) ? raw.roReady : blank.roReady,
   };
 }
 
@@ -138,6 +156,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [dupWarn, setDupWarn] = useState(null); // { vin, intakeRow, quoteRow, proceed }
   const intakeRef = useRef(null);
   intakeRef.current = intake;
+  // Every open/retry receives a generation. A response from an earlier visit
+  // to the same VIN must not replace a newer A→B→A session.
+  const openGenerationRef = useRef(0);
+  const lastEditTsRef = useRef(0);
   // Per-truck save status: 'saved' only after the server confirms; a failed
   // push shows a RETRY. Each opened VIN gets its OWN tracker instance; the
   // onChange guard means a retired tracker (previous truck) can never update
@@ -248,12 +270,15 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 
   // Adopt a server row for a VIN, honoring the old conflict rule.
   const [serverCheckFailed, setServerCheckFailed] = useState(false);
-  const refreshFromServer = useCallback(async (v) => {
+  const refreshFromServer = useCallback(async (v, expectedGeneration) => {
+    const generation = expectedGeneration ?? ++openGenerationRef.current;
+    const isCurrent = () =>
+      generation === openGenerationRef.current && intakeRef.current?.vin === v;
     try {
       const j = await api.getIntake(v);
+      if (!isCurrent()) return;
       if (!j || !j.found) { setServerCheckFailed(false); return; }
       const cur = intakeRef.current;
-      if (!cur || cur.vin !== v) return;
       const serverIsFinal = !!(j.completedAt || j.committedBy);
       if (!serverIsFinal && (j.updatedAt || 0) <= (cur.ts || 0)) {
         // Preserve newer local edits, but server-owned identity/linkage fields
@@ -262,17 +287,20 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
         const next = mergeCanonicalServerFields(cur, j);
         saveToCache(next);
         intakeRef.current = next;
+        lastEditTsRef.current = Math.max(lastEditTsRef.current, Number(next.ts) || 0);
         setIntake(next);
+        setServerCheckFailed(false);
         return;
       }
       const it = intakeFromServerRow(j);
       saveToCache(it);
       intakeRef.current = it;
+      lastEditTsRef.current = Math.max(lastEditTsRef.current, Number(it.ts) || 0);
       setIntake(it);
       setServerCheckFailed(false);
     } catch {
       // Offline — local copy stands, but say so instead of looking current.
-      setServerCheckFailed(true);
+      if (isCurrent()) setServerCheckFailed(true);
     }
   }, []);
 
@@ -305,7 +333,11 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     const noPush = !!(opts && opts.noPush);
     const s = intakeRef.current;
     if (!s || s.committedBy) return;
-    const next = { ...s, ...patch, ts: noPush ? s.ts || 0 : Date.now() };
+    const ts = noPush
+      ? s.ts || 0
+      : Math.max(Date.now(), (Number(s.ts) || 0) + 1, lastEditTsRef.current + 1);
+    if (!noPush) lastEditTsRef.current = ts;
+    const next = { ...s, ...patch, ts };
     intakeRef.current = next;
     setIntake(next);
     saveToCache(next);
@@ -342,8 +374,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const openFor = useCallback(
     (raw, seed, authoritativeRow) => {
       const v = String(raw || '').trim().toUpperCase();
+      const generation = ++openGenerationRef.current;
       const cache = loadCache();
-      let it = v && cache[v] ? cache[v] : blankIntake(v);
+      let it = v && cache[v] ? intakeFromCache(cache[v], v) : blankIntake(v);
       // Seed the landing QUOTE DETAILS onto a fresh (untouched) intake only.
       if (seed && (!it.ts || it.ts === 0)) {
         it = {
@@ -365,8 +398,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       // response can otherwise arrive before React commits setIntake(), see the
       // previous VIN/null ref, and discard the canonical saved details.
       intakeRef.current = it;
+      lastEditTsRef.current = Math.max(lastEditTsRef.current, Number(it.ts) || 0);
+      setServerCheckFailed(false);
       setIntake(it);
-      if (v.length >= 6 && !authoritativeRow?.found) refreshFromServer(v);
+      if (v.length >= 6 && !authoritativeRow?.found) refreshFromServer(v, generation);
     },
     [refreshFromServer]
   );
@@ -415,26 +450,44 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     }
     beginIntake(v, overridden);
   };
-  const ensureIntakeQuote = async () => {
+  const linkOperationIsCurrent = (operation) =>
+    !!operation &&
+    operation.generation === openGenerationRef.current &&
+    intakeRef.current?.vin === operation.vin &&
+    intakeRef.current?.id === operation.id;
+
+  const ensureIntakeQuote = async (operation) => {
     let cur = intakeRef.current;
     if (!cur) return null;
+    const op = operation || {
+      generation: openGenerationRef.current,
+      vin: cur.vin,
+      id: cur.id,
+    };
+    if (!linkOperationIsCurrent(op)) return null;
     if (cur.quoteId) return cur.quoteId;
 
     // A newly scanned VIN starts as an untouched local intake. Persist that
     // row before linking its quote; the server cannot link a quote to an
     // intake id that does not exist yet.
     if (!cur.ts) {
-      cur = { ...cur, ts: Date.now() };
-      await api.putIntake(intakePayload(cur));
+      const ts = Math.max(Date.now(), lastEditTsRef.current + 1);
+      lastEditTsRef.current = ts;
+      cur = { ...cur, ts };
       intakeRef.current = cur;
       setIntake(cur);
       saveToCache(cur);
+      await api.putIntake(intakePayload(cur));
+      if (!linkOperationIsCurrent(op)) return null;
     }
 
     const id = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
     const r = await api.linkIntakeQuote(cur.id, id);
+    if (!linkOperationIsCurrent(op)) return null;
     const canonical = r?.quoteId || id;
-    const linked = { ...cur, quoteId: canonical };
+    // Preserve edits made while the link request was in flight, but only for
+    // this exact open generation/VIN/intake id.
+    const linked = { ...intakeRef.current, quoteId: canonical };
     intakeRef.current = linked;
     setIntake(linked);
     saveToCache(linked);
@@ -444,9 +497,17 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   // dying silently (the camera/quote buttons looked "dead" otherwise).
   // Returns the quote id on success, null on failure.
   const ensureIntakeQuoteWithFeedback = async () => {
+    const cur = intakeRef.current;
+    if (!cur) return null;
+    const operation = {
+      generation: openGenerationRef.current,
+      vin: cur.vin,
+      id: cur.id,
+    };
     try {
-      return await ensureIntakeQuote();
+      return await ensureIntakeQuote(operation);
     } catch (e) {
+      if (!linkOperationIsCurrent(operation)) return null;
       if (e?.status === 409) {
         // 409 means "committed or not found". Repair by VIN, never blindly:
         // another phone may already own this VIN's server row under a
@@ -455,28 +516,56 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
         // id), stop on a committed one, and only re-push our row when the
         // server has no row for this VIN at all (first save never landed).
         try {
-          const cur = intakeRef.current;
-          if (cur && String(cur.vin || '').length >= 6) {
-            const j = await api.getIntake(cur.vin).catch(() => null);
+          if (String(operation.vin || '').length >= 6) {
+            const j = await api.getIntake(operation.vin).catch(() => null);
+            if (!linkOperationIsCurrent(operation)) return null;
             if (j?.found && j.id) {
               if (j.committedBy) {
                 showToast?.('This intake was already committed — it is locked. Refreshing…');
-                refreshFromServer(cur.vin);
+                refreshFromServer(operation.vin);
                 return null;
               }
-              if (j.quoteId) { refreshFromServer(cur.vin); return j.quoteId; }
+              if (j.quoteId) {
+                const live = intakeRef.current;
+                const serverIsNewer =
+                  !!(j.completedAt || j.committedBy) ||
+                  (Number(j.updatedAt) || 0) > (Number(live?.ts) || 0);
+                const base = serverIsNewer ? intakeFromServerRow(j) : live;
+                const linked = { ...base, id: j.id, quoteId: j.quoteId };
+                intakeRef.current = linked;
+                setIntake(linked);
+                saveToCache(linked);
+                return j.quoteId;
+              }
               const qid = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
               const r = await api.linkIntakeQuote(j.id, qid);
+              if (!linkOperationIsCurrent(operation)) return null;
               const canonical = r?.quoteId || qid;
-              setIntake((s) => (s ? { ...s, id: j.id, quoteId: canonical } : s));
+              const live = intakeRef.current;
+              const serverIsNewer =
+                !!(j.completedAt || j.committedBy) ||
+                (Number(j.updatedAt) || 0) > (Number(live?.ts) || 0);
+              const base = serverIsNewer ? intakeFromServerRow(j) : live;
+              const linked = { ...base, id: j.id, quoteId: canonical };
+              intakeRef.current = linked;
+              setIntake(linked);
+              saveToCache(linked);
               return canonical;
             }
-            await api.putIntake(intakePayload(cur));
-            return await ensureIntakeQuote();
+            await api.putIntake(intakePayload(intakeRef.current));
+            if (!linkOperationIsCurrent(operation)) return null;
+            return await ensureIntakeQuote(operation);
           }
-        } catch { /* fall through to the committed message */ }
-        showToast?.('This intake was already committed — it is locked. Refreshing…');
-        refreshFromServer(intake.vin);
+        } catch {
+          if (linkOperationIsCurrent(operation)) {
+            showToast?.('Could not reach the server — check your connection and try again.');
+          }
+          return null;
+        }
+        if (linkOperationIsCurrent(operation)) {
+          showToast?.('This intake was already committed — it is locked. Refreshing…');
+          refreshFromServer(operation.vin);
+        }
       } else if (e?.status === 401) {
         showToast?.('You are signed out — sign in again first.');
       } else {
@@ -489,10 +578,18 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     // Read vehicle through the ref so this callback stays stable — otherwise
     // every keystroke in the vehicle field would recreate it.
     if (!v || v.length !== 17 || intakeRef.current?.vehicle) return;
+    const generation = openGenerationRef.current;
     setDecoding(true);
     const desc = await decodeVinInfo(v);
-    if (desc) saveIntake({ vehicle: desc });
-    setDecoding(false);
+    if (
+      desc &&
+      generation === openGenerationRef.current &&
+      intakeRef.current?.vin === v &&
+      !intakeRef.current?.vehicle
+    ) {
+      saveIntake({ vehicle: desc });
+    }
+    if (generation === openGenerationRef.current) setDecoding(false);
   }, [saveIntake]);
   useEffect(() => { if (intakeVin?.length === 17) decodeIntake(intakeVin); }, [intakeVin, decodeIntake]); // best effort
 
@@ -520,11 +617,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 
   const doCommit = ({ signerId, pin, forEmployeeId }) =>
     api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId, ratesVersion: ratesVersionRef.current }).then((r) => {
-      setIntake((s) => {
-        const next = { ...s, committedBy: r.committedBy, overriddenBy: r.overriddenBy || null };
-        saveToCache(next);
-        return next;
-      });
+      const cur = intakeRef.current;
+      if (!cur) return;
+      const next = { ...cur, committedBy: r.committedBy, overriddenBy: r.overriddenBy || null, completedAt: r.completedAt || Date.now() };
+      intakeRef.current = next;
+      saveToCache(next);
+      setIntake(next);
       setPinOpen(false);
       showToast && showToast('Intake saved ✓');
     });

@@ -180,7 +180,14 @@ const H = vi.hoisted(() => {
             const row =
               intakeRows.find((r) => r.id === id) || quoteRows.find((r) => r.id === id);
             if (!row || row.committedBy) return []; // immutability guard
-            Object.assign(row, patch);
+            const persistedPatch = { ...patch };
+            // The real database evaluates COALESCE(completed_at, NOW()) and
+            // returns a Date. Mirror that instead of retaining Drizzle's SQL
+            // expression object in the in-memory adapter.
+            if (persistedPatch.completedAt?.queryChunks) {
+              persistedPatch.completedAt = row.completedAt || new Date();
+            }
+            Object.assign(row, persistedPatch);
             return [row];
           },
         }),
@@ -318,7 +325,11 @@ describe("commit endpoints", () => {
     expect(r.status).toBe(200);
     expect(r.body.committedBy).toBe("Worker");
     expect(r.body.overriddenBy).toBeNull();
-    expect(intakeRows.find((x) => x.id === "in1").committedBy).toBe("Worker");
+    expect(Number.isFinite(r.body.completedAt)).toBe(true);
+    const saved = intakeRows.find((x) => x.id === "in1");
+    expect(saved.committedBy).toBe("Worker");
+    expect(saved.completedAt).toBeInstanceOf(Date);
+    expect(r.body.completedAt).toBe(saved.completedAt.getTime());
   });
 
   it("refuses to re-commit an already committed intake (409, immutable)", async () => {
