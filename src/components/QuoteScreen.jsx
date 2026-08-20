@@ -606,6 +606,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
   // photos not yet analyzed: { id, thumb, base64, dataUrl }
   const [photos, setPhotos] = useState([]);
   const [walkOpen, setWalkOpen] = useState(false);
+  const [viewingAllSavedPhotos, setViewingAllSavedPhotos] = useState(false);
   // Every photo already saved on the server for this quote — walk-arounds and
   // damage close-ups alike — so a reopened quote shows the full photo set.
   const [serverPhotos, setServerPhotos] = useState([]);
@@ -1339,7 +1340,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
         {step === 'photos' && (
           <PhotosStep
             photos={photos}
-            damageFocus={!!prefill?.startAtPhotos}
+            damageFocus={!!prefill?.startAtPhotos && !viewingAllSavedPhotos}
             serverPhotos={serverPhotos}
             pendingUploads={pendingUploads}
             onEnlarge={setLightbox}
@@ -1352,7 +1353,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onRemove={removePhoto}
             onAnalyze={startAnalyze}
             onBack={() => setStep('confirm')}
-            onSeeQuote={lines.length ? () => setStep('quote') : null}
+            onSeeQuote={lines.length ? () => { setViewingAllSavedPhotos(false); setStep('quote'); } : null}
           />
         )}
 
@@ -1413,6 +1414,9 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onDelete={deleteLine}
             onTogglePart={togglePart}
             onAddMore={() => setStep('photos')}
+            onViewPhotos={() => { setViewingAllSavedPhotos(true); setStep('photos'); }}
+            savedPhotoCount={serverPhotos.length}
+            walkPhotoCount={serverPhotos.filter((p) => !String(p.slot || '').startsWith('dmg')).length}
             flags={flags}
             keep={keep}
             notes={notes}
@@ -1784,7 +1788,7 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
 }
 
 /* ---------- quote editor ---------- */
-function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore,
+function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onViewPhotos, savedPhotoCount = 0, walkPhotoCount = 0,
   flags, keep, notes, notesOpen, flagPick, flagSearch,
   onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep, onCopy, onImage, onPrint }) {
   const locked = !!committed;
@@ -1872,6 +1876,17 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
         onRemoveFlag={onRemoveFlag}
         onToggleKeep={onToggleKeep}
       />
+
+      {savedPhotoCount > 0 && (
+        <button
+          className="btn btn-dark"
+          style={{ minHeight: 56, marginTop: 4, fontSize: 14, letterSpacing: .3 }}
+          onClick={onViewPhotos}
+        >
+          VIEW ALL SAVED PHOTOS · {savedPhotoCount}
+          {walkPhotoCount > 0 ? ` (${walkPhotoCount} WALK-AROUND)` : ''}
+        </button>
+      )}
 
       {locked ? (
         <div className="card" style={{ borderColor: 'var(--green)', background: '#e8f3ea' }}>

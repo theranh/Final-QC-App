@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { api } from '../lib/api';
 
 const QUOTE_ID = 'FQ-readiness';
 
@@ -98,5 +99,63 @@ describe('QuoteScreen camera navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /ADD DAMAGE CLOSE-UP/i }));
     const damageCamera = await screen.findByTestId('walk-camera');
     expect(damageCamera).toHaveAttribute('data-mode', 'damage');
+  });
+
+  it('makes every stored photo reachable from a reopened saved quote', async () => {
+    api.quoterSync.mockResolvedValueOnce({
+      quotes: [{
+        id: 'FQ-with-saved-photos',
+        vin: '1GTUUCED3RZ336835',
+        stock: 'A22944',
+        estimator: 'Brandon',
+        miles: '100',
+        lines: [{
+          id: 'damage-1',
+          status: 'done',
+          review: false,
+          cls: {
+            panel: 'hood',
+            damage_type: 'dent',
+            severity: 'minor',
+            paint_damaged: false,
+            ri_parts_needed: [],
+          },
+        }],
+      }],
+      rates: {},
+      corrections: [],
+    });
+    api.quotePhotos.mockResolvedValueOnce({
+      photos: [
+        { id: 'walk-1', slot: 'ext_front', ts: 1 },
+        { id: 'walk-2', slot: 'int_dash', ts: 2 },
+        { id: 'damage-1', slot: 'dmg', ts: 3 },
+      ],
+    });
+
+    render(
+      <QuoteScreen
+        prefill={{
+          quoteId: 'FQ-with-saved-photos',
+          vin: '1GTUUCED3RZ336835',
+          stock: 'A22944',
+          estimator: 'Brandon',
+        }}
+        onClose={() => {}}
+        showToast={() => {}}
+      />,
+    );
+
+    const viewPhotos = await screen.findByRole('button', {
+      name: /VIEW ALL SAVED PHOTOS · 3 \(2 WALK-AROUND\)/i,
+    });
+    fireEvent.click(viewPhotos);
+
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 2')).toBeInTheDocument();
+    expect(screen.getByText('DAMAGE PHOTOS · 1')).toBeInTheDocument();
+    expect(screen.getByAltText('ext_front')).toHaveAttribute(
+      'src',
+      '/api/quoter/photo?id=walk-1',
+    );
   });
 });
