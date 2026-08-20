@@ -22,6 +22,9 @@
  *  - `tracker` phase: insert-only push of frozen snapshot rows sent in the
  *    request body (source is the workspace/dev DB); frozen months are copied
  *    verbatim and never overwritten.
+ *  - `correct_stock` phase: narrow metadata correction for one exact VIN +
+ *    old-stock pair. Updates the canonical intake and linked quote together,
+ *    writes an audit row, and never rewrites immutable pricing snapshots.
  */
 import type { Express, Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
@@ -243,6 +246,130 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           q.rowCount ? inserted++ : skippedExistingVin++;
         }
         return res.json({ phase, distinctVins: rows.length, inserted, skippedExistingVin });
+      }
+
+      if (phase === "correct_stock") {
+        const vin = String(req.body?.vin || "").trim().toUpperCase();
+        const oldStock = String(req.body?.oldStock || "").trim().toUpperCase();
+        const newStock = String(req.body?.newStock || "").trim().toUpperCase();
+        const stockPattern = /^[A-Z0-9-]{1,40}$/;
+        if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) {
+          return res.status(400).json({ message: "A valid 17-character VIN is required" });
+        }
+        if (!stockPattern.test(oldStock) || !stockPattern.test(newStock) || oldStock === newStock) {
+          return res.status(400).json({ message: "Distinct valid oldStock and newStock values are required" });
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const matches = await client.query(
+            `SELECT id, vin, stock, quote_id
+             FROM intakes
+             WHERE UPPER(vin) = $1 AND UPPER(stock) = $2
+             FOR UPDATE`,
+            [vin, oldStock],
+          );
+          if (matches.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: matches.rowCount === 0
+                ? "No intake matches that VIN and old stock"
+                : "Multiple intakes match; correction refused",
+            });
+          }
+
+          const intake = matches.rows[0];
+          const conflicts = await client.query(
+            `SELECT 1
+             FROM intakes
+             WHERE UPPER(stock) = $1 AND id <> $2
+             UNION ALL
+             SELECT 1
+             FROM quotes
+             WHERE UPPER(COALESCE(data->>'stock', '')) = $1 AND id <> COALESCE($3, '')
+             LIMIT 1`,
+            [newStock, intake.id, intake.quote_id],
+          );
+          if (conflicts.rowCount) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "The replacement stock number is already in use" });
+          }
+
+          let quoteUpdated = false;
+          if (intake.quote_id) {
+            const quote = await client.query(
+              `SELECT id, data->>'stock' AS stock
+               FROM quotes
+               WHERE id = $1
+               FOR UPDATE`,
+              [intake.quote_id],
+            );
+            if (quote.rowCount !== 1) {
+              await client.query("ROLLBACK");
+              return res.status(409).json({ message: "The linked quote could not be found" });
+            }
+            const quoteStock = String(quote.rows[0].stock || "").trim().toUpperCase();
+            if (quoteStock !== oldStock && quoteStock !== newStock) {
+              await client.query("ROLLBACK");
+              return res.status(409).json({ message: "The linked quote has a different stock number" });
+            }
+            if (quoteStock === oldStock) {
+              await client.query(
+                `UPDATE quotes
+                 SET data = jsonb_set(data, '{stock}', to_jsonb($1::text), true),
+                     updated_at = NOW()
+                 WHERE id = $2`,
+                [newStock, intake.quote_id],
+              );
+              quoteUpdated = true;
+            }
+          }
+
+          await client.query(
+            `UPDATE intakes SET stock = $1, updated_at = NOW() WHERE id = $2`,
+            [newStock, intake.id],
+          );
+          const snapshots = await client.query(
+            `SELECT COUNT(*)::int AS count
+             FROM quote_snapshots
+             WHERE intake_id = $1 OR quote_id = $2`,
+            [intake.id, intake.quote_id],
+          );
+          const immutableSnapshots = Number(snapshots.rows[0]?.count || 0);
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('stock_corrected', 'replit-agent', 'system@truckranch.com', 'Replit Agent',
+                $1::jsonb)`,
+            [JSON.stringify({
+              vin,
+              intakeId: intake.id,
+              quoteId: intake.quote_id || null,
+              oldStock,
+              newStock,
+              quoteUpdated,
+              immutableSnapshotsUntouched: immutableSnapshots,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            vin,
+            intakeId: intake.id,
+            quoteId: intake.quote_id || null,
+            oldStock,
+            newStock,
+            quoteUpdated,
+            immutableSnapshotsUntouched: immutableSnapshots,
+          });
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
       }
 
       if (phase === "spotcheck") {
