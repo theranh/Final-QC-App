@@ -473,6 +473,19 @@ describe("intake created_at (arrival timestamp) immutability", () => {
       expect(updateClause).not.toMatch(/created_at\s*=/i);
     }
   });
+
+  it("preserves an established quote link during later full intake saves", async () => {
+    H.intakeUpsertSql.length = 0;
+    const r = await req("PUT", "/api/quoter/intakes", {
+      id: "linked-save",
+      vin: "1FTFW1E55MFA00002",
+      quoteId: null,
+      ts: Date.now(),
+    });
+    expect(r.status).toBe(200);
+    const updateClause = H.intakeUpsertSql[0].split(/DO UPDATE SET/i)[1] ?? "";
+    expect(updateClause).toMatch(/quote_id\s*=\s*COALESCE\s*\(\s*intakes\.quote_id\s*,/i);
+  });
 });
 
 describe("server-authoritative AI classify config", () => {

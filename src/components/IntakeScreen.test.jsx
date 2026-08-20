@@ -11,6 +11,8 @@ const INVALID_VIN = '1HGCM82633A004353'; // same VIN, broken check digit
 // ---- mocks --------------------------------------------------------------
 const putIntake = vi.fn(() => Promise.resolve({}));
 const linkIntakeQuote = vi.fn(() => Promise.resolve({}));
+const getIntake = vi.fn(() => Promise.resolve({ found: false }));
+const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
 let serverIntakes = [];
@@ -20,8 +22,8 @@ vi.mock('../lib/api', () => ({
     listIntakes: () => Promise.resolve({ intakes: serverIntakes }),
     quoterSync: () => Promise.resolve({ quotes: serverQuotes }),
     signers: () => Promise.resolve({ signers: [] }),
-    getIntake: () => Promise.resolve({ found: false }),
-    quotePhotos: () => Promise.resolve({ photos: [] }),
+    getIntake: (...args) => getIntake(...args),
+    quotePhotos: (...args) => quotePhotos(...args),
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
     commitIntake: () => Promise.resolve({}),
@@ -68,6 +70,9 @@ beforeEach(() => {
   putIntake.mockClear();
   linkIntakeQuote.mockReset();
   linkIntakeQuote.mockResolvedValue({});
+  getIntake.mockReset();
+  getIntake.mockResolvedValue({ found: false });
+  quotePhotos.mockClear();
   serverIntakes = [];
   serverQuotes = [];
 });
@@ -142,6 +147,88 @@ describe('IntakeScreen scan wiring', () => {
     fireEvent.click(walkButton);
 
     await waitFor(() => expect(screen.getByTestId('mock-walk')).toHaveAttribute('data-quote-id', 'q-newly-linked'));
+    expect(putIntake).toHaveBeenCalledWith(expect.objectContaining({ vin: VALID_VIN }));
+    expect(putIntake.mock.invocationCallOrder[0]).toBeLessThan(linkIntakeQuote.mock.invocationCallOrder[0]);
+  });
+
+  it('opens a completed intake overview instead of its damage quoter', async () => {
+    serverIntakes = [{
+      id: 'in-completed',
+      vin: VALID_VIN,
+      stock: 'T-1234',
+      vehicle: '2021 Honda Accord',
+      quoteId: 'q-completed',
+      completedAt: 1700000000000,
+    }];
+    serverQuotes = [{
+      id: 'q-completed',
+      vin: VALID_VIN,
+      stock: 'T-1234',
+      vehicle: '2021 Honda Accord',
+      estimator: 'Test Estimator',
+      miles: '42000',
+      ts: 1700000000000,
+    }];
+    const completedRow = {
+      found: true,
+      id: 'in-completed',
+      vin: VALID_VIN,
+      stock: 'T-1234',
+      vehicle: '2021 Honda Accord',
+      quoteId: 'q-completed',
+      completedAt: 1700000000000,
+      committedBy: 'Test Estimator',
+      data: {},
+      updatedAt: 1700000000000,
+    };
+    getIntake.mockResolvedValue(completedRow);
+    // Simulate a different device having left a newer-looking local draft
+    // without the server-owned quote link.
+    localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({
+      [VALID_VIN]: {
+        id: 'local-stale',
+        vin: VALID_VIN,
+        stock: 'LOCAL',
+        vehicle: 'Stale local draft',
+        miles: '',
+        estimator: '',
+        steps: { 1: [], 2: [], 3: [], 4: [] },
+        roReady: [],
+        notes: '',
+        ts: 1800000000000,
+        completedAt: null,
+        committedBy: null,
+        overriddenBy: null,
+        quoteId: null,
+        mddTags: false,
+      },
+    }));
+
+    render(<IntakeScreen showToast={() => {}} />);
+    fireEvent.click(await screen.findByText(/2021 Honda Accord/i));
+
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 0')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
+    expect(getIntake).toHaveBeenCalledWith(VALID_VIN);
+    await waitFor(() => expect(quotePhotos).toHaveBeenCalledWith('q-completed'));
+  });
+
+  it('still opens the damage quoter for a true quote-only record', async () => {
+    serverQuotes = [{
+      id: 'q-only',
+      vin: VALID_VIN,
+      stock: 'T-1234',
+      vehicle: '2021 Honda Accord',
+      estimator: 'Test Estimator',
+      miles: '42000',
+      ts: 1700000000000,
+    }];
+
+    render(<IntakeScreen showToast={() => {}} />);
+    fireEvent.click(await screen.findByText(/2021 Honda Accord/i));
+
+    expect(await screen.findByTestId('mock-quote')).toBeInTheDocument();
+    expect(screen.queryByText(/WALK-AROUND PHOTOS/i)).not.toBeInTheDocument();
   });
 
   it('cancelling the scanner returns to the landing screen untouched', async () => {

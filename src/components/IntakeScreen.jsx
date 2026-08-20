@@ -69,6 +69,43 @@ function blankIntake(vin) {
   };
 }
 
+function intakeFromServerRow(j) {
+  const d = j.data || {};
+  return {
+    id: j.id,
+    vin: j.vin,
+    stock: j.stock || '',
+    vehicle: j.vehicle || '',
+    miles: j.miles || '',
+    estimator: j.estimator || '',
+    steps: {
+      1: (d.steps && d.steps['1']) || [],
+      2: (d.steps && d.steps['2']) || [],
+      3: (d.steps && d.steps['3']) || [],
+      4: (d.steps && d.steps['4']) || [],
+    },
+    roReady: Array.isArray(d.roReady) ? d.roReady : [],
+    notes: d.notes || '',
+    ts: j.updatedAt || Date.now(),
+    completedAt: j.completedAt || null,
+    committedBy: j.committedBy || null,
+    overriddenBy: j.overriddenBy || null,
+    quoteId: j.quoteId || null,
+    mddTags: !!d.mddTags,
+  };
+}
+
+function mergeCanonicalServerFields(local, server) {
+  return {
+    ...local,
+    id: server.id || local.id,
+    completedAt: server.completedAt || null,
+    committedBy: server.committedBy || null,
+    overriddenBy: server.overriddenBy || null,
+    quoteId: server.quoteId || null,
+  };
+}
+
 export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, openQuote, onOpenQuoteConsumed }) {
   const [vin, setVin] = useState('');
   const [intake, setIntake] = useState(null);
@@ -217,41 +254,17 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       if (!j || !j.found) { setServerCheckFailed(false); return; }
       const cur = intakeRef.current;
       if (!cur || cur.vin !== v) return;
-      if ((j.updatedAt || 0) <= (cur.ts || 0)) {
-        // Local copy is newer — adopt the server row id so our next save
-        // updates that row instead of creating a duplicate for the same VIN.
-        if ((j.id && j.id !== cur.id) || j.committedBy !== cur.committedBy) {
-          setIntake((s) => {
-            const next = { ...s, id: j.id || s.id, committedBy: j.committedBy || null, overriddenBy: j.overriddenBy || null };
-            saveToCache(next);
-            return next;
-          });
-        }
+      const serverIsFinal = !!(j.completedAt || j.committedBy);
+      if (!serverIsFinal && (j.updatedAt || 0) <= (cur.ts || 0)) {
+        // Preserve newer local edits, but server-owned identity/linkage fields
+        // must always win. Otherwise a stale browser cache can hide the
+        // canonical quote and its walk-around photos.
+        const next = mergeCanonicalServerFields(cur, j);
+        saveToCache(next);
+        setIntake(next);
         return;
       }
-      const d = j.data || {};
-      const it = {
-        id: j.id,
-        vin: j.vin,
-        stock: j.stock || '',
-        vehicle: j.vehicle || '',
-        miles: j.miles || '',
-        estimator: j.estimator || '',
-        steps: {
-          1: (d.steps && d.steps['1']) || [],
-          2: (d.steps && d.steps['2']) || [],
-          3: (d.steps && d.steps['3']) || [],
-          4: (d.steps && d.steps['4']) || [],
-        },
-        roReady: Array.isArray(d.roReady) ? d.roReady : [],
-        notes: d.notes || '',
-        ts: j.updatedAt || Date.now(),
-        completedAt: j.completedAt || null,
-        committedBy: j.committedBy || null,
-        overriddenBy: j.overriddenBy || null,
-        quoteId: j.quoteId || null,
-        mddTags: !!d.mddTags,
-      };
+      const it = intakeFromServerRow(j);
       saveToCache(it);
       setIntake(it);
       setServerCheckFailed(false);
@@ -325,7 +338,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 
   // Open an intake for a VIN: prefer the local cache, then fetch the server copy.
   const openFor = useCallback(
-    (raw, seed) => {
+    (raw, seed, authoritativeRow) => {
       const v = String(raw || '').trim().toUpperCase();
       const cache = loadCache();
       let it = v && cache[v] ? cache[v] : blankIntake(v);
@@ -339,12 +352,22 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           mddTags: it.mddTags || !!seed.mddTags,
         };
       }
+      if (authoritativeRow?.found) {
+        const serverIsFinal = !!(authoritativeRow.completedAt || authoritativeRow.committedBy);
+        it = serverIsFinal || (authoritativeRow.updatedAt || 0) > (it.ts || 0)
+          ? intakeFromServerRow(authoritativeRow)
+          : mergeCanonicalServerFields(it, authoritativeRow);
+        saveToCache(it);
+      }
       setIntake(it);
-      if (v.length >= 6) refreshFromServer(v);
+      if (v.length >= 6 && !authoritativeRow?.found) refreshFromServer(v);
     },
     [refreshFromServer]
   );
-  const openExisting = (row) => { setVin(row.vin); openFor(row.vin); };
+  const openExisting = (row) => {
+    setVin(row.vin);
+    openFor(row.vin, null, row?.found ? row : null);
+  };
   // Auto-open a VIN handed in from another tab (e.g. tapping an In-Take Quote
   // card on the Vehicles tab). Consumed once so back-navigation still works.
   useEffect(() => {
@@ -387,11 +410,28 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     beginIntake(v, overridden);
   };
   const ensureIntakeQuote = async () => {
-    if (intake?.quoteId) return intake.quoteId;
+    let cur = intakeRef.current;
+    if (!cur) return null;
+    if (cur.quoteId) return cur.quoteId;
+
+    // A newly scanned VIN starts as an untouched local intake. Persist that
+    // row before linking its quote; the server cannot link a quote to an
+    // intake id that does not exist yet.
+    if (!cur.ts) {
+      cur = { ...cur, ts: Date.now() };
+      await api.putIntake(intakePayload(cur));
+      intakeRef.current = cur;
+      setIntake(cur);
+      saveToCache(cur);
+    }
+
     const id = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
-    const r = await api.linkIntakeQuote(intake.id, id);
+    const r = await api.linkIntakeQuote(cur.id, id);
     const canonical = r?.quoteId || id;
-    setIntake((s) => s ? { ...s, quoteId: canonical } : s);
+    const linked = { ...cur, quoteId: canonical };
+    intakeRef.current = linked;
+    setIntake(linked);
+    saveToCache(linked);
     return canonical;
   };
   // Same as ensureIntakeQuote, but explains failures with a toast instead of
@@ -547,6 +587,21 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   if (!started) {
     const recentSearch = homeSearch.trim().toUpperCase();
     const recentFiltered = recentQuotes.filter((q) => !recentSearch || [q.vin, q.stock, q.vehicle, q.estimator].join(' ').toUpperCase().includes(recentSearch));
+    const openRecentQuote = async (q) => {
+      try {
+        // The landing lists load independently and have different limits, so
+        // they cannot reliably tell us whether this quote owns an intake.
+        // Resolve the VIN against the server before choosing the destination.
+        const linkedIntake = await api.getIntake(q.vin);
+        if (linkedIntake?.found && linkedIntake.quoteId === q.id) {
+          openExisting(linkedIntake);
+          return;
+        }
+        setStandaloneQuote({ vin: q.vin, stock: q.stock, vehicle: q.vehicle, estimator: q.estimator, miles: q.miles, quoteId: q.id });
+      } catch {
+        showToast?.('Could not open this vehicle — check your connection and try again.');
+      }
+    };
     const knownEst = homeEstimator && estimators.includes(homeEstimator);
     const missing = [
       !homeStock.trim() && 'Stock #',
@@ -640,7 +695,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             <div className="empty-note">No saved quotes match.</div>
           ) : (
             recentFiltered.slice(0, homeSearch ? 20 : 6).map((q) => (
-              <RecentQuoteCard key={q.id} quote={q} onClick={() => setStandaloneQuote({ vin: q.vin, stock: q.stock, vehicle: q.vehicle, estimator: q.estimator, miles: q.miles, quoteId: q.id })} />
+              <RecentQuoteCard key={q.id} quote={q} onClick={() => openRecentQuote(q)} />
             ))
           )}
 

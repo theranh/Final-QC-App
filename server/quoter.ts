@@ -759,7 +759,12 @@ export function registerQuoterRoutes(app: Express) {
                 to_timestamp(${ts} / 1000.0), NULL, to_timestamp(${ts} / 1000.0))
         ON CONFLICT (id) DO UPDATE SET
           vin = ${vin}, stock = ${stock}, vehicle = ${vehicle}, miles = ${miles},
-          estimator = ${estimator}, quote_id = ${quoteId}, data = ${dataJson}::jsonb,
+          estimator = ${estimator},
+          -- Linking is compare-and-set and server-owned. Once a quote is linked,
+          -- a stale full intake save from another device must never replace or
+          -- clear that canonical relationship.
+          quote_id = COALESCE(intakes.quote_id, ${quoteId}),
+          data = ${dataJson}::jsonb,
           -- created_at is the arrival timestamp: written once at first insert,
           -- deliberately ABSENT from this update list so no later edit (from
           -- any device, any offline queue) can ever overwrite it.

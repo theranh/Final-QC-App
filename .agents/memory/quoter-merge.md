@@ -11,3 +11,4 @@ description: Durable decisions from folding the Body Quoter into the Final QC ap
 - Closed months are frozen in `production_tracker` (values stored exactly as typed from the sheet, variance NOT recomputed — shown unavailable for frozen months); current month stays live. Re-snapshot = correction path (delete-then-insert per month).
 - Section 6 of the migration doc is a PARALLEL RUN, not a cutover — the standalone Quoter is never retired without the user saying so.
 - Data copy script: `scripts/migrate-quoter-data.ts` (resumable photo cursor in scripts/.quoter-photo-cursor); needs QUOTER_DATABASE_URL; section 5 cleanup only after copy verified.
+- Intake-to-quote linkage is server-owned and compare-and-set: once an intake has a canonical quote ID, full intake saves must preserve it even if a stale client sends no ID or a different one. Reopening a completed intake must also prefer the server's canonical link over newer-looking local cache timestamps.
