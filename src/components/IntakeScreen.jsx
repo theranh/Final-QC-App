@@ -80,6 +80,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [, setVinOverride] = useState(false);
   const [vinMessage, setVinMessage] = useState('');
   const [walkOpen, setWalkOpen] = useState(false);
+  const [walkQuoteId, setWalkQuoteId] = useState(null);
   const [walkMode, setWalkMode] = useState('guided'); // 'guided' | 'extra' (after-the-fact additions)
   const [, setDecoding] = useState(false);
   const [estimators, setEstimators] = useState([]);
@@ -805,11 +806,21 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   ))}
                 </div>
               )}
-              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => { if (await ensureIntakeQuoteWithFeedback()) setWalkOpen(true); }}>TAKE WALK-AROUND PHOTOS</button>}
+              {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => {
+                const quoteId = await ensureIntakeQuoteWithFeedback();
+                if (quoteId) {
+                  setWalkQuoteId(quoteId);
+                  setWalkOpen(true);
+                }
+              }}>TAKE WALK-AROUND PHOTOS</button>}
               {/* Saved trucks can always ADD new photos after the fact —
                   each one is a brand-new picture; nothing saved is touched. */}
               {locked && intake.quoteId && !quoteRowRef.current?.committedBy && (
-                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => { setWalkMode('extra'); setWalkOpen(true); }}>+ ADD PHOTOS</button>
+                <button className="btn btn-outline" style={{ marginTop: 9 }} onClick={() => {
+                  setWalkMode('extra');
+                  setWalkQuoteId(intake.quoteId);
+                  setWalkOpen(true);
+                }}>+ ADD PHOTOS</button>
               )}
             </div>
             {/* Notes — its own card so it stands apart from the photo grid. */}
@@ -913,7 +924,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
         />
       )}
       {walkOpen && (
-        <WalkAroundCamera quoteId={intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkMode('guided'); }} showToast={showToast} />
+        <WalkAroundCamera quoteId={walkQuoteId || intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkQuoteId(null); setWalkMode('guided'); }} showToast={showToast} />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>

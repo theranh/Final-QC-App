@@ -10,6 +10,7 @@ const INVALID_VIN = '1HGCM82633A004353'; // same VIN, broken check digit
 
 // ---- mocks --------------------------------------------------------------
 const putIntake = vi.fn(() => Promise.resolve({}));
+const linkIntakeQuote = vi.fn(() => Promise.resolve({}));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
 let serverIntakes = [];
@@ -22,7 +23,7 @@ vi.mock('../lib/api', () => ({
     getIntake: () => Promise.resolve({ found: false }),
     quotePhotos: () => Promise.resolve({ photos: [] }),
     putIntake: (...args) => putIntake(...args),
-    linkIntakeQuote: () => Promise.resolve({}),
+    linkIntakeQuote: (...args) => linkIntakeQuote(...args),
     commitIntake: () => Promise.resolve({}),
   },
 }));
@@ -54,7 +55,7 @@ vi.mock('./VinScanner', async () => {
 });
 
 vi.mock('./QuoteScreen', () => ({ default: () => <div data-testid="mock-quote" /> }));
-vi.mock('./WalkAroundCamera', () => ({ default: () => <div data-testid="mock-walk" /> }));
+vi.mock('./WalkAroundCamera', () => ({ default: ({ quoteId }) => <div data-testid="mock-walk" data-quote-id={quoteId} /> }));
 vi.mock('./PinDialog', () => ({
   default: () => <div data-testid="mock-pin" />,
   SignatureBadge: () => <span />,
@@ -65,6 +66,8 @@ import IntakeScreen from './IntakeScreen';
 beforeEach(() => {
   localStorage.clear();
   putIntake.mockClear();
+  linkIntakeQuote.mockReset();
+  linkIntakeQuote.mockResolvedValue({});
   serverIntakes = [];
   serverQuotes = [];
 });
@@ -128,6 +131,17 @@ describe('IntakeScreen scan wiring', () => {
     expect(await screen.findByText('TRUCK')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('VIN…')).toHaveValue(VALID_VIN);
     expect(screen.getByRole('button', { name: 'SAVE' })).toBeInTheDocument();
+  });
+
+  it('opens walk-around capture with the newly linked quote after scanning a VIN', async () => {
+    linkIntakeQuote.mockResolvedValue({ quoteId: 'q-newly-linked' });
+    await openScanner();
+    fireEvent.click(screen.getByText('emit-valid-scan'));
+
+    const walkButton = await screen.findByRole('button', { name: /take walk-around photos/i });
+    fireEvent.click(walkButton);
+
+    await waitFor(() => expect(screen.getByTestId('mock-walk')).toHaveAttribute('data-quote-id', 'q-newly-linked'));
   });
 
   it('cancelling the scanner returns to the landing screen untouched', async () => {
