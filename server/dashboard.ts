@@ -379,11 +379,20 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
 
   const trackerByVin = sheet?.byVin ?? new Map<string, TrackerRow>();
   const quotes = await fetchQuotes(rows.map((r) => r.vin));
+  // Canonical intake metadata for completed-QC cards. A vehicle can have an
+  // inspection without a digital intake (legacy imports), so the client needs
+  // this explicit relationship rather than guessing from VIN alone.
+  const intakeByVin = new Map<string, (typeof completedIntakes)[number]>();
+  for (const intake of completedIntakes) {
+    const cur = intakeByVin.get(intake.vin);
+    if (!cur || (cur.inProgress && !intake.inProgress)) intakeByVin.set(intake.vin, intake);
+  }
 
   // ----- vehicles -----
   const vehicles = rows.map((row) => {
     const tracker = trackerByVin.get(row.vin) || null;
     const quote = quotes.get(row.vin) || { found: false as const };
+    const intake = intakeByVin.get(row.vin) || null;
     const released = tracker?.closedRO != null;
     const statusKey = row.status === "open" ? "openRecheck" : released ? "released" : "frontlineReady";
     return {
@@ -407,6 +416,16 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
         ? { hrs: quote.totals?.hrs ?? null, usd: quote.totals?.usd ?? null, lineCount: quote.lineCount ?? null }
         : null,
       tracker,
+      intake: intake
+        ? {
+            id: intake.intakeId,
+            quoteId: intake.quoteId,
+            estimator: intake.estimator,
+            miles: intake.miles,
+            completedAt: intake.completedAt,
+            inProgress: intake.inProgress,
+          }
+        : null,
     };
   });
   const byQc = new Map(vehicles.map((v) => [v.qcNumber, v]));

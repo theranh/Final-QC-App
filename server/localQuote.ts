@@ -171,8 +171,10 @@ export async function fetchIntakeStats(from: string, to: string): Promise<Intake
 // ---------- completed intakes list (was /api/intakes-completed) ----------
 
 export type CompletedIntake = {
+  intakeId: string;
   vin: string;
   stock: string;
+  miles: string;
   vehicle: string;
   estimator: string | null;
   completedAt: number | null;
@@ -184,7 +186,7 @@ export type CompletedIntake = {
  *  in-progress ones still being worked, newest activity first, VIN normalized. */
 export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
   const r = await db.execute(sql`
-    SELECT vin, stock, vehicle, estimator, quote_id,
+    SELECT id, vin, stock, miles, vehicle, estimator, quote_id,
            EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms,
            EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
     FROM intakes
@@ -192,8 +194,10 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
   `);
   return rowsOf(r)
     .map((row) => ({
+      intakeId: String(row.id),
       vin: String(row.vin ?? "").trim().toUpperCase(),
       stock: String(row.stock ?? "").trim(),
+      miles: String(row.miles ?? "").trim(),
       vehicle: String(row.vehicle ?? "").trim(),
       estimator: row.estimator != null ? String(row.estimator).trim() || null : null,
       completedAt: row.completed_ms != null

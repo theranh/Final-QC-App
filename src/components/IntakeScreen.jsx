@@ -261,11 +261,13 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
         // canonical quote and its walk-around photos.
         const next = mergeCanonicalServerFields(cur, j);
         saveToCache(next);
+        intakeRef.current = next;
         setIntake(next);
         return;
       }
       const it = intakeFromServerRow(j);
       saveToCache(it);
+      intakeRef.current = it;
       setIntake(it);
       setServerCheckFailed(false);
     } catch {
@@ -359,6 +361,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           : mergeCanonicalServerFields(it, authoritativeRow);
         saveToCache(it);
       }
+      // Keep the ref in sync before the network request starts. A fast server
+      // response can otherwise arrive before React commits setIntake(), see the
+      // previous VIN/null ref, and discard the canonical saved details.
+      intakeRef.current = it;
       setIntake(it);
       if (v.length >= 6 && !authoritativeRow?.found) refreshFromServer(v);
     },

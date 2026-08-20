@@ -95,6 +95,34 @@ describe("searchTrucks", () => {
     expect(out.some((r) => r.kind === "quote" && r.quoteId === "q3")).toBe(true);
   });
 
+  it("merges an inspection with its linked intake so the richer overview is the navigation target", async () => {
+    const vin = "1FTFW1E55MFA00011";
+    H.setResponses([
+      [{
+        id: 11, qc_number: "FQ-1011", vin, stock: "OLD-STOCK", vehicle: "Inspection vehicle",
+        status: "cleared", archived: false, updated_ms: 3000,
+        intake_id: "i11", intake_stock: "T211", intake_vehicle: "2022 Ford F-150",
+        intake_quote_id: "q11", intake_committed_by: "Ana", intake_updated_ms: 4000,
+      }],
+      [],
+      [],
+    ]);
+
+    const out = await searchTrucks("FQ-1011");
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      kind: "intake",
+      vin,
+      stock: "T211",
+      vehicle: "2022 Ford F-150",
+      qcNumber: "FQ-1011",
+      quoteId: "q11",
+      intakeId: "i11",
+      committed: true,
+    });
+  });
+
   it("escapes user-typed LIKE wildcards instead of interpreting them", async () => {
     await searchTrucks("50%_T");
     expect(H.calls.length).toBeGreaterThan(0);

@@ -72,7 +72,8 @@ beforeEach(() => {
   linkIntakeQuote.mockResolvedValue({});
   getIntake.mockReset();
   getIntake.mockResolvedValue({ found: false });
-  quotePhotos.mockClear();
+  quotePhotos.mockReset();
+  quotePhotos.mockResolvedValue({ photos: [] });
   serverIntakes = [];
   serverQuotes = [];
 });
@@ -211,6 +212,52 @@ describe('IntakeScreen scan wiring', () => {
     expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
     expect(getIntake).toHaveBeenCalledWith(VALID_VIN);
     await waitFor(() => expect(quotePhotos).toHaveBeenCalledWith('q-completed'));
+  });
+
+  it('hydrates a Vehicles-tab VIN with all saved details and separates walk-around from damage photos', async () => {
+    serverQuotes = [{
+      id: 'q-vehicle-tab',
+      vin: VALID_VIN,
+      stock: 'T-5678',
+      vehicle: '2022 Honda Accord',
+      estimator: 'Jamie Lee',
+      miles: '38250',
+      ts: 1700000000000,
+      lines: [{ id: 'line-1', cls: { panel: 'Door' } }],
+      totals: { hrs: 2.5, usd: 375 },
+    }];
+    getIntake.mockResolvedValue({
+      found: true,
+      id: 'in-vehicle-tab',
+      vin: VALID_VIN,
+      stock: 'T-5678',
+      vehicle: '2022 Honda Accord',
+      miles: '38250',
+      estimator: 'Jamie Lee',
+      quoteId: 'q-vehicle-tab',
+      completedAt: 1700000000000,
+      committedBy: 'Jamie Lee',
+      data: { notes: 'Saved intake note', mddTags: true, roReady: Array(9).fill(true) },
+      updatedAt: 1700000000000,
+    });
+    quotePhotos.mockResolvedValue({
+      photos: [
+        { id: 'p-front', slot: 'front' },
+        { id: 'p-extra', slot: 'xtra_1' },
+        { id: 'p-damage', slot: 'dmg_door' },
+      ],
+    });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByDisplayValue('T-5678')).toBeDisabled();
+    expect(screen.getByDisplayValue('2022 Honda Accord')).toBeDisabled();
+    expect(screen.getByDisplayValue('38250')).toBeDisabled();
+    expect(screen.getByDisplayValue('Jamie Lee')).toBeDisabled();
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 2')).toBeInTheDocument();
+    expect(screen.getByText('DAMAGE PHOTOS · 1')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
+    expect(quotePhotos).toHaveBeenCalledWith('q-vehicle-tab');
   });
 
   it('still opens the damage quoter for a true quote-only record', async () => {

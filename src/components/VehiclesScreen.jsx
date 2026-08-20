@@ -28,7 +28,7 @@ const usd = (v) =>
 // "mike smith" → "Mike Smith" (also after hyphens: "mary-jo" → "Mary-Jo").
 const titleCaseName = (s) => s.replace(/(^|[\s-])([a-zà-ö])/g, (m, sep, ch) => sep + ch.toUpperCase());
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenVehicle, onOpenIntake, onOpenRecord, onOpenQuote }) {
+export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -143,34 +143,50 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenV
         {bucket === 'completed' &&
           list.map((v) => {
             const sm = STATUS_META[v.statusKey] || STATUS_META.frontlineReady;
-            const money =
-              v.tracker && v.tracker.retailPlan != null && v.tracker.closedRO != null
-                ? `${usd(v.tracker.retailPlan)} plan · ${usd(v.tracker.closedRO)} closed`
-                : v.quote && v.quote.hrs != null
-                ? `${v.quote.hrs} hrs quoted`
-                : 'Quote unavailable';
+            const quoteSummary = v.quote
+              ? [
+                  v.quote.hrs != null ? `${v.quote.hrs} hrs` : null,
+                  v.quote.usd != null ? usd(v.quote.usd) : null,
+                  v.quote.lineCount != null ? `${v.quote.lineCount} line${v.quote.lineCount === 1 ? '' : 's'}` : null,
+                ].filter(Boolean).join(' · ')
+              : 'Quote unavailable';
+            const trackerSummary =
+              v.tracker && (v.tracker.retailPlan != null || v.tracker.closedRO != null)
+                ? [
+                    v.tracker.retailPlan != null ? `${usd(v.tracker.retailPlan)} plan` : null,
+                    v.tracker.closedRO != null ? `${usd(v.tracker.closedRO)} closed` : null,
+                  ].filter(Boolean).join(' · ')
+                : null;
             return (
-              <div
+              <button
+                type="button"
                 key={v.qcNumber}
-                onClick={() => onOpenVehicle(v.vin, v.qcNumber)}
-                style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
+                onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
+                style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                   <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {v.stock} · {v.vehicle}
+                    {v.stock || 'NO STOCK #'} · {v.vehicle || 'Vehicle not recorded'}
                   </span>
                   <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: sm.bg, padding: '2px 7px', borderRadius: 4, flex: '0 0 auto' }}>{sm.label}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'baseline' }}>
-                  <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>…{(v.vin || '').slice(-8)}</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 9px', marginTop: 4, alignItems: 'baseline' }}>
+                  <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)', wordBreak: 'break-all' }}>{v.vin || 'VIN unavailable'}</span>
                   <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>{v.qcNumber}</span>
+                  {v.inspector && <span style={{ fontSize: 9.5, color: 'var(--muted)' }}>Inspector: {titleCaseName(v.inspector)}</span>}
+                  {v.intake?.estimator && <span style={{ fontSize: 9.5, color: 'var(--muted)' }}>Estimator: {titleCaseName(v.intake.estimator)}</span>}
                   <span style={{ flex: 1 }} />
                   <span style={{ fontSize: 9.5, fontWeight: 600, color: 'var(--muted)' }}>
                     {v.daysInProduction != null ? `${v.daysInProduction}d in production` : 'days n/a'}
                   </span>
                 </div>
-                <div style={{ fontSize: 10.5, fontWeight: 600, marginTop: 4, color: 'var(--brown)' }}>{money}</div>
-              </div>
+                <div style={{ fontSize: 10.5, fontWeight: 600, marginTop: 5, color: 'var(--brown)' }}>{quoteSummary}</div>
+                {trackerSummary && <div style={{ fontSize: 10, marginTop: 3, color: 'var(--muted)' }}>{trackerSummary}</div>}
+                <div style={{ display: 'flex', gap: 10, marginTop: 4, fontSize: 9.5, color: 'var(--muted)' }}>
+                  <span>{v.itemCount || 0} QC issue{v.itemCount === 1 ? '' : 's'}</span>
+                  <span>{v.intake ? 'Tap for intake details + walk-around photos' : 'Digital intake unavailable · tap for full QC record'}</span>
+                </div>
+              </button>
             );
           })}
         {/* Global search: everything the two dash buckets above can't show —

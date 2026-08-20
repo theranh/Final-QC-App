@@ -644,6 +644,9 @@ function AuthedApp({ me, onAuthRefresh }) {
   };
   // Open the intake (walk-around photos + details) for an awaiting-QC unit.
   const openIntakeFor = (v) => {
+    if (!v?.vin) return;
+    setVehSel(null);
+    setIntakeOpenQuote(null);
     setIntakeOpenVin(v.vin);
     setTab('intake');
   };
@@ -766,7 +769,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenVehicle={openVehicle} onOpenIntake={openIntakeFor} onOpenRecord={(id) => { setTab('records'); setViewRec(id); }} onOpenQuote={(q) => { setIntakeOpenQuote(q); setTab('intake'); }} />
+      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenIntake={openIntakeFor} onOpenRecord={(id) => { setTab('records'); setViewRec(id); }} onOpenQuote={(q) => { setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }} />
     );
   } else if (tab === 'intake') {
     content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} openQuote={intakeOpenQuote} onOpenQuoteConsumed={() => setIntakeOpenQuote(null)} />;
