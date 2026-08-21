@@ -1,7 +1,7 @@
 - [Express 5 + TS quirks](express5-ts-quirks.md) — no "*" route strings in Express 5; passing middleware arrays breaks TS overload inference, compose into one handler instead.
 - [Deployment port pinning](deploy-port-pinning.md) — .replit [env] forces PORT=5173; prod start script must pin PORT=5000 or the published app is unreachable.
 - [Old Recon import](old-recon-import.md) — legacy Expo app data lives on-device only; export must come from the old Repl; import here auto-converts, server assigns FQ numbers.
-- [gitPush INDEX_LOCKED](git-push-index-locked.md) — check `find .git -name "*.lock"` for stale ref locks (not just index.lock); after removal, set branch upstream config if push says BRANCH_ALREADY_EXISTS.
+- [Git push recovery](git-push-index-locked.md) — inspect all Git locks; a healthy GitHub connector does not automatically authenticate the local HTTPS remote.
 - [Google Sheets export](google-sheets-export.md) — Replit Sheets connector is read-only; writes need a service-account secret, and only columns A, C, D, K–O, Q may be filled (D auto-fills QC-pass date) in the VPC tracker.
 - [Quoter merge](quoter-merge.md) — merged-Quoter invariants: /api/quoter/* auth, verbatim pricing, PIN-at-commit immutability, frozen months, parallel run (never retire old app).
 - [Tracker snapshots](tracker-snapshots.md) — frozen months go to prod via the token-guarded sync endpoint's tracker_snapshot phase; re-running a month is the correction path.
