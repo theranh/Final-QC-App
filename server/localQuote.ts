@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
 import { requireEmployee } from "./access";
+import { walkCoverRank } from "@shared/photoRoles";
 
 // Local replacements for what used to be remote Body Quoter reads. The Quoter's
 // data now lives in this app's Postgres (quotes / intakes tables), so these
@@ -213,19 +214,9 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
 
 export type QuoteCover = { cover: string | null; hrs: number | null; usd: number | null; lineCount: number };
 
-// Guided walk-around slot keys in shooting order (mirror of the client's
-// WALK_SLOTS in src/lib/walkSlots.js) — used to pick the earliest available
-// shot as a card's cover thumbnail.
-const WALK_SLOT_ORDER = [
-  "ext_fd_corner", "ext_driver", "ext_rd_corner", "ext_rear", "ext_bed", "ext_rp_corner",
-  "ext_passenger", "ext_fp_corner", "ext_front", "ext_roof",
-  "int_driver", "int_dash", "int_console", "int_rear_d", "int_rear_p", "int_passenger",
-  "whl_lf", "trd_lf", "whl_lr", "trd_lr", "whl_rr", "trd_rr", "whl_rf", "trd_rf",
-];
-
-/** For each quote id, the EARLIEST existing walk-around photo in shooting
- *  order — front driver corner first, then on around the truck. Damage
- *  close-ups and extras never qualify. One metadata-only query. */
+/** For each quote id, use Front · driver corner as the vehicle-list cover.
+ *  The remaining guided angles are fallback-only when that shot is missing.
+ *  Damage close-ups and extras never qualify. One metadata-only query. */
 export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, { id: string; rank: number }>> {
   const bestWalk = new Map<string, { id: string; rank: number }>();
   const unique = [...new Set(quoteIds.filter(Boolean))];
@@ -235,7 +226,7 @@ export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, 
     WHERE quote_id = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
   `);
   for (const p of rowsOf(pr)) {
-    const rank = WALK_SLOT_ORDER.indexOf(String(p.slot));
+    const rank = walkCoverRank(p.slot);
     if (rank < 0) continue; // not a walk-around slot (e.g. damage close-up)
     const qid = String(p.quote_id);
     const prev = bestWalk.get(qid);
@@ -244,9 +235,9 @@ export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, 
   return bestWalk;
 }
 
-/** Latest quote per VIN → its cover thumbnail (first damage-line thumb stored
- *  as `data.cover`) plus hrs/usd/lineCount. Used to enrich the awaiting-QC
- *  cards with a photo, mirroring the old all-quotes list. Read-only. */
+/** Latest quote per VIN → its preferred front-driver-corner intake thumbnail
+ *  plus hrs/usd/lineCount. Stored quote/damage covers are fallback-only. Used
+ *  to enrich the awaiting-QC cards. Read-only. */
 export async function fetchQuoteCovers(entries: Array<{ vin: string; quoteId?: string | null }>): Promise<Map<string, QuoteCover>> {
   const out = new Map<string, QuoteCover>();
   // Intake-linked quote ids: the photos live under the intake's own quote id,

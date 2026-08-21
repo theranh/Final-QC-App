@@ -24,7 +24,15 @@ class FakeImage {
   set src(v) { this._src = v; queueMicrotask(() => this.onload && this.onload()); }
   get src() { return this._src; }
 }
-const ctxStub = { drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {} };
+const ctxStub = {
+  drawImage: vi.fn(),
+  save: vi.fn(),
+  restore: vi.fn(),
+  translate: vi.fn(),
+  rotate: vi.fn(),
+  scale: vi.fn(),
+  transform: vi.fn(),
+};
 
 const QUOTE = 'FQ123';
 const shotFile = () => new File(['jpegbytes'], 'shot.jpg', { type: 'image/jpeg' });
@@ -47,6 +55,7 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
   let showToast;
   beforeEach(async () => {
     vi.clearAllMocks();
+    for (const method of Object.values(ctxStub)) method.mockClear();
     api.quotePhotos.mockResolvedValue({ photos: [] });
     vi.stubGlobal('Image', FakeImage);
     HTMLCanvasElement.prototype.getContext = () => ctxStub;
@@ -62,6 +71,136 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
 
   const renderCamera = () =>
     render(<WalkAroundCamera quoteId={QUOTE} committed={false} onClose={() => {}} showToast={showToast} />);
+
+  it('keeps the live viewfinder free of guided angle and damage-photo titles', () => {
+    api.putQuotePhoto.mockResolvedValue({});
+    renderCamera();
+
+    expect(screen.queryByLabelText('Required angle: Front · driver corner')).not.toBeInTheDocument();
+    expect(screen.queryByText(/NEXT REQUIRED PHOTO/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: /add damage close-up/i }));
+    expect(screen.queryByText('DAMAGE CLOSE-UP')).not.toBeInTheDocument();
+    expect(screen.queryByText(/WIDE SHOT — STEP BACK/i)).not.toBeInTheDocument();
+  });
+
+  it('requests camera access and blocks the shutter until the opening permission gate completes', async () => {
+    let resolveCamera;
+    const track = {
+      getCapabilities: () => ({}),
+      applyConstraints: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    };
+    const getUserMedia = vi.fn(() => new Promise((resolve) => { resolveCamera = resolve; }));
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+    const { container } = renderCamera();
+
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/requesting camera access/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Take photo'));
+    expect(api.putQuotePhoto).not.toHaveBeenCalled();
+
+    resolveCamera(stream);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
+    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
+    expect(container.querySelector('video').srcObject).toBe(stream);
+    expect(api.putQuotePhoto).not.toHaveBeenCalled();
+  });
+
+  it('captures the browser-presented live frame without a hidden gravity rotation', async () => {
+    const track = {
+      getCapabilities: () => ({}),
+      applyConstraints: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    };
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+    });
+    api.putQuotePhoto.mockResolvedValue({});
+    const { container } = renderCamera();
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
+    const video = container.querySelector('video');
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, value: 1920 },
+      videoHeight: { configurable: true, value: 1080 },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
+    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
+    ctxStub.drawImage.mockClear();
+    ctxStub.rotate.mockClear();
+
+    fireEvent.click(screen.getByLabelText('Take photo'));
+
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
+    expect(ctxStub.rotate).not.toHaveBeenCalled();
+    expect(ctxStub.drawImage).toHaveBeenCalledWith(
+      video,
+      0,
+      0,
+      1920,
+      1080,
+      0,
+      0,
+      1600,
+      900,
+    );
+  });
+
+  it('binds rapid file selections to only one reserved slot at a time', async () => {
+    api.putQuotePhoto.mockResolvedValue({});
+    const { container } = renderCamera();
+    const input = container.querySelector('input[type="file"]');
+
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
+    expect(api.putQuotePhoto.mock.calls[0][0].id).toBe(`${QUOTE}_${WALK_SLOTS[0].key}`);
+
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(2));
+    expect(api.putQuotePhoto.mock.calls[1][0].id).toBe(`${QUOTE}_${WALK_SLOTS[1].key}`);
+  });
+
+  it('serializes a same-slot retake and ignores the stale upload failure', async () => {
+    let failFirstUpload;
+    api.putQuotePhoto
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirstUpload = reject; }))
+      .mockResolvedValueOnce({});
+    const { container } = renderCamera();
+
+    const first = await snap(container);
+    expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(await screen.findByRole('button', { name: WALK_SLOTS[0].label }));
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+    expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+
+    failFirstUpload(Object.assign(new Error('too large'), { status: 413 }));
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(2));
+    const second = api.putQuotePhoto.mock.calls[1][0];
+    expect(second.id).toBe(first.id);
+    expect(second.captureTs).toBeGreaterThan(first.captureTs);
+    expect(showToast).not.toHaveBeenCalledWith(expect.stringMatching(/too large/i));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    expect(screen.getByRole('button', { name: WALK_SLOTS[0].label }).querySelector('img')).not.toBeNull();
+  });
 
   it('24th guided shot switches to extra mode and keeps the camera open for unlimited photos', async () => {
     api.putQuotePhoto.mockResolvedValue({});

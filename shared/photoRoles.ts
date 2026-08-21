@@ -10,6 +10,16 @@ const WALK_SLOT_KEY_LIST = [
   "whl_lf", "trd_lf", "whl_lr", "trd_lr", "whl_rr", "trd_rr", "whl_rf", "trd_rf",
 ];
 const WALK_SLOT_KEYS = new Set(WALK_SLOT_KEY_LIST);
+// Vehicle-list cards always prefer the front driver-corner intake photo.
+// Remaining guided angles are fallback-only when that required shot is absent.
+export const INTAKE_CARD_COVER_SLOT = "ext_fd_corner";
+
+export function walkCoverRank(slot: unknown): number {
+  const normalized = typeof slot === "string" ? slot.trim().toLowerCase() : "";
+  if (normalized === INTAKE_CARD_COVER_SLOT) return 0;
+  const fallbackIndex = WALK_SLOT_KEY_LIST.indexOf(normalized);
+  return fallbackIndex < 0 ? -1 : fallbackIndex + 1;
+}
 const LEGACY_PANEL_DAMAGE_RE = new RegExp(
   `^(?:${WALK_SLOT_KEY_LIST.filter((key) => key.startsWith("ext_")).join("|")})_dmg$`,
 );

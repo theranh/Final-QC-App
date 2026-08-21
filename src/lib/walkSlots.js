@@ -4,13 +4,13 @@ export const WALK_SLOTS = [
   ['ext_bed', 'Exterior', 'Bed'], ['ext_rp_corner', 'Exterior', 'Rear · passenger corner'],
   ['ext_passenger', 'Exterior', 'Passenger side'], ['ext_fp_corner', 'Exterior', 'Front · passenger corner'],
   ['ext_front', 'Exterior', 'Front'], ['ext_roof', 'Exterior', 'Roof'],
-  ['int_driver', 'Interior', 'Driver seat'], ['int_dash', 'Interior', 'Dash'],
-  ['int_console', 'Interior', 'Center console'], ['int_rear_d', 'Interior', 'Rear seat · driver side'],
-  ['int_rear_p', 'Interior', 'Rear seat · passenger side'], ['int_passenger', 'Interior', 'Passenger seat'],
   ['whl_lf', 'Wheels / tires', 'Left front wheel'], ['trd_lf', 'Wheels / tires', 'Left front tire'],
   ['whl_lr', 'Wheels / tires', 'Left rear wheel'], ['trd_lr', 'Wheels / tires', 'Left rear tire'],
   ['whl_rr', 'Wheels / tires', 'Right rear wheel'], ['trd_rr', 'Wheels / tires', 'Right rear tire'],
   ['whl_rf', 'Wheels / tires', 'Right front wheel'], ['trd_rf', 'Wheels / tires', 'Right front tire'],
+  ['int_driver', 'Interior', 'Driver seat'], ['int_dash', 'Interior', 'Dash'],
+  ['int_console', 'Interior', 'Center console'], ['int_rear_d', 'Interior', 'Rear seat · driver side'],
+  ['int_rear_p', 'Interior', 'Rear seat · passenger side'], ['int_passenger', 'Interior', 'Passenger seat'],
 ].map(([key, group, label]) => ({ key, group, label }));
 
 export function nextUntakenSlot(slots, taken, from = 0) {

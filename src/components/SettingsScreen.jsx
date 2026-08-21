@@ -279,8 +279,8 @@ export default function SettingsScreen({ me, lastBackupAt, serverBackupAt, recs,
         const resp = await fetch(`/api/quoter/photo?id=${encodeURIComponent(ph.id)}`);
         if (!resp.ok) throw new Error(`Could not fetch photo ${ph.id} (${resp.status})`);
         const blob = await resp.blob();
-        // Re-encode upright: createImageBitmap with imageOrientation:'from-image' bakes
-        // the EXIF rotation into pixels, then the canvas produces an orientation-1 JPEG.
+        // Re-encode upright: the shared normalizer strips EXIF from its decode
+        // copy, transforms raw pixels explicitly, then canvas emits canonical JPEG.
         const dataUrl = await orientedJpegDataUrl(blob, 1600, 0.8);
         await api.putQuotePhoto({ id: ph.id, quoteId: ph.quoteId, slot: ph.slot || '', role: photoRoleOf(ph), dataUrl });
         setProgress(i + 1, list.length);

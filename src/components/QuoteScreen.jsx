@@ -576,7 +576,10 @@ function scaleImage(file, max, q) {
 }
 
 function thumbFromDataUrl(dataUrl) {
-  return orientedJpegDataUrl(dataUrl, 340, 0.7).catch(() => dataUrl);
+  // A thumbnail must be a fresh canonical re-encode of the same pixels as the
+  // full photo; falling back to source bytes lets browser EXIF behavior make
+  // the two views disagree after an update.
+  return orientedJpegDataUrl(dataUrl, 340, 0.7);
 }
 
 export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) {

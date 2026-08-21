@@ -6,10 +6,21 @@ import VinScanner from './VinScanner';
 import { prefetchZxing } from '../lib/zxingDecode';
 import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
-import { subscribePending, subscribePersistence, queueServerDelete, attemptServerDelete } from '../lib/photoQueue';
+import {
+  attemptServerDelete,
+  newJobKey,
+  pendingJobs,
+  persistJob,
+  queueServerDelete,
+  removeJob,
+  removeJobsForPhoto,
+  subscribePending,
+  subscribePersistence,
+} from '../lib/photoQueue';
 import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
 import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
+import { rotateJpegDataUrl } from '../lib/photo';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -620,6 +631,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 
   const [pinOpen, setPinOpen] = useState(false);
   const [commitConfirm, setCommitConfirm] = useState(false); // summary shown before the PIN dialog
+  const [identityEditOpen, setIdentityEditOpen] = useState(false);
+  const [identityDraft, setIdentityDraft] = useState({ stock: '', miles: '' });
   const locked = !!(intake && intake.committedBy); // committed → read-only
 
   // "What's left" progress strip — card anchors for tap-to-scroll.
@@ -640,6 +653,36 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       showToast && showToast('Intake saved ✓');
     });
 
+  const openIdentityEdit = () => {
+    const cur = intakeRef.current;
+    if (!cur?.committedBy) return;
+    setIdentityDraft({ stock: cur.stock || '', miles: cur.miles || '' });
+    setIdentityEditOpen(true);
+  };
+
+  const saveIdentityCorrection = ({ signerId, pin }) => {
+    const cur = intakeRef.current;
+    if (!cur?.committedBy) return Promise.reject(new Error('This intake is not committed'));
+    return api.correctCommittedIntake(cur.id, {
+      stock: identityDraft.stock,
+      miles: identityDraft.miles,
+      signerId,
+      pin,
+    }).then((r) => {
+      const next = {
+        ...cur,
+        stock: r.stock,
+        miles: r.miles,
+        ts: r.updatedAt || Date.now(),
+      };
+      intakeRef.current = next;
+      saveToCache(next);
+      setIntake(next);
+      setIdentityEditOpen(false);
+      showToast?.('Stock # and miles updated ✓');
+    });
+  };
+
   const cleanVin = vin.trim().toUpperCase();
   const started = intake && cleanVin.length >= 6;
 
@@ -654,6 +697,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const damageWidePhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'damage_wide');
   const unclassifiedPhotos = intakePhotos.filter((p) => photoRoleOf(p) === 'unclassified');
   const [lightbox, setLightbox] = useState(null); // { url, id } of enlarged photo
+  const [rotatingPhotoId, setRotatingPhotoId] = useState(null);
+  const rotationBusyRef = useRef(false);
   const photoQuoteId = intake?.quoteId ?? null;
   const photoIntakeId = intake?.id ?? null;
   // Photos can still be uploading in the background (weak signal) when the
@@ -983,6 +1028,15 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   <input type="checkbox" checked={!!intake.mddTags} disabled={locked} onChange={e => saveIntake({ mddTags: e.target.checked })} />
                   Are both Key &amp; Vehicle MDD tags present?
                 </label>
+                {locked && (
+                  <button
+                    className="btn btn-outline-brown"
+                    style={{ gridColumn: '1 / span 2', height: 42 }}
+                    onClick={openIdentityEdit}
+                  >
+                    EDIT STOCK # / MILES · ADMIN PIN
+                  </button>
+                )}
               </div>
             </div>
             <div className="card" ref={photosCardRef}>
@@ -1135,7 +1189,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#e8f3ea', border: '1px solid var(--green)' }}>
                   <SignatureBadge committedBy={intake.committedBy} overriddenBy={intake.overriddenBy} />
                   <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 4 }}>
-                    Saved and locked{intake.completedAt ? ' · ' + new Date(intake.completedAt).toLocaleDateString() : ''}. Photos, notes, and the quote below stay visible for review. A correction is a new record, not an edit.
+                    Saved and locked{intake.completedAt ? ' · ' + new Date(intake.completedAt).toLocaleDateString() : ''}. Stock # and miles can be corrected with an admin PIN; all other intake fields remain locked.
                   </div>
                 </div>
               ) : (
@@ -1169,6 +1223,43 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           onClose={() => setPinOpen(false)}
         />
       )}
+      {identityEditOpen && intake && (
+        <PinDialog
+          title="Correct stock # and miles"
+          subtitle={`${intake.vin} · saved intake`}
+          adminOnly
+          canConfirm={!!identityDraft.stock.trim() && !!String(identityDraft.miles).trim()}
+          confirmLabel="Save protected changes"
+          busyLabel="Saving…"
+          onCommit={saveIdentityCorrection}
+          onClose={() => setIdentityEditOpen(false)}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+            <label>
+              <span className="field-label">STOCK #</span>
+              <input
+                aria-label="Corrected stock number"
+                className="input"
+                value={identityDraft.stock}
+                maxLength={40}
+                autoCapitalize="characters"
+                onChange={(e) => setIdentityDraft((d) => ({ ...d, stock: e.target.value.toUpperCase() }))}
+              />
+            </label>
+            <label>
+              <span className="field-label">MILES</span>
+              <input
+                aria-label="Corrected miles"
+                className="input"
+                value={identityDraft.miles}
+                maxLength={20}
+                inputMode="numeric"
+                onChange={(e) => setIdentityDraft((d) => ({ ...d, miles: e.target.value }))}
+              />
+            </label>
+          </div>
+        </PinDialog>
+      )}
       {walkOpen && (
         <WalkAroundCamera quoteId={walkQuoteId || intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkQuoteId(null); setWalkMode('guided'); }} showToast={showToast} />
       )}
@@ -1180,39 +1271,99 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           {lightbox.id && (
             <button
               className="btn btn-outline-brown lightbox-action"
+              disabled={rotatingPhotoId === lightbox.id}
               onClick={async (e) => {
                 e.stopPropagation();
+                if (rotationBusyRef.current) return;
+                rotationBusyRef.current = true;
+                setRotatingPhotoId(lightbox.id);
                 try {
-                  // Rotate 90° clockwise client-side, then overwrite via the
-                  // photo upsert (in-place overwrite is allowed even after
-                  // sign-off; only new photos/deletes are frozen).
-                  const img = new Image();
-                  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = lightbox.url; });
-                  // Cap the longest side (same 1600px cap as the camera) so the
-                  // re-encoded JPEG always fits the server's size limit.
-                  const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
-                  const w = Math.max(1, Math.round(img.naturalWidth * scale));
-                  const h = Math.max(1, Math.round(img.naturalHeight * scale));
-                  const c = document.createElement('canvas');
-                  c.width = h; c.height = w;
-                  const ctx = c.getContext('2d');
-                  ctx.translate(c.width / 2, c.height / 2);
-                  ctx.rotate(Math.PI / 2);
-                  ctx.drawImage(img, -w / 2, -h / 2, w, h);
-                  const dataUrl = c.toDataURL('image/jpeg', 0.8);
+                  // Canonicalize source EXIF first, then apply one deliberate
+                  // clockwise turn. This avoids browser-dependent double
+                  // rotation when repairing an older iPhone photo.
+                  const dataUrl = await rotateJpegDataUrl(lightbox.url, 90, 1600, 0.8);
                   const meta = intakePhotos.find((p) => p.id === lightbox.id);
-                  await api.putQuotePhoto({ id: lightbox.id, quoteId: photoQuoteId, slot: meta?.slot || '', role: photoRoleOf(meta || {}), dataUrl });
-                  // Cache-bust so the fresh rotation shows immediately.
+                  if (!meta || !photoQuoteId) throw new Error('Photo metadata is unavailable');
+                  const existing = (await pendingJobs(photoQuoteId)).filter((j) => j.id === lightbox.id);
+                  const storedTs = Number(meta.ts);
+                  const captureTs = Math.max(
+                    Date.now(),
+                    Number.isSafeInteger(storedTs) ? storedTs + 1 : 0,
+                    ...existing.map((j) => Number(j.captureTs || j.addedAt || 0) + 1),
+                  );
+                  const job = {
+                    key: newJobKey(lightbox.id),
+                    id: lightbox.id,
+                    quoteId: photoQuoteId,
+                    slotKey: meta.slot,
+                    role: photoRoleOf(meta),
+                    dataUrl,
+                    captureTs,
+                    addedAt: Date.now(),
+                  };
+
+                  // Persist before sending. A transient failure leaves this
+                  // replacement in IndexedDB for the normal app-level retry
+                  // loop; captureTs prevents an older in-flight upload from
+                  // overwriting the repaired pixels.
+                  await persistJob(job);
+                  await removeJobsForPhoto(job.id, job.key, captureTs);
+                  let queued = false;
+                  try {
+                    const response = await api.putQuotePhoto({
+                      id: job.id,
+                      quoteId: job.quoteId,
+                      slot: job.slotKey,
+                      role: job.role,
+                      dataUrl: job.dataUrl,
+                      captureTs: job.captureTs,
+                    });
+                    if (response?.stale) {
+                      // A newer version from another device won. Retrying this
+                      // exact job can never succeed, and blindly rotating the
+                      // newer image could be wrong, so reconcile instead.
+                      await removeJob(job.key);
+                      await removeJobsForPhoto(job.id, job.key, captureTs);
+                      if (photoIntakeId) {
+                        const fresh = await api.intakePhotos(photoIntakeId);
+                        if (!fresh?.quoteId || fresh.quoteId === photoQuoteId) {
+                          setIntakePhotos(Array.isArray(fresh?.photos) ? fresh.photos : []);
+                        }
+                      }
+                      setLightbox(null);
+                      showToast?.('Photo changed on another device — refreshed the newest version instead of rotating it.');
+                      return;
+                    }
+                    await removeJob(job.key);
+                    await removeJobsForPhoto(job.id, job.key, captureTs);
+                  } catch (uploadError) {
+                    const permanent = [400, 403, 409, 410, 413].includes(uploadError?.status);
+                    if (permanent) await removeJob(job.key);
+                    const persisted = (await pendingJobs(photoQuoteId)).some((j) => j.key === job.key);
+                    if (permanent || !persisted) throw uploadError;
+                    queued = true;
+                  }
+
+                  // Show the corrected pixels immediately even while offline.
+                  // Once sent, use a cache-busted server URL.
                   const bust = `/api/quoter/photo?id=${encodeURIComponent(lightbox.id)}&t=${Date.now()}`;
-                  setLightbox({ ...lightbox, url: bust });
-                  setIntakePhotos((prev) => prev.map((p) => (p.id === lightbox.id ? { ...p, bust: Date.now() } : p)));
-                  showToast?.('Photo rotated ✓');
+                  const visibleUrl = queued ? dataUrl : bust;
+                  setLightbox({ ...lightbox, url: visibleUrl });
+                  setIntakePhotos((prev) => prev.map((p) => (
+                    p.id === lightbox.id
+                      ? { ...p, url: queued ? dataUrl : undefined, bust: Date.now() }
+                      : p
+                  )));
+                  showToast?.(queued ? 'Photo rotated — will send when connection returns' : 'Photo rotated ✓');
                 } catch {
                   showToast?.('Couldn’t rotate the photo — check your connection and try again.');
+                } finally {
+                  rotationBusyRef.current = false;
+                  setRotatingPhotoId(null);
                 }
               }}
             >
-              ↻ ROTATE
+              {rotatingPhotoId === lightbox.id ? 'ROTATING…' : '↻ ROTATE'}
             </button>
           )}
           {lightbox.id && !quoteRowRef.current?.committedBy && (

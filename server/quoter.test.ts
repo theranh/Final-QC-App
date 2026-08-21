@@ -360,6 +360,32 @@ describe("quote delete integrity (no orphans, tombstoned uploads)", () => {
 });
 
 describe("photo mutations blocked once owning quote committed", () => {
+  it("rejects a JPEG that still carries a non-upright EXIF orientation", async () => {
+    quoteRows.push({ id: "orientation-q", data: {}, committedBy: null, overriddenBy: null });
+    const exifSix = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xe1, 0x00, 0x22,
+      0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+      0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08,
+      0x00, 0x01,
+      0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+      0x00, 0x06, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00,
+      0xff, 0xd9,
+    ]);
+    const r = await req("POST", "/api/quoter/photos", {
+      id: "orientation-bad",
+      quoteId: "orientation-q",
+      slot: "ext_front",
+      role: "walk",
+      dataUrl: `data:image/jpeg;base64,${exifSix.toString("base64")}`,
+    });
+
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/orientation.*not normalized/i);
+    expect(photoRows.some((photo) => photo.id === "orientation-bad")).toBe(false);
+  });
+
   it("POST /api/quoter/photos 409s when owning quote is committed", async () => {
     quoteRows.push({ id: "cq", data: {}, committedBy: "Worker", overriddenBy: null });
     const r = await req("POST", "/api/quoter/photos", {
@@ -420,6 +446,37 @@ describe("photo mutations blocked once owning quote committed", () => {
     expect(bad.status).toBe(400);
     expect(bad.body.error).toMatch(/role or slot/i);
     expect(photoRows.some((p) => p.id === "role-bad")).toBe(false);
+  });
+
+  it("does not let an older delayed capture overwrite a newer retake of the same slot", async () => {
+    quoteRows.push({ id: "ordered-q", data: {}, committedBy: null, overriddenBy: null });
+    const newerTs = Date.now() - 100;
+    const newerData = "data:image/png;base64," + Buffer.from("newer-photo").toString("base64");
+    const olderData = "data:image/png;base64," + Buffer.from("older-photo").toString("base64");
+
+    const newer = await req("POST", "/api/quoter/photos", {
+      id: "ordered-q_ext_front",
+      quoteId: "ordered-q",
+      slot: "ext_front",
+      role: "walk",
+      captureTs: newerTs,
+      dataUrl: newerData,
+    });
+    const delayedOlder = await req("POST", "/api/quoter/photos", {
+      id: "ordered-q_ext_front",
+      quoteId: "ordered-q",
+      slot: "ext_front",
+      role: "walk",
+      captureTs: newerTs - 1,
+      dataUrl: olderData,
+    });
+
+    expect(newer.status).toBe(200);
+    expect(delayedOlder.status).toBe(200);
+    expect(delayedOlder.body.stale).toBe(true);
+    const saved = photoRows.find((photo) => photo.id === "ordered-q_ext_front");
+    expect(saved.ts).toBe(newerTs);
+    expect(Buffer.from(saved.data).toString()).toBe("newer-photo");
   });
 
   it("the intake manifest reads only its exact linked quote, even when the VIN has another quote", async () => {

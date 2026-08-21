@@ -1,10 +1,7 @@
 // Tests for src/lib/photo.js
 //
 // jsdom cannot exercise real EXIF decoding, so these tests cover:
-//   • probeOrientationSupport: absent createImageBitmap → img fallback used
-//   • probeOrientationSupport: probe returns 1×2 → option honored, bmp path used
-//   • probeOrientationSupport: probe returns 2×1 → silent-ignore detected, img fallback
-//   • probeOrientationSupport: probe throws → img fallback
+//   • EXIF is stripped from a temporary decode copy before browser decoding
 //   • loadOriented img path: resolves with naturalWidth × naturalHeight
 //   • loadOriented img path: rejects on bad image
 //   • loadOriented bmp path: returns bitmap dims; done() closes bitmap
@@ -44,13 +41,17 @@ function makeImageClass({ fail = false, naturalWidth = 320, naturalHeight = 240 
 // Canvas stub that provides toBlob (needed for the orientation probe).
 function stubCanvas() {
   const probeJpeg = new Blob([new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9])], { type: 'image/jpeg' });
-  const ctx = { drawImage: vi.fn(), fillRect: vi.fn() };
+  const ctx = {
+    drawImage: vi.fn(), fillRect: vi.fn(), save: vi.fn(), restore: vi.fn(),
+    scale: vi.fn(), translate: vi.fn(), rotate: vi.fn(), transform: vi.fn(),
+  };
   const canvas = {
     width: 0, height: 0,
     getContext: () => ctx,
     toDataURL: () => 'data:image/jpeg;base64,stubresult',
     toBlob: (cb) => cb(probeJpeg),
   };
+  canvas.ctx = ctx;
   const orig = document.createElement.bind(document);
   vi.spyOn(document, 'createElement').mockImplementation((tag) =>
     tag === 'canvas' ? canvas : orig(tag),
@@ -58,8 +59,7 @@ function stubCanvas() {
   return canvas;
 }
 
-// Reset module registry so each dynamic import gets a fresh module instance
-// (clears _orientationProbeResult = null back to its initial value).
+// Reset module registry so every test gets a clean module instance.
 beforeEach(() => { vi.resetModules(); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -106,10 +106,10 @@ describe('loadOriented — img fallback (no createImageBitmap)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Orientation probe detection
+// Metadata-independent bitmap decoding
 // ---------------------------------------------------------------------------
 
-describe('probeOrientationSupport', () => {
+describe('metadata-independent bitmap decoding', () => {
   it('uses img fallback when createImageBitmap is absent', async () => {
     vi.stubGlobal('createImageBitmap', undefined);
     vi.stubGlobal('Image', makeImageClass({ naturalWidth: 50, naturalHeight: 100 }));
@@ -121,34 +121,17 @@ describe('probeOrientationSupport', () => {
     expect(result.height).toBe(100);
   });
 
-  it('uses createImageBitmap path when probe returns 1×2 (option honored)', async () => {
-    stubCanvas();
-    vi.stubGlobal('createImageBitmap', vi.fn()
-      .mockResolvedValueOnce({ width: 1, height: 2, close: vi.fn() })  // probe
-      .mockResolvedValueOnce({ width: 240, height: 320, close: vi.fn() }), // main
-    );
+  it('decodes the EXIF-free source without browser orientation options', async () => {
+    const createBitmap = vi.fn().mockResolvedValue({ width: 240, height: 320, close: vi.fn() });
+    vi.stubGlobal('createImageBitmap', createBitmap);
     const { loadOriented } = await import('./photo.js');
     const result = await loadOriented(RED_1x1);
     expect(result.width).toBe(240);
     expect(result.height).toBe(320);
+    expect(createBitmap.mock.calls[0]).toHaveLength(1);
   });
 
-  it('falls back to img when probe returns 2×1 (silent-ignore detected)', async () => {
-    stubCanvas();
-    vi.stubGlobal('createImageBitmap', vi.fn()
-      .mockResolvedValueOnce({ width: 2, height: 1, close: vi.fn() }), // probe: ignored
-    );
-    vi.stubGlobal('Image', makeImageClass({ naturalWidth: 320, naturalHeight: 240 }));
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:ignored');
-    vi.spyOn(URL, 'revokeObjectURL').mockReturnValue(undefined);
-    const { loadOriented } = await import('./photo.js');
-    const result = await loadOriented(RED_1x1);
-    expect(result.width).toBe(320);
-    expect(result.height).toBe(240);
-  });
-
-  it('falls back to img when probe createImageBitmap throws', async () => {
-    stubCanvas();
+  it('falls back to img when createImageBitmap throws', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn().mockRejectedValue(new Error('no support')));
     vi.stubGlobal('Image', makeImageClass({ naturalWidth: 10, naturalHeight: 20 }));
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:probe-throw');
@@ -168,10 +151,7 @@ describe('loadOriented — createImageBitmap path', () => {
   it('done() calls bmp.close()', async () => {
     stubCanvas();
     const bmp = { width: 240, height: 320, close: vi.fn() };
-    vi.stubGlobal('createImageBitmap', vi.fn()
-      .mockResolvedValueOnce({ width: 1, height: 2, close: vi.fn() })  // probe
-      .mockResolvedValueOnce(bmp),                                       // main
-    );
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(bmp));
     const { loadOriented } = await import('./photo.js');
     const { done } = await loadOriented(RED_1x1);
     done();
@@ -179,11 +159,7 @@ describe('loadOriented — createImageBitmap path', () => {
   });
 
   it('falls through to img when main bmp call throws', async () => {
-    stubCanvas();
-    vi.stubGlobal('createImageBitmap', vi.fn()
-      .mockResolvedValueOnce({ width: 1, height: 2, close: vi.fn() }) // probe: honored
-      .mockRejectedValueOnce(new Error('corrupt jpeg')),               // main: fails
-    );
+    vi.stubGlobal('createImageBitmap', vi.fn().mockRejectedValue(new Error('corrupt jpeg')));
     vi.stubGlobal('Image', makeImageClass({ naturalWidth: 44, naturalHeight: 88 }));
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:main-fail');
     vi.spyOn(URL, 'revokeObjectURL').mockReturnValue(undefined);
@@ -217,5 +193,71 @@ describe('orientedJpegDataUrl', () => {
     vi.stubGlobal('Image', makeImageClass({ fail: true }));
     const { orientedJpegDataUrl } = await import('./photo.js');
     await expect(orientedJpegDataUrl(RED_1x1, 1000, 0.8)).rejects.toThrow();
+  });
+});
+
+function exifJpegDataUrl(orientation) {
+  const bytes = new Uint8Array([
+    0xff, 0xd8,
+    0xff, 0xe1, 0x00, 0x22,
+    0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+    0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08,
+    0x00, 0x01,
+    0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+    0x00, orientation, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0xff, 0xd9,
+  ]);
+  return `data:image/jpeg;base64,${btoa(String.fromCharCode(...bytes))}`;
+}
+
+describe('canonical EXIF transforms', () => {
+  it('applies every EXIF orientation exactly once to raw bitmap pixels', async () => {
+    const canvas = stubCanvas();
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 4, height: 3, close: vi.fn() }));
+    const { orientedJpegDataUrl } = await import('./photo.js');
+    const matrices = {
+      2: [-1, 0, 0, 1, 4, 0],
+      3: [-1, 0, 0, -1, 4, 3],
+      4: [1, 0, 0, -1, 0, 3],
+      5: [0, 1, 1, 0, 0, 0],
+      6: [0, 1, -1, 0, 3, 0],
+      7: [0, -1, -1, 0, 3, 4],
+      8: [0, -1, 1, 0, 0, 4],
+    };
+
+    for (let orientation = 1; orientation <= 8; orientation += 1) {
+      canvas.ctx.transform.mockClear();
+      await orientedJpegDataUrl(exifJpegDataUrl(orientation), 100, 0.8);
+      expect(canvas.width).toBe(orientation >= 5 ? 3 : 4);
+      expect(canvas.height).toBe(orientation >= 5 ? 4 : 3);
+      if (orientation === 1) expect(canvas.ctx.transform).not.toHaveBeenCalled();
+      else expect(canvas.ctx.transform).toHaveBeenCalledWith(...matrices[orientation]);
+    }
+  });
+
+  it('removes EXIF before decoding while retaining its explicit transform', async () => {
+    let decodedBytes;
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob) => {
+      decodedBytes = new Uint8Array(await blob.arrayBuffer());
+      return { width: 4, height: 3, close: vi.fn() };
+    }));
+    const { loadOriented } = await import('./photo.js');
+    const decoded = await loadOriented(exifJpegDataUrl(6));
+    expect(decoded.orientation).toBe(6);
+    expect(decoded.width).toBe(3);
+    expect(decoded.height).toBe(4);
+    expect(String.fromCharCode(...decodedBytes)).not.toContain('Exif');
+  });
+});
+
+describe('manual canonical rotation', () => {
+  it('normalizes source EXIF before applying one deliberate clockwise turn', async () => {
+    const canvas = stubCanvas();
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 4, height: 3, close: vi.fn() }));
+    const { rotateJpegDataUrl } = await import('./photo.js');
+    const result = await rotateJpegDataUrl(exifJpegDataUrl(6), 90, 100, 0.8);
+    expect(result).toBe('data:image/jpeg;base64,stubresult');
+    expect(canvas.ctx.rotate).toHaveBeenCalledWith(Math.PI / 2);
   });
 });

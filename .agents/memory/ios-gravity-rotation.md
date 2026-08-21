@@ -1,13 +1,13 @@
 ---
-name: iOS gravity sign in camera rotation fix
-description: devicemotion accelerationIncludingGravity has opposite sign on iOS vs Android
+name: Live camera orientation authority
+description: Browser-presented MediaStream frames are authoritative; gravity must not rotate captured pixels
 ---
-Rule: the walk-around camera's rotation-lock fix (rotate portrait-feed shots upright from gravity readings) must flip the sign of x/y on iOS (`S = IS_IOS ? -1 : 1`) before the rotation branches. Held upright, iOS reports y ≈ -9.8 while Android reports +9.8.
+Rule: capture live-camera pixels exactly as the browser presents the MediaStream frame. Do not apply a universal DeviceMotion/gravity transform. Keep explicit EXIF 1–8 normalization for file imports and metadata-free JPEG output.
 
-**Why:** without the flip, every upright portrait photo on iPhone matched the "upside down" branch and was saved rotated 180°. The old Body Quoter never hit this because motion permission was never granted there.
-**How to apply:** any code interpreting accelerationIncludingGravity must normalize the platform sign first; IS_IOS = iP(hone|ad|od) UA or MacIntel + maxTouchPoints > 1.
+**Why:** modern iPhone and Android browsers already normalize live video presentation. Gravity plus frame dimensions cannot distinguish raw sensor pixels from browser-normalized pixels, so a second transform rotated already-upright photos by 90° or 180° across multiple phones.
+**How to apply:** live shutter code may crop/scale the presented frame but must not rotate it from gravity. Stored-photo repair must canonicalize source EXIF before one deliberate user-requested turn, and replacement uploads must retain durable queue/version conflict handling.
 
-Also: iOS grants motion access only from a user gesture — request it on the camera's first pointerdown AND have the shutter await a bounded gravity-sample wait, or the first portrait-locked landscape shot saves sideways (no reading yet).
+Also: keep the shop-requested opening permission gate if motion permission remains part of the product flow, but motion readings must never influence photo pixels.
 
 Link-quote 409 means "committed OR not found"; repair by VIN (adopt the server row's id) — never blindly re-push the local intake row, another phone may own that VIN under a different id.
 

@@ -42,7 +42,7 @@ class FakeImage {
   get src() { return this._src; }
 }
 const ctxStub = {
-  drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {},
+  drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {}, scale() {}, transform() {},
   getImageData(x, y, w, h) {
     const data = new Uint8ClampedArray(w * h * 4).fill(128);
     return { data };
@@ -184,6 +184,35 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     finishUpload({});
   });
 
+  it('keeps the guided slot reserved through Keep, then unlocks on the next slot', async () => {
+    analyzeDataUrl
+      .mockResolvedValueOnce(['dark'])
+      .mockResolvedValueOnce([]);
+    let finishFirstUpload;
+    api.putQuotePhoto
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirstUpload = resolve; }))
+      .mockResolvedValueOnce({});
+    const { container } = renderCamera();
+    const input = container.querySelector('input[type="file"]');
+
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+    const keep = await screen.findByLabelText('Keep photo');
+    expect(screen.getByLabelText('Take photo')).toBeDisabled();
+
+    fireEvent.click(keep);
+
+    await waitFor(() => {
+      expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+      expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    });
+    fireEvent.change(input, { target: { files: [shotFile()] } });
+
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(2));
+    expect(api.putQuotePhoto.mock.calls[0][0].id).toBe(`${QUOTE}_${WALK_SLOTS[0].key}`);
+    expect(api.putQuotePhoto.mock.calls[1][0].id).toBe(`${QUOTE}_${WALK_SLOTS[1].key}`);
+    finishFirstUpload({});
+  });
+
   // ── 3. Retake → overlay dismissed, no save ─────────────────────────────────
   it('Retake dismisses the overlay without saving', async () => {
     analyzeDataUrl.mockResolvedValue(['blur']);
@@ -210,8 +239,9 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     analyzeDataUrl.mockResolvedValue(['dark']);
     const { container } = renderCamera();
 
-    // Verify guided mode header is visible initially.
-    expect(screen.getByText(/WALK-AROUND/i)).toBeInTheDocument();
+    // The camera is ready in guided mode without showing an angle title.
+    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+    expect(screen.queryByText(/NEXT REQUIRED PHOTO/i)).not.toBeInTheDocument();
 
     const input = container.querySelector('input[type="file"]');
     fireEvent.change(input, { target: { files: [shotFile()] } });
@@ -220,8 +250,8 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Still in guided mode — the camera header is back.
-    expect(screen.getByText(/WALK-AROUND/i)).toBeInTheDocument();
+    // Still in guided mode — the shutter is ready again.
+    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
   });
 
   it('camera remains in extra mode after Retake', async () => {
@@ -252,7 +282,8 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(screen.getAllByText(/DAMAGE CLOSE-UP/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    expect(screen.queryByText(/DAMAGE CLOSE-UP/i)).not.toBeInTheDocument();
     expect(onDamageCapture).not.toHaveBeenCalled();
     expect(api.putQuotePhoto).not.toHaveBeenCalled();
   });
@@ -266,14 +297,15 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     const input = container.querySelector('input[type="file"]');
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
-    await waitFor(() => expect(screen.getAllByText(/WIDE SHOT/i).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(screen.getAllByText(/WIDE SHOT/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    expect(screen.queryByText(/WIDE SHOT/i)).not.toBeInTheDocument();
     expect(onDamageCapture).not.toHaveBeenCalled();
   });
 
@@ -286,7 +318,7 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     const input = container.querySelector('input[type="file"]');
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
-    await waitFor(() => expect(screen.getAllByText(/WIDE SHOT/i).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
@@ -296,7 +328,7 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     const [closeUp, wide] = onDamageCapture.mock.calls[0];
     expect(closeUp).toBe('data:image/jpeg;base64,normalized');
     expect(wide).toBe('data:image/jpeg;base64,normalized');
-    expect(screen.getByText(/WALK-AROUND/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
   });
 
   // ── 5. Fail-open: exception in analyzeDataUrl must not block saving ─────────

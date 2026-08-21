@@ -18,7 +18,17 @@ import { api } from '../lib/api';
  *   onCommit(({ signerId, pin, forEmployeeId }) => Promise) — does the API call
  *   onClose  — dismiss without committing
  */
-export default function PinDialog({ title, subtitle, onCommit, onClose }) {
+export default function PinDialog({
+  title,
+  subtitle,
+  onCommit,
+  onClose,
+  adminOnly = false,
+  confirmLabel = 'Commit sign-off',
+  busyLabel = 'Committing…',
+  canConfirm = true,
+  children,
+}) {
   const [signers, setSigners] = useState(null);
   const [loadError, setLoadError] = useState(false);
   const [signerId, setSignerId] = useState(null);
@@ -45,7 +55,10 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
     };
   }, [loadAttempt]);
 
-  const withPin = useMemo(() => (signers || []).filter((s) => s.hasPin), [signers]);
+  const withPin = useMemo(
+    () => (signers || []).filter((s) => s.hasPin && (!adminOnly || s.canOverride)),
+    [signers, adminOnly],
+  );
   const signer = useMemo(() => (signers || []).find((s) => s.id === signerId) || null, [signers, signerId]);
   const canOverride = !!(signer && signer.canOverride);
 
@@ -68,6 +81,7 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
 
   const canSubmit =
     !busy &&
+    canConfirm &&
     signerId != null &&
     /^\d{4}$/.test(pin) &&
     (!overrideOn || forId != null);
@@ -122,13 +136,15 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
           <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Loading…</div>
         )}
 
+        {children}
+
         {signers != null && (
           <>
             <div style={{ marginTop: 12 }}>
-              <div className="field-label">WHO IS SIGNING?</div>
+              <div className="field-label">{adminOnly ? 'ADMIN AUTHORIZATION' : 'WHO IS SIGNING?'}</div>
               {withPin.length === 0 ? (
                 <div style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 600, marginTop: 4 }}>
-                  No one has a PIN yet. An admin must set PINs in Settings first.
+                  {adminOnly ? 'No admin has a PIN yet. Set one in Settings first.' : 'No one has a PIN yet. An admin must set PINs in Settings first.'}
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
@@ -164,7 +180,7 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
               </div>
             )}
 
-            {canOverride && (
+            {canOverride && !adminOnly && (
               <div style={{ marginTop: 12 }}>
                 <div
                   className={'pill-btn' + (overrideOn ? ' on amber' : '')}
@@ -202,7 +218,7 @@ export default function PinDialog({ title, subtitle, onCommit, onClose }) {
                 style={{ height: 44, flex: 1, opacity: canSubmit ? 1 : 0.6 }}
                 onClick={submit}
               >
-                {busy ? 'Committing…' : 'Commit sign-off'}
+                {busy ? busyLabel : confirmLabel}
               </button>
             </div>
           </>

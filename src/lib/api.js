@@ -90,6 +90,8 @@ export const api = {
   signers: () => request('GET', '/api/quoter/signers'),
   commitIntake: (payload) => request('POST', '/api/quoter/commit-intake', payload),
   commitQuote: (payload) => request('POST', '/api/quoter/commit-quote', payload),
+  correctCommittedIntake: (id, payload) =>
+    request('POST', `/api/quoter/intakes/${encodeURIComponent(id)}/correct-stock-miles`, payload),
 
   // ---------- Collaboration / Operations Handoff ----------
   /** GET /api/collaboration/timeline?vin=… => { events, flags } */

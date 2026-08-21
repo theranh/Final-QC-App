@@ -8,6 +8,7 @@ import { aiAnalyses, corrections, deletedQuotes, intakes, photos, quotes, settin
 import { validateRates } from "./ratesValidation";
 import { bestWalkPhotoIds } from "./localQuote";
 import { inferPhotoRole, isPhotoRole, validPhotoRoleForSlot } from "@shared/photoRoles";
+import { readJpegExifOrientation } from "./photoExif";
 
 // ---------------------------------------------------------------------------
 // Body Quoter API, ported from the old standalone server (attached_assets/
@@ -468,6 +469,12 @@ export function registerQuoterRoutes(app: Express) {
       const role = body.role == null
         ? inferPhotoRole(slot)
         : (isPhotoRole(body.role) ? body.role : null);
+      const rawCaptureTs = Number(body.captureTs);
+      const captureTs = Number.isSafeInteger(rawCaptureTs) &&
+        rawCaptureTs >= 1_577_836_800_000 &&
+        rawCaptureTs <= Date.now() + 86_400_000
+        ? rawCaptureTs
+        : null;
       const mDU = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(
         String(body.dataUrl || ""),
       );
@@ -481,6 +488,15 @@ export function registerQuoterRoutes(app: Express) {
       if (!buf.length || buf.length > 4 * 1024 * 1024) {
         return res.status(413).json({ error: "Photo too large" });
       }
+      // Permanent storage invariant: browsers must never have EXIF work left
+      // to do when rendering a saved JPEG. A future Safari/Chrome update can
+      // change metadata handling, but it cannot reinterpret upright pixels.
+      if (mDU[1] === "image/jpeg") {
+        const orientation = readJpegExifOrientation(buf);
+        if (orientation != null && orientation !== 1) {
+          return res.status(400).json({ error: "Photo orientation was not normalized" });
+        }
+      }
       // Acquire a per-quote advisory lock inside a transaction so that concurrent
       // uploads (e.g. close-up + wide shot fired in parallel) cannot both observe
       // a count below 160 and both insert, exceeding the cap. ALL guards run
@@ -490,6 +506,7 @@ export function registerQuoterRoutes(app: Express) {
       let quoteDeleted = false;
       let wrongOwner = false;
       let quoteCommitted = false;
+      let staleUpload = false;
       await db.transaction(async (tx) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`,
@@ -497,7 +514,7 @@ export function registerQuoterRoutes(app: Express) {
         // Ownership guard: an existing photo may only be overwritten by its own
         // quote — a photo id + an unrelated quoteId must never hijack the row.
         const [existing] = await tx
-          .select({ quoteId: photos.quoteId })
+          .select({ quoteId: photos.quoteId, ts: photos.ts })
           .from(photos)
           .where(eq(photos.id, id));
         if (existing && existing.quoteId !== quoteId) {
@@ -525,6 +542,17 @@ export function registerQuoterRoutes(app: Express) {
           quoteDeleted = true;
           return;
         }
+        // New camera clients attach the time the shutter was pressed. A slow
+        // first upload must never overwrite a newer retake merely because it
+        // arrived last. Older clients omit captureTs and retain legacy behavior.
+        if (
+          existing &&
+          captureTs != null &&
+          Number(existing.ts || 0) >= captureTs
+        ) {
+          staleUpload = true;
+          return;
+        }
         const cnt = await tx.execute(
           sql`SELECT COUNT(*)::int AS n FROM photos WHERE quote_id = ${quoteId} AND id <> ${id}`,
         );
@@ -532,7 +560,7 @@ export function registerQuoterRoutes(app: Express) {
           limitReached = true;
           return;
         }
-        const ts = Date.now();
+        const ts = captureTs ?? Date.now();
         await tx
           .insert(photos)
           .values({ id, quoteId, slot, role, mime: mDU[1], data: buf, ts })
@@ -553,7 +581,7 @@ export function registerQuoterRoutes(app: Express) {
       if (limitReached) {
         return res.status(409).json({ error: "Photo limit reached for this truck" });
       }
-      res.json({ ok: true, id });
+      res.json({ ok: true, id, stale: staleUpload });
     }),
   );
 

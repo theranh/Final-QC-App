@@ -1,135 +1,225 @@
 // Photo decode + downscale helpers shared by every capture/upload path.
 //
-// ORIENTATION RULE: every photo must be decoded through loadOriented() so the
-// camera's EXIF orientation tag is applied BEFORE the pixels hit a canvas.
-// Decoding with plain `new Image()` + drawImage leaves some browsers (and all
-// re-encoded data URLs) showing portrait shots sideways. createImageBitmap
-// with imageOrientation:'from-image' bakes the rotation into the pixels; the
-// <img> fallback covers older browsers, which also auto-apply EXIF on draw.
+// STORAGE CONTRACT: newly persisted JPEGs contain upright pixels and no EXIF
+// orientation instruction. We parse the source orientation, remove EXIF from a
+// temporary decode copy so the browser cannot auto-rotate it, transform the raw
+// pixels ourselves, and re-encode. Future browser/app updates therefore cannot
+// reinterpret the saved image differently.
 
-// Convert a data-URL to a Blob without going through fetch().
-// fetch(data:...) can silently fail in iOS Safari PWA and private-browsing
-// contexts; this synchronous path always works.
 function dataUrlToBlob(dataUrl) {
   const comma = dataUrl.indexOf(',');
   const mime = dataUrl.slice(5, dataUrl.indexOf(';'));
   const bytes = atob(dataUrl.slice(comma + 1));
   const buf = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+  for (let i = 0; i < bytes.length; i += 1) buf[i] = bytes.charCodeAt(i);
   return new Blob([buf], { type: mime });
 }
 
-// Probe whether createImageBitmap actually applies the imageOrientation option.
-// Some early iOS Safari 15.x builds accept the call but silently return
-// un-rotated pixels. We detect this once per page load by decoding a tiny
-// EXIF orientation-6 JPEG and comparing bitmap dimensions: orientation-6 on
-// a 2×1 stored image should produce a 1-wide × 2-tall bitmap (width < height).
-// If the browser ignores the option the bitmap stays 2×1 (width > height).
-//
-// Stored as a module-level promise so concurrent callers share a single probe
-// run — the promise is created once and reused for every subsequent call.
-let _orientationProbePromise = null;
-
-function probeOrientationSupport() {
-  if (_orientationProbePromise) return _orientationProbePromise;
-  _orientationProbePromise = _runOrientationProbe();
-  return _orientationProbePromise;
+async function sourceToBlob(src) {
+  if (typeof src !== 'string') return src;
+  if (src.startsWith('data:')) return dataUrlToBlob(src);
+  const response = await fetch(src, { cache: 'no-store', credentials: 'same-origin' });
+  if (!response.ok) throw new Error('Could not read that image');
+  return response.blob();
 }
 
-async function _runOrientationProbe() {
-  if (typeof createImageBitmap !== 'function') return false;
-  try {
-    // Build a 2×1 white JPEG via canvas, then splice in an EXIF APP1 segment
-    // that declares orientation 6 (rotate 90° CW → corrected dims become 1×2).
-    // No network call: canvas.toBlob encodes inline; EXIF bytes are embedded here.
-    const cv = document.createElement('canvas');
-    cv.width = 2; cv.height = 1;
-    cv.getContext('2d').fillRect(0, 0, 2, 1);
-    const base = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 1));
-    const raw = new Uint8Array(await base.arrayBuffer());
-
-    // EXIF APP1 payload declaring orientation = 6 (rotate 90° CW).
-    // Big-endian TIFF header + single IFD entry for Orientation tag (0x0112).
-    const exif = new Uint8Array([
-      0xFF, 0xE1, 0x00, 0x22,                                   // APP1 marker, length=34
-      0x45, 0x78, 0x69, 0x66, 0x00, 0x00,                       // "Exif\0\0"
-      0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,           // TIFF big-endian, IFD at offset 8
-      0x00, 0x01,                                                 // IFD: 1 entry
-      0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,           // tag=Orientation, SHORT, count=1
-      0x00, 0x06, 0x00, 0x00,                                     // value=6, padding
-      0x00, 0x00, 0x00, 0x00,                                     // next IFD=0 (none)
-    ]);
-
-    // Replace any JFIF APP0 segment (FF E0) with the EXIF APP1.
-    // JPEG decoders work with EXIF-only; we drop APP0 to avoid duplicate markers.
-    let rest = 2; // skip SOI (FF D8)
-    if (raw[2] === 0xFF && raw[3] === 0xE0) rest = 2 + 2 + ((raw[4] << 8) | raw[5]);
-    const jpeg = new Uint8Array(2 + exif.length + (raw.length - rest));
-    jpeg[0] = 0xFF; jpeg[1] = 0xD8;
-    jpeg.set(exif, 2);
-    jpeg.set(raw.subarray(rest), 2 + exif.length);
-
-    const bmp = await createImageBitmap(
-      new Blob([jpeg], { type: 'image/jpeg' }),
-      { imageOrientation: 'from-image' },
-    );
-    // Orientation 6 on a 2×1 raw JPEG → corrected bitmap must be 1 wide × 2 tall.
-    const honored = bmp.width < bmp.height;
-    try { bmp.close(); } catch { /* noop */ }
-    return honored;
-  } catch {
-    // createImageBitmap threw or canvas is unavailable — fall back to <img>.
-    return false;
+function parseExifOrientation(bytes, tiff) {
+  if (tiff + 8 >= bytes.length) return null;
+  const le = bytes[tiff] === 0x49 && bytes[tiff + 1] === 0x49;
+  const be = bytes[tiff] === 0x4d && bytes[tiff + 1] === 0x4d;
+  if (!le && !be) return null;
+  const r16 = (at) => (le
+    ? bytes[at] | (bytes[at + 1] << 8)
+    : (bytes[at] << 8) | bytes[at + 1]);
+  const r32 = (at) => (le
+    ? (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0
+    : ((bytes[at] * 0x1000000) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8) + bytes[at + 3]));
+  if (r16(tiff + 2) !== 42) return null;
+  const ifd = tiff + r32(tiff + 4);
+  if (ifd + 2 >= bytes.length) return null;
+  const count = r16(ifd);
+  for (let i = 0; i < count; i += 1) {
+    const entry = ifd + 2 + i * 12;
+    if (entry + 10 >= bytes.length) break;
+    if (r16(entry) === 0x0112) {
+      const value = r16(entry + 8);
+      return value >= 1 && value <= 8 ? value : null;
+    }
   }
+  return null;
 }
 
-// For tests: reset the module-level promise so each test starts a fresh probe.
-export function _resetOrientationProbe() { _orientationProbePromise = null; }
-
-// Decode a File/Blob or data-URL string into a drawable whose pixels are
-// already upright. Returns { source, width, height, done() } — call done()
-// after drawing to free bitmap memory (important on iPhone).
-export async function loadOriented(src) {
-  const blob = typeof src === 'string' ? dataUrlToBlob(src) : src;
-  if (await probeOrientationSupport()) {
-    try {
-      const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-      return { source: bmp, width: bmp.width, height: bmp.height, done: () => { try { bmp.close(); } catch { /* noop */ } } };
-    } catch { /* decode failed — fall through to <img> */ }
+function analyzeAndStripJpegExif(bytes) {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return { orientation: 1, bytes };
   }
-  // <img> fallback: modern iOS/Android Safari applies EXIF orientation when
-  // drawing to canvas (CSS image-orientation: from-image default).
-  // naturalWidth/naturalHeight give intrinsic pixel dimensions regardless of
-  // DOM placement or CSS sizing, and reflect EXIF-corrected dims on modern iOS.
+  const exifRanges = [];
+  let orientation = 1;
+  let pos = 2;
+  while (pos + 3 < bytes.length && bytes[pos] === 0xff) {
+    const marker = bytes[pos + 1];
+    if (marker === 0xda) break;
+    const length = (bytes[pos + 2] << 8) | bytes[pos + 3];
+    if (length < 2 || pos + 2 + length > bytes.length) break;
+    if (
+      marker === 0xe1
+      && pos + 10 < bytes.length
+      && String.fromCharCode(...bytes.slice(pos + 4, pos + 10)) === 'Exif\u0000\u0000'
+    ) {
+      const parsed = parseExifOrientation(bytes, pos + 10);
+      if (parsed != null) orientation = parsed;
+      exifRanges.push([pos, pos + 2 + length]);
+    }
+    pos += 2 + length;
+  }
+  if (!exifRanges.length) return { orientation, bytes };
+
+  const removed = exifRanges.reduce((sum, [start, end]) => sum + end - start, 0);
+  const stripped = new Uint8Array(bytes.length - removed);
+  let sourceAt = 0;
+  let targetAt = 0;
+  for (const [start, end] of exifRanges) {
+    stripped.set(bytes.slice(sourceAt, start), targetAt);
+    targetAt += start - sourceAt;
+    sourceAt = end;
+  }
+  stripped.set(bytes.slice(sourceAt), targetAt);
+  return { orientation, bytes: stripped };
+}
+
+async function prepareDecodeSource(blob) {
+  if (!/image\/jpeg/i.test(blob.type || '')) return { orientation: 1, blob };
+  const source = new Uint8Array(await blob.arrayBuffer());
+  const analyzed = analyzeAndStripJpegExif(source);
+  return {
+    orientation: analyzed.orientation,
+    blob: analyzed.bytes === source
+      ? blob
+      : new Blob([analyzed.bytes], { type: 'image/jpeg' }),
+  };
+}
+
+function decodeWithImage(blob) {
   const url = URL.createObjectURL(blob);
-  const img = await new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => { URL.revokeObjectURL(url); resolve(i); };
-    i.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that image')); };
-    i.src = url;
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({
+        source: image,
+        rawWidth: image.naturalWidth || image.width,
+        rawHeight: image.naturalHeight || image.height,
+        done: () => {},
+      });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not read that image'));
+    };
+    image.src = url;
   });
-  return { source: img, width: img.naturalWidth, height: img.naturalHeight, done: () => {} };
 }
 
-// Downscale any photo source to an upright JPEG data URL.
-// zoom > 1 center-crops before scaling (used by the camera's digital zoom).
+// Decode a File/Blob or data URL into raw pixels plus the explicit transform
+// still required. The source blob has already had EXIF removed, so browser
+// orientation behavior cannot cause a second rotation.
+export async function loadOriented(src) {
+  const input = await sourceToBlob(src);
+  const prepared = await prepareDecodeSource(input);
+  let decoded;
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(prepared.blob);
+      decoded = {
+        source: bitmap,
+        rawWidth: bitmap.width,
+        rawHeight: bitmap.height,
+        done: () => { try { bitmap.close(); } catch { /* noop */ } },
+      };
+    } catch { /* Fall back to <img> decoding of the same EXIF-free blob. */ }
+  }
+  if (!decoded) decoded = await decodeWithImage(prepared.blob);
+  const swap = prepared.orientation >= 5 && prepared.orientation <= 8;
+  return {
+    ...decoded,
+    width: swap ? decoded.rawHeight : decoded.rawWidth,
+    height: swap ? decoded.rawWidth : decoded.rawHeight,
+    orientation: prepared.orientation,
+  };
+}
+
+function drawUpright(ctx, decoded) {
+  const { orientation, rawWidth: w, rawHeight: h, source } = decoded;
+  switch (orientation) {
+    case 2: ctx.transform(-1, 0, 0, 1, w, 0); break;
+    case 3: ctx.transform(-1, 0, 0, -1, w, h); break;
+    case 4: ctx.transform(1, 0, 0, -1, 0, h); break;
+    case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+    case 6: ctx.transform(0, 1, -1, 0, h, 0); break;
+    case 7: ctx.transform(0, -1, -1, 0, h, w); break;
+    case 8: ctx.transform(0, -1, 1, 0, 0, w); break;
+    default: break;
+  }
+  ctx.drawImage(source, 0, 0, w, h);
+}
+
+// Downscale any photo source to an upright, metadata-free JPEG data URL.
+// zoom > 1 center-crops in upright coordinates.
 export async function orientedJpegDataUrl(src, max, quality, zoom = 1) {
-  const d = await loadOriented(src);
+  const decoded = await loadOriented(src);
   try {
-    const scale = Math.min(1, max / Math.max(d.width, d.height));
-    const sw = d.width / zoom; const sh = d.height / zoom;
-    const sx = (d.width - sw) / 2; const sy = (d.height - sh) / 2;
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, Math.round(sw * scale));
-    c.height = Math.max(1, Math.round(sh * scale));
-    c.getContext('2d').drawImage(d.source, sx, sy, sw, sh, 0, 0, c.width, c.height);
-    return c.toDataURL('image/jpeg', quality);
+    const scale = Math.min(1, max / Math.max(decoded.width, decoded.height));
+    const sw = decoded.width / zoom;
+    const sh = decoded.height / zoom;
+    const sx = (decoded.width - sw) / 2;
+    const sy = (decoded.height - sh) / 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(sw * scale));
+    canvas.height = Math.max(1, Math.round(sh * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.translate(-sx, -sy);
+    drawUpright(ctx, decoded);
+    ctx.restore();
+    return canvas.toDataURL('image/jpeg', quality);
   } finally {
-    d.done();
+    decoded.done();
   }
 }
 
-// Downscale + JPEG-compress a captured photo so localStorage can hold many of them as data URLs.
+// Deliberately rotate a stored photo after first canonicalizing any source EXIF.
+// This is the repair path for older photos whose pixel direction was already
+// wrong. The output is always a metadata-free JPEG, so the same repair renders
+// identically in Safari, Chrome, thumbnails, and full-size views.
+export async function rotateJpegDataUrl(src, degrees = 90, max = 1600, quality = 0.8) {
+  const canonical = await orientedJpegDataUrl(src, max, quality);
+  const decoded = await loadOriented(canonical);
+  try {
+    const normalized = ((Number(degrees) % 360) + 360) % 360;
+    if (normalized === 0) return canonical;
+    const swap = normalized === 90 || normalized === 270;
+    const canvas = document.createElement('canvas');
+    canvas.width = swap ? decoded.height : decoded.width;
+    canvas.height = swap ? decoded.width : decoded.height;
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(normalized * Math.PI / 180);
+    ctx.drawImage(
+      decoded.source,
+      -decoded.width / 2,
+      -decoded.height / 2,
+      decoded.width,
+      decoded.height,
+    );
+    ctx.restore();
+    return canvas.toDataURL('image/jpeg', quality);
+  } finally {
+    decoded.done();
+  }
+}
+
 export function compressImageFile(file) {
   return orientedJpegDataUrl(file, 1000, 0.55);
 }

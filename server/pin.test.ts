@@ -134,6 +134,18 @@ const H = vi.hoisted(() => {
         return { rows: row ? [{ value: row.value }] : [] };
       }
       if (/for update/i.test(text)) {
+        const intake = intakeRows.find((r) => r.id === params[0]);
+        if (intake) {
+          return {
+            rows: [{
+              id: intake.id,
+              vin: intake.vin,
+              stock: intake.stock,
+              miles: intake.miles,
+              committed_by: intake.committedBy,
+            }],
+          };
+        }
         const row = quoteRows.find((r) => r.id === params[0]);
         return {
           rows: row
@@ -174,12 +186,16 @@ const H = vi.hoisted(() => {
       set: (patch: any) => ({
         where: (cond: any) => ({
           returning: async () => {
-            const { params } = sqlParts(cond);
+            const { text, params } = sqlParts(cond);
             const id = params[0];
             // ids are unique across stores in these tests; find whichever holds it.
             const row =
               intakeRows.find((r) => r.id === id) || quoteRows.find((r) => r.id === id);
-            if (!row || row.committedBy) return []; // immutability guard
+            if (!row) return [];
+            // Normal commits require an unlocked row; the narrow stock/miles
+            // correction route deliberately requires an already-committed row.
+            const requiresCommitted = /IS NOT NULL/i.test(text);
+            if ((requiresCommitted && !row.committedBy) || (!requiresCommitted && row.committedBy)) return [];
             const persistedPatch = { ...patch };
             // The real database evaluates COALESCE(completed_at, NOW()) and
             // returns a Date. Mirror that instead of retaining Drizzle's SQL
@@ -336,6 +352,137 @@ describe("commit endpoints", () => {
     const r = await post("/api/quoter/commit-intake", { id: "in1", signerId: 2, pin: "2222" });
     expect(r.status).toBe(409);
     expect(intakeRows.find((x) => x.id === "in1").committedBy).toBe("Worker");
+  });
+
+  it("lets an admin PIN correct stock and miles on a committed intake", async () => {
+    intakeRows.push({
+      id: "in-correct",
+      vin: "CORRECTVIN1234567",
+      stock: "OLD-STOCK",
+      miles: "100",
+      quoteId: "q-correct",
+      data: {},
+      committedBy: "Worker",
+      overriddenBy: null,
+      completedAt: new Date(),
+      updatedAt: new Date(0),
+    });
+    quoteRows.push({
+      id: "q-correct",
+      data: { stock: "QUOTE-STOCK", miles: "QUOTE-MILES" },
+      committedBy: "Quote signer",
+      overriddenBy: null,
+    });
+    const beforeAudits = audits.length;
+    const r = await post("/api/quoter/intakes/in-correct/correct-stock-miles", {
+      stock: "new-stock",
+      miles: "456",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ stock: "NEW-STOCK", miles: "456" });
+    const saved = intakeRows.find((x) => x.id === "in-correct");
+    expect(saved).toMatchObject({
+      stock: "NEW-STOCK",
+      miles: "456",
+      committedBy: "Worker",
+    });
+    expect(quoteRows.find((x) => x.id === "q-correct")?.data).toEqual({
+      stock: "QUOTE-STOCK",
+      miles: "QUOTE-MILES",
+    });
+    expect(audits).toHaveLength(beforeAudits + 1);
+    expect(audits.at(-1)).toMatchObject({
+      action: "intake_stock_miles_corrected",
+      actorName: "Sup",
+      details: {
+        previousStock: "OLD-STOCK",
+        previousMiles: "100",
+        stock: "NEW-STOCK",
+        miles: "456",
+      },
+    });
+  });
+
+  it("audits each later correction against the immediately prior committed values", async () => {
+    intakeRows.push({
+      id: "in-correct-sequential",
+      vin: "SEQUENTIALVIN1234",
+      stock: "ORIGINAL",
+      miles: "1",
+      data: {},
+      committedBy: "Worker",
+      overriddenBy: null,
+      completedAt: new Date(),
+    });
+    const beforeAudits = audits.length;
+
+    expect((await post("/api/quoter/intakes/in-correct-sequential/correct-stock-miles", {
+      stock: "FIRST",
+      miles: "2",
+      signerId: 2,
+      pin: "2222",
+    })).status).toBe(200);
+    expect((await post("/api/quoter/intakes/in-correct-sequential/correct-stock-miles", {
+      stock: "SECOND",
+      miles: "3",
+      signerId: 2,
+      pin: "2222",
+    })).status).toBe(200);
+
+    expect(audits.slice(beforeAudits).map((a) => a.details)).toEqual([
+      expect.objectContaining({ previousStock: "ORIGINAL", previousMiles: "1", stock: "FIRST", miles: "2" }),
+      expect.objectContaining({ previousStock: "FIRST", previousMiles: "2", stock: "SECOND", miles: "3" }),
+    ]);
+  });
+
+  it("rejects a non-admin PIN for a committed intake correction", async () => {
+    intakeRows.push({
+      id: "in-no-admin",
+      vin: "NOADMINVIN123456",
+      stock: "UNCHANGED",
+      miles: "999",
+      data: {},
+      committedBy: "Worker",
+      overriddenBy: null,
+      completedAt: new Date(),
+    });
+    const r = await post("/api/quoter/intakes/in-no-admin/correct-stock-miles", {
+      stock: "SHOULD-NOT-SAVE",
+      miles: "1",
+      signerId: 1,
+      pin: "1111",
+    });
+
+    expect(r.status).toBe(403);
+    expect(r.body.error).toMatch(/admin pin/i);
+    expect(intakeRows.find((x) => x.id === "in-no-admin")).toMatchObject({
+      stock: "UNCHANGED",
+      miles: "999",
+    });
+  });
+
+  it("does not allow the protected correction route on an uncommitted intake", async () => {
+    intakeRows.push({
+      id: "in-open",
+      vin: "OPENVIN123456789",
+      stock: "OPEN",
+      miles: "10",
+      data: {},
+      committedBy: null,
+      overriddenBy: null,
+    });
+    const r = await post("/api/quoter/intakes/in-open/correct-stock-miles", {
+      stock: "NEW",
+      miles: "20",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(r.status).toBe(409);
+    expect(intakeRows.find((x) => x.id === "in-open").stock).toBe("OPEN");
   });
 
   it("supervisor override sets committed_by=worker, overridden_by=supervisor", async () => {

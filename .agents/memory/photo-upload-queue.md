@@ -13,4 +13,4 @@ Walk-around photos persist to IndexedDB before upload and flush on next app laun
 ## Damage close-ups
 Damage close-ups now go through the same durable queue (persist before upload). Rule: any durable-queue capture path must also purge queued/in-flight copies on delete, or the launch flusher resurrects a photo the inspector removed — use an isDeleted check so an in-flight send that lands after a delete gets deleted server-side too.
 
-**Orientation rule (Aug 2026):** every photo ingestion path must decode through loadOriented/orientedJpegDataUrl in src/lib/photo.js (createImageBitmap imageOrientation from-image, <img> fallback). Never add a new Image()+canvas decode for uploaded photos — EXIF portrait shots come out sideways.
+**Orientation rule (Aug 2026):** every uploaded photo must pass through the shared canonicalizer, which parses EXIF, removes it from a temporary decode copy, explicitly transforms raw pixels, and re-encodes upright. Never rely on browser EXIF behavior or persist a non-upright orientation tag.

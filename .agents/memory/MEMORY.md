@@ -6,7 +6,7 @@
 - [Quoter merge](quoter-merge.md) — merged-Quoter invariants: /api/quoter/* auth, verbatim pricing, PIN-at-commit immutability, frozen months, parallel run (never retire old app).
 - [Tracker snapshots](tracker-snapshots.md) — frozen months go to prod via the token-guarded sync endpoint's tracker_snapshot phase; re-running a month is the correction path.
 - [Intake completion](intake-completion.md) — checklists removed; PIN commit alone sets completed_at and must invalidate the dashboard cache.
-- [iOS gravity rotation](ios-gravity-rotation.md) — accelerationIncludingGravity sign is flipped on iOS vs Android; normalize before camera rotation logic. Notes edits outside QuoteScreen must use the notes-only PATCH.
+- [Live camera orientation](ios-gravity-rotation.md) — capture browser-presented MediaStream pixels; never use universal gravity transforms. File imports still require explicit EXIF normalization.
 - [Hours-only display](hours-only-display.md) — quote UI shows hours only; usd stays in saved data for tracker sync; awaiting list dedupes per VIN with IN PROGRESS badge.
 - [Migrated re-checks](migrated-rechecks.md) — imported open inspections lacked openItems; admin repair button rebuilds them; 401s in a stale PWA now force the sign-in screen via auth:expired event.
 - [Photo upload queue](photo-upload-queue.md) — queue records keyed per capture, not per slot, or a slow upload's cleanup deletes a retake; 401 is transient, only 413/409/403 drop.
@@ -19,3 +19,4 @@
 - [Manager analytics semantics](manager-analytics-semantics.md) — Chicago completed-intake cohorts; tracker stages are day-precision; AI telemetry stays separate from committed pricing.
 - [VIN scanner reliability](vin-scanner-reliability.md) — keep ZXing bundled; native barcode APIs are optional, bounded accelerators and must never block/callback after close.
 - [Photo ownership and roles](photo-ownership-roles.md) — reopen through the intake’s exact quote link; persist photo roles and isolate unknown legacy slots rather than guessing.
+- [Guided photo route](guided-photo-route.md) — shop route is exterior → wheels/tires → interior; show the active angle and preserve shutter-time ownership across async work.

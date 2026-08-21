@@ -25,6 +25,12 @@
  *  - `correct_stock` phase: narrow metadata correction for one exact VIN +
  *    old-stock pair. Updates the canonical intake and linked quote together,
  *    writes an audit row, and never rewrites immutable pricing snapshots.
+ *  - `repair_a23137_photo_slots` phase: one audited, idempotent correction for
+ *    the known A23137 guided-photo route mismatch. It only relabels the exact
+ *    existing photo rows; image bytes and timestamps are never changed.
+ *  - `repair_bc23139_photo_link` phase: one audited, idempotent correction for
+ *    the duplicate Tacoma intake whose newer committed row lost the link to
+ *    its only verified quote/photo gallery. It changes no quote or photo data.
  */
 import type { Express, Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
@@ -36,6 +42,55 @@ import { inferPhotoRole } from "@shared/photoRoles";
 const { Pool } = pg;
 const PHOTO_BATCH = 25;
 const SETTINGS_SKIP = ["_secret", "_import_v1"];
+const A23137_PHOTO_REPAIR = {
+  repairKey: "a23137-guided-photo-route-v1",
+  stock: "A23137",
+  vin: "1FTFW1E52NFB62557",
+  intakeId: "in1787316303068duqe",
+  quoteId: "q1787316310269inp5",
+  moves: [
+    // The eight wheel/tire captures were taken first, while the old hidden
+    // route was assigning the six interior slots and then the first wheel pair.
+    ["int_driver", "whl_lf"],
+    ["int_dash", "trd_lf"],
+    ["int_console", "whl_lr"],
+    ["int_rear_d", "trd_lr"],
+    ["int_rear_p", "whl_rr"],
+    ["int_passenger", "trd_rr"],
+    ["whl_lf", "whl_rf"],
+    ["trd_lf", "trd_rf"],
+    // The best six interior views are promoted from the later wheel/extra rows.
+    ["whl_lr", "int_driver"],
+    ["trd_lr", "int_dash"],
+    ["whl_rr", "int_console"],
+    ["xtra_1787316507812ym4c", "int_rear_d"],
+    ["xtra_1787316495928bhh2", "int_rear_p"],
+    ["xtra_1787316515476ngjm", "int_passenger"],
+    // Preserve the three displaced detail shots as the same three extras.
+    ["trd_rr", "xtra_1787316495928bhh2"],
+    ["whl_rf", "xtra_1787316507812ym4c"],
+    ["trd_rf", "xtra_1787316515476ngjm"],
+  ] as const,
+};
+const BC23139_PHOTO_LINK_REPAIR = {
+  repairKey: "bc23139-intake-photo-link-v1",
+  vin: "3TMCZ5AN7PM564911",
+  stock: "BC23139",
+  miles: "98903",
+  targetIntakeId: "in17872487015441szr",
+  sourceIntakeId: "in1787241427970g3w6",
+  quoteId: "q17872414337397s4t",
+  committedBy: "Brandon",
+  expectedPhotos: 32,
+  expectedWalk: 29,
+  expectedDamage: 3,
+} as const;
+
+function canonicalPhotoId(quoteId: string, slot: string): string {
+  return slot.startsWith("xtra_")
+    ? `${quoteId}_x${slot.slice("xtra_".length)}`
+    : `${quoteId}_${slot}`;
+}
 
 let srcPool: pg.Pool | null = null;
 function src(): pg.Pool {
@@ -364,6 +419,331 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
             newStock,
             quoteUpdated,
             immutableSnapshotsUntouched: immutableSnapshots,
+          });
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
+      }
+
+      if (phase === "repair_a23137_photo_slots") {
+        const repair = A23137_PHOTO_REPAIR;
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [repair.repairKey],
+          );
+
+          const priorAudit = await client.query(
+            `SELECT 1
+             FROM audit_log
+             WHERE action = 'photo_slots_corrected'
+               AND details->>'repairKey' = $1
+             LIMIT 1`,
+            [repair.repairKey],
+          );
+          if (priorAudit.rowCount) {
+            await client.query("COMMIT");
+            return res.json({
+              phase,
+              repairKey: repair.repairKey,
+              alreadyApplied: true,
+              moved: 0,
+            });
+          }
+
+          const intake = await client.query(
+            `SELECT id, vin, stock, quote_id
+             FROM intakes
+             WHERE id = $1
+               AND UPPER(vin) = $2
+               AND UPPER(stock) = $3
+               AND quote_id = $4
+             FOR UPDATE`,
+            [repair.intakeId, repair.vin, repair.stock, repair.quoteId],
+          );
+          if (intake.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "A23137 intake identity no longer matches; repair refused",
+            });
+          }
+
+          const sourceIds = repair.moves.map(([fromSlot]) =>
+            canonicalPhotoId(repair.quoteId, fromSlot),
+          );
+          const targetIds = repair.moves.map(([, toSlot]) =>
+            canonicalPhotoId(repair.quoteId, toSlot),
+          );
+          if (
+            new Set(sourceIds).size !== repair.moves.length ||
+            new Set(targetIds).size !== repair.moves.length ||
+            sourceIds.some((id) => !targetIds.includes(id))
+          ) {
+            throw new Error("A23137 repair map must be a closed permutation of unique photo IDs");
+          }
+
+          const lockedPhotos = await client.query(
+            `SELECT id, slot, role
+             FROM photos
+             WHERE quote_id = $1 AND id = ANY($2::text[])
+             FOR UPDATE`,
+            [repair.quoteId, sourceIds],
+          );
+          if (lockedPhotos.rowCount !== repair.moves.length) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: `Expected ${repair.moves.length} A23137 source photos, found ${lockedPhotos.rowCount}`,
+            });
+          }
+          const byId = new Map(
+            lockedPhotos.rows.map((photo) => [String(photo.id), photo]),
+          );
+          for (const [fromSlot] of repair.moves) {
+            const sourceId = canonicalPhotoId(repair.quoteId, fromSlot);
+            const photo = byId.get(sourceId);
+            if (photo?.slot !== fromSlot || photo?.role !== "walk") {
+              await client.query("ROLLBACK");
+              return res.status(409).json({
+                message: `A23137 source ${fromSlot} no longer matches the audited repair plan`,
+              });
+            }
+          }
+
+          const temporaryIds: string[] = [];
+          for (let index = 0; index < repair.moves.length; index += 1) {
+            const [fromSlot] = repair.moves[index];
+            const sourceId = canonicalPhotoId(repair.quoteId, fromSlot);
+            const temporaryId = `__photo_repair__${repair.repairKey}__${index}`;
+            temporaryIds.push(temporaryId);
+            await client.query(
+              `UPDATE photos SET id = $1 WHERE quote_id = $2 AND id = $3`,
+              [temporaryId, repair.quoteId, sourceId],
+            );
+          }
+
+          for (let index = 0; index < repair.moves.length; index += 1) {
+            const [, toSlot] = repair.moves[index];
+            await client.query(
+              `UPDATE photos
+               SET id = $1, slot = $2
+               WHERE quote_id = $3 AND id = $4`,
+              [
+                canonicalPhotoId(repair.quoteId, toSlot),
+                toSlot,
+                repair.quoteId,
+                temporaryIds[index],
+              ],
+            );
+          }
+
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('photo_slots_corrected', 'replit-agent', 'system@truckranch.com', 'Replit Agent',
+                $1::jsonb)`,
+            [JSON.stringify({
+              repairKey: repair.repairKey,
+              stock: repair.stock,
+              vin: repair.vin,
+              intakeId: repair.intakeId,
+              quoteId: repair.quoteId,
+              moved: repair.moves.length,
+              imageBytesChanged: false,
+              timestampsChanged: false,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            repairKey: repair.repairKey,
+            alreadyApplied: false,
+            moved: repair.moves.length,
+            imageBytesChanged: false,
+            timestampsChanged: false,
+          });
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
+      }
+
+      if (phase === "repair_bc23139_photo_link") {
+        const repair = BC23139_PHOTO_LINK_REPAIR;
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [repair.repairKey],
+          );
+
+          const priorAudit = await client.query(
+            `SELECT 1
+             FROM audit_log
+             WHERE action = 'intake_photo_link_repaired'
+               AND details->>'repairKey' = $1
+             LIMIT 1`,
+            [repair.repairKey],
+          );
+          if (priorAudit.rowCount) {
+            await client.query("COMMIT");
+            return res.json({
+              phase,
+              repairKey: repair.repairKey,
+              alreadyApplied: true,
+              quoteId: repair.quoteId,
+              photos: repair.expectedPhotos,
+            });
+          }
+
+          const target = await client.query(
+            `SELECT id, vin, stock, miles, quote_id, committed_by, completed_at
+             FROM intakes
+             WHERE id = $1
+               AND UPPER(TRIM(vin)) = $2
+               AND UPPER(TRIM(stock)) = $3
+               AND TRIM(miles) = $4
+               AND committed_by = $5
+               AND completed_at IS NOT NULL
+             FOR UPDATE`,
+            [
+              repair.targetIntakeId,
+              repair.vin,
+              repair.stock,
+              repair.miles,
+              repair.committedBy,
+            ],
+          );
+          if (target.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23139 target intake identity no longer matches; repair refused",
+            });
+          }
+          const currentQuoteId = String(target.rows[0].quote_id || "");
+          if (currentQuoteId && currentQuoteId !== repair.quoteId) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23139 target intake already links to a different quote; repair refused",
+            });
+          }
+
+          const source = await client.query(
+            `SELECT id
+             FROM intakes
+             WHERE id = $1
+               AND UPPER(TRIM(vin)) = $2
+               AND UPPER(TRIM(stock)) = $3
+               AND TRIM(miles) = $4
+               AND quote_id = $5
+               AND committed_by = $6
+               AND completed_at IS NOT NULL
+             FOR UPDATE`,
+            [
+              repair.sourceIntakeId,
+              repair.vin,
+              repair.stock,
+              repair.miles,
+              repair.quoteId,
+              repair.committedBy,
+            ],
+          );
+          if (source.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23139 source intake/quote identity no longer matches; repair refused",
+            });
+          }
+
+          const quote = await client.query(
+            `SELECT id
+             FROM quotes
+             WHERE id = $1
+               AND UPPER(COALESCE(data->>'vin', '')) = $2
+               AND UPPER(COALESCE(data->>'stock', '')) = $3
+             FOR UPDATE`,
+            [repair.quoteId, repair.vin, repair.stock],
+          );
+          if (quote.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23139 quote identity no longer matches; repair refused",
+            });
+          }
+
+          const photoStats = await client.query(
+            `SELECT COUNT(*)::int AS total,
+                    COUNT(*) FILTER (WHERE role = 'walk')::int AS walk,
+                    COUNT(*) FILTER (WHERE role = 'damage')::int AS damage,
+                    COUNT(*) FILTER (WHERE data IS NULL OR OCTET_LENGTH(data) = 0)::int AS empty
+             FROM photos
+             WHERE quote_id = $1`,
+            [repair.quoteId],
+          );
+          const stats = photoStats.rows[0];
+          if (
+            Number(stats?.total) !== repair.expectedPhotos
+            || Number(stats?.walk) !== repair.expectedWalk
+            || Number(stats?.damage) !== repair.expectedDamage
+            || Number(stats?.empty) !== 0
+          ) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23139 photo manifest changed; repair refused",
+            });
+          }
+
+          if (!currentQuoteId) {
+            const linked = await client.query(
+              `UPDATE intakes
+               SET quote_id = $1, updated_at = NOW()
+               WHERE id = $2 AND quote_id IS NULL`,
+              [repair.quoteId, repair.targetIntakeId],
+            );
+            if (linked.rowCount !== 1) {
+              await client.query("ROLLBACK");
+              return res.status(409).json({
+                message: "BC23139 target intake changed while repair was running; repair refused",
+              });
+            }
+          }
+
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('intake_photo_link_repaired', 'replit-agent', 'system@truckranch.com', 'Replit Agent',
+                $1::jsonb)`,
+            [JSON.stringify({
+              repairKey: repair.repairKey,
+              stock: repair.stock,
+              vin: repair.vin,
+              targetIntakeId: repair.targetIntakeId,
+              sourceIntakeId: repair.sourceIntakeId,
+              quoteId: repair.quoteId,
+              photos: repair.expectedPhotos,
+              walkPhotos: repair.expectedWalk,
+              damagePhotos: repair.expectedDamage,
+              imageBytesChanged: false,
+              sourceLinkChanged: false,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            repairKey: repair.repairKey,
+            alreadyApplied: currentQuoteId === repair.quoteId,
+            quoteId: repair.quoteId,
+            photos: repair.expectedPhotos,
+            imageBytesChanged: false,
           });
         } catch (e) {
           await client.query("ROLLBACK").catch(() => {});

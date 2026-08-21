@@ -8,10 +8,6 @@ import PhotoQualityReview from './PhotoQualityReview';
 import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
 
 const MAX = 1600;
-// iOS (all iPhone/iPad browsers, incl. iPadOS Safari that masquerades as Mac).
-const IS_IOS = typeof navigator !== 'undefined' &&
-  (/iP(hone|ad|od)/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 // EXIF-aware decode + downscale — portrait/landscape uploads come out upright.
 function dataUrlImage(dataUrl, max = MAX, quality = 0.8, zoom = 1) {
   return orientedJpegDataUrl(dataUrl, max, quality, zoom);
@@ -26,9 +22,17 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // are retried automatically (every few seconds + when the network returns),
   // so a weak-signal moment in the shop can't quietly lose pictures.
   const [pendingCount, setPendingCount] = useState(0);
-  const queueRef = useRef([]); // [{ id, slotKey, dataUrl, prev }]
+  const queueRef = useRef([]); // newest failed job per photo id
   const retryBusyRef = useRef(false);
   const closeWarnRef = useRef(0);
+  const latestCaptureRef = useRef(new Map()); // photo id -> newest capture key
+  const uploadChainsRef = useRef(new Map()); // photo id -> serialized upload promise
+  const captureClockRef = useRef(0);
+  const nextCaptureTs = () => {
+    const ts = Math.max(Date.now(), captureClockRef.current + 1);
+    captureClockRef.current = ts;
+    return ts;
+  };
   const takenRef = useRef({}); // latest taken map for async callbacks
   useEffect(() => { takenRef.current = taken; }, [taken]);
   const interactedRef = useRef(false); // user captured/picked a slot already
@@ -45,7 +49,12 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       pendingJobs(quoteId).then((jobs) => {
         if (!live) return;
         for (const job of jobs) {
-          if (!queueRef.current.some((j) => j.id === job.id)) queueRef.current.push(job);
+          latestCaptureRef.current.set(job.id, job.key);
+          captureClockRef.current = Math.max(
+            captureClockRef.current,
+            Number(job.captureTs || job.addedAt || 0),
+          );
+          if (!queueRef.current.some((j) => j.key === job.key)) queueRef.current.push(job);
         }
         if (queueRef.current.length) setPendingCount(queueRef.current.length);
       });
@@ -95,40 +104,88 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const [landscape, setLandscape] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(orientation: landscape)').matches);
   const [zoomCaps, setZoomCaps] = useState(null);
   const videoRef = useRef(null); const streamRef = useRef(null); const trackRef = useRef(null);
+  const cameraStartRef = useRef(null);
+  const cameraEpochRef = useRef(0);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraStarting, setCameraStarting] = useState(false);
   const fileRef = useRef(null); const canvasRef = useRef(null);
   const gravRef = useRef(null); // last gravity reading {x,y,t} for the rotation-lock fix
   const motionOnRef = useRef(false);
+  const motionRequestRef = useRef(null);
+  const motionPermissionSettledRef = useRef(false);
+  const [accessPrepared, setAccessPrepared] = useState(false);
   // Advisory quality review: null = no pending review; otherwise { dataUrl, warnings, action }
   // where action is the deferred save function to call on Keep.
   const [qualityReview, setQualityReview] = useState(null);
   const qualityBusyRef = useRef(false);
   const qualityDecisionRef = useRef(false);
+  // One shutter press owns one immutable guided slot until the image has been
+  // normalized, persisted, and reflected in state. This prevents rapid taps
+  // from reusing the same render's slot before React advances the sequence.
+  const shotBusyRef = useRef(false);
+  const [shotBusy, setShotBusy] = useState(false);
+  const releaseShot = () => {
+    shotBusyRef.current = false;
+    setShotBusy(false);
+  };
   const progress = walkProgress(WALK_SLOTS, taken, skipped);
-  const slot = WALK_SLOTS[current];
+  const slot = WALK_SLOTS[current] || WALK_SLOTS[0];
   const zooms = useMemo(() => [0.5, 1, 2, 3, 5], []);
 
   const stopCamera = useCallback(() => {
+    cameraEpochRef.current += 1;
     if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    trackRef.current = null;
+    setCameraReady(false);
   }, []);
   const startCamera = useCallback(async () => {
-    if (!navigator.mediaDevices?.getUserMedia) return;
-    let cancelled = false;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }, audio: false });
-      if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
-      streamRef.current = stream; trackRef.current = stream.getVideoTracks()[0];
-      if (videoRef.current) videoRef.current.srcObject = stream;
-      const caps = trackRef.current.getCapabilities ? trackRef.current.getCapabilities() : {};
-      setZoomCaps(caps.zoom || null);
-      if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
-    } catch { if (!cancelled) setError('Camera unavailable. Choose a photo from your device instead.'); }
-    return () => { cancelled = true; };
+    if (streamRef.current) {
+      setCameraReady(true);
+      return true;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Live camera is unavailable. Choose a photo from your device instead.');
+      return false;
+    }
+    if (cameraStartRef.current) return cameraStartRef.current;
+    const epoch = cameraEpochRef.current;
+    const request = (async () => {
+      setCameraStarting(true);
+      setError('');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }, audio: false });
+        if (epoch !== cameraEpochRef.current) {
+          stream.getTracks().forEach((t) => t.stop());
+          return false;
+        }
+        streamRef.current = stream;
+        trackRef.current = stream.getVideoTracks()[0];
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        const caps = trackRef.current.getCapabilities ? trackRef.current.getCapabilities() : {};
+        setZoomCaps(caps.zoom || null);
+        if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
+        setCameraReady(true);
+        return true;
+      } catch (e) {
+        if (epoch === cameraEpochRef.current) {
+          setCameraReady(false);
+          setError(e?.name === 'NotAllowedError'
+            ? 'Allow camera access to use the live camera, or choose a photo from your device.'
+            : 'Camera unavailable. Choose a photo from your device instead.');
+        }
+        return false;
+      } finally {
+        if (epoch === cameraEpochRef.current) setCameraStarting(false);
+        cameraStartRef.current = null;
+      }
+    })();
+    cameraStartRef.current = request;
+    return request;
   }, []);
   useEffect(() => {
-    let cancel;
-    Promise.resolve(startCamera()).then((cleanup) => { cancel = cleanup; });
-    return () => { if (cancel) cancel(); stopCamera(); };
+    void startCamera();
+    return stopCamera;
   }, [startCamera, stopCamera]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   // Gravity readings power the old Body Quoter's rotation-lock fix: if the
@@ -141,18 +198,30 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // Resolves once the listener is attached (or permission is denied), so a
   // caller can wait for gravity to start flowing before it matters.
   const enableMotion = useCallback(() => {
-    if (motionOnRef.current) return Promise.resolve();
+    if (motionOnRef.current || motionPermissionSettledRef.current) return Promise.resolve();
+    if (motionRequestRef.current) return motionRequestRef.current;
     const attach = () => { motionOnRef.current = true; window.addEventListener('devicemotion', onMotion); };
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      return DeviceMotionEvent.requestPermission().then((r) => { if (r === 'granted') attach(); }).catch(() => {});
-    }
-    if (typeof DeviceMotionEvent !== 'undefined') attach();
-    return Promise.resolve();
+    const request = (async () => {
+      try {
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+          const result = await DeviceMotionEvent.requestPermission();
+          if (result === 'granted') attach();
+        } else if (typeof DeviceMotionEvent !== 'undefined') {
+          attach();
+        }
+      } catch {
+        // Denial is allowed: the camera still works, just without gravity data.
+      } finally {
+        motionPermissionSettledRef.current = true;
+        motionRequestRef.current = null;
+      }
+    })();
+    motionRequestRef.current = request;
+    return request;
   }, [onMotion]);
   useEffect(() => {
-    enableMotion();
     return () => { if (motionOnRef.current) window.removeEventListener('devicemotion', onMotion); };
-  }, [enableMotion, onMotion]);
+  }, [onMotion]);
   useEffect(() => {
     const mq = window.matchMedia?.('(orientation: landscape)');
     if (!mq) return;
@@ -172,35 +241,73 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // instead of dropping it. Permanent rejections (committed / too large) are
   // surfaced and the slot is rolled back so the tech can react.
   const uploadPhoto = useCallback(async (job, { fromRetry = false } = {}) => {
+    const isLatest = () => latestCaptureRef.current.get(job.id) === job.key;
     try {
-      await api.putQuotePhoto({ id: job.id, quoteId, slot: job.slotKey, role: 'walk', dataUrl: job.dataUrl });
-      queueRef.current = queueRef.current.filter((j) => j.id !== job.id);
+      await api.putQuotePhoto({
+        id: job.id,
+        quoteId,
+        slot: job.slotKey,
+        role: 'walk',
+        dataUrl: job.dataUrl,
+        captureTs: job.captureTs,
+      });
+      queueRef.current = queueRef.current.filter((j) => j.key !== job.key);
       setPendingCount(queueRef.current.length);
       // Clear only THIS capture's on-disk copy: a retake of the same slot may
       // already have persisted a newer record, which must stay queued.
       removeJob(job.key);
+      if (isLatest()) latestCaptureRef.current.delete(job.id);
       return true;
     } catch (e) {
       if (e.status === 413 || e.status === 409 || e.status === 403) {
         // Permanent — retrying won't help. Restore what the slot showed before
         // this shot (a prior server photo stays visible; an empty slot empties).
-        queueRef.current = queueRef.current.filter((j) => j.id !== job.id);
+        queueRef.current = queueRef.current.filter((j) => j.key !== job.key);
         setPendingCount(queueRef.current.length);
         removeJob(job.key); // retrying can never succeed — drop the on-disk copy too
-        setTaken((p) => ({ ...p, [job.slotKey]: !!job.prev }));
-        setPhotos((p) => ({ ...p, [job.slotKey]: job.prev || undefined }));
-        showToast?.(e.status === 413 ? 'Photo is too large — try again closer or with less zoom.' : 'This quote is locked and cannot accept photos.');
+        if (isLatest()) {
+          latestCaptureRef.current.delete(job.id);
+          setTaken((p) => {
+            const restored = { ...p, [job.slotKey]: !!job.prev };
+            takenRef.current = restored;
+            return restored;
+          });
+          setPhotos((p) => ({ ...p, [job.slotKey]: job.prev || undefined }));
+          showToast?.(e.status === 413 ? 'Photo is too large — try again closer or with less zoom.' : 'This quote is locked and cannot accept photos.');
+        }
         return false;
       }
       // Transient (offline / server blip / signed out): keep it queued —
       // in memory AND on disk — for auto-retry. A 401 clears itself once the
       // tech signs back in, so the shot must survive until then.
-      if (!queueRef.current.some((j) => j.id === job.id)) queueRef.current.push(job);
+      if (isLatest() && !queueRef.current.some((j) => j.key === job.key)) {
+        queueRef.current.push(job);
+      } else if (!isLatest()) {
+        removeJob(job.key);
+      }
       setPendingCount(queueRef.current.length);
-      if (!fromRetry) showToast?.(e.status === 401 ? 'Signed out — photo saved, it will send after you sign in again.' : 'Weak signal — photo saved on screen, sending in background…');
+      if (!fromRetry && isLatest()) showToast?.(e.status === 401 ? 'Signed out — photo saved, it will send after you sign in again.' : 'Weak signal — photo saved on screen, sending in background…');
       return false;
     }
   }, [quoteId, showToast]);
+
+  // Different guided slots upload in parallel, but retakes of the same stable
+  // photo id are serialized in capture order. Combined with captureTs on the
+  // server, this also stays safe if the app closes and the global flusher runs.
+  const scheduleUpload = useCallback((job, options) => {
+    const prior = uploadChainsRef.current.get(job.id) || Promise.resolve();
+    let tracked;
+    tracked = prior
+      .catch(() => {})
+      .then(() => uploadPhoto(job, options))
+      .finally(() => {
+        if (uploadChainsRef.current.get(job.id) === tracked) {
+          uploadChainsRef.current.delete(job.id);
+        }
+      });
+    uploadChainsRef.current.set(job.id, tracked);
+    return tracked;
+  }, [uploadPhoto]);
 
   // Auto-retry loop: every 5s while shots are waiting, plus immediately when
   // the network comes back.
@@ -210,15 +317,14 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       retryBusyRef.current = true;
       try {
         for (const job of [...queueRef.current]) {
-           
-          await uploadPhoto(job, { fromRetry: true });
+          await scheduleUpload(job, { fromRetry: true });
         }
       } finally { retryBusyRef.current = false; }
     };
     const t = setInterval(flush, 5000);
     window.addEventListener('online', flush);
     return () => { clearInterval(t); window.removeEventListener('online', flush); };
-  }, [uploadPhoto]);
+  }, [scheduleUpload]);
 
   // Extra photos (after-the-fact shots on a saved truck): each capture gets a
   // fresh timestamped slot/id, so nothing existing can ever be overwritten.
@@ -230,26 +336,30 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const tag = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     const slotKey = `xtra_${tag}`;
     const id = `${quoteId}_x${tag}`.slice(0, 60);
+    const captureTs = nextCaptureTs();
     // Same durable path as guided shots: persist to disk before the upload
     // attempt so a force-close or dead battery can't lose an extra photo.
     const key = newJobKey(id);
-    await persistJob({ key, id, quoteId, slotKey, role: 'walk', dataUrl });
+    const job = { key, id, quoteId, slotKey, role: 'walk', dataUrl, captureTs };
+    latestCaptureRef.current.set(id, key);
+    await persistJob(job);
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
-    await uploadPhoto({ key, id, slotKey, dataUrl });
+    void scheduleUpload(job);
   };
   const extraShots = Object.keys(photos).filter((k) => k.startsWith('xtra_') && photos[k]);
 
-  const saveGuided = async (dataUrl) => {
+  const saveGuided = async (dataUrl, targetSlot) => {
     if (committed) return;
+    if (!targetSlot) throw new Error('No guided photo slot was reserved');
     if (addOnly) {
       // Never overwrite a saved photo: wait until we know which spots the
       // server already has, and refuse occupied ones.
       if (!serverLoaded) { showToast?.('Checking which photos exist — try again in a second.'); return; }
-      if (taken[slot.key]) { showToast?.('That spot already has a photo — saved photos can’t be replaced.'); return; }
+      if (takenRef.current[targetSlot.key]) { showToast?.('That spot already has a photo — saved photos can’t be replaced.'); return; }
     }
     const thumb = await dataUrlImage(dataUrl, 340, 0.7, 1);
-    const id = `${quoteId}_${slot.key}`.slice(0, 60);
-    const slotKey = slot.key;
+    const id = `${quoteId}_${targetSlot.key}`.slice(0, 60);
+    const slotKey = targetSlot.key;
     const prev = photos[slotKey]; // restored if the upload is permanently rejected
     // Optimistic: show the shot and advance right away; the upload (or its
     // retry queue) catches up in the background.
@@ -261,16 +371,22 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     // so an in-flight older upload for this slot can only ever delete its
     // own record, never this one.
     const key = newJobKey(id);
-    await persistJob({ key, id, quoteId, slotKey, role: 'walk', dataUrl });
+    const captureTs = nextCaptureTs();
+    const job = { key, id, quoteId, slotKey, role: 'walk', dataUrl, captureTs, prev };
+    latestCaptureRef.current.set(id, key);
+    await persistJob(job);
     // This shot supersedes any earlier queued capture of the same slot —
     // purge them (disk + memory) so a stale retry can't overwrite it.
     await removeJobsForPhoto(id, key);
     queueRef.current = queueRef.current.filter((j) => j.id !== id);
     setPendingCount(queueRef.current.length);
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
-    setTaken((p) => ({ ...p, [slotKey]: true }));
+    const nextTaken = { ...takenRef.current, [slotKey]: true };
+    takenRef.current = nextTaken;
+    setTaken(nextTaken);
     setSkipped((p) => ({ ...p, [slotKey]: false }));
-    const next = nextUntakenSlot(WALK_SLOTS, { ...taken, [slotKey]: true }, current + 1);
+    const targetIndex = WALK_SLOTS.findIndex((candidate) => candidate.key === slotKey);
+    const next = nextUntakenSlot(WALK_SLOTS, nextTaken, targetIndex + 1);
     if (next >= 0) setCurrent(next);
     else {
       // All 24 guided spots are done — keep the camera rolling in extra mode
@@ -279,7 +395,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       setMode('extra');
       showToast?.('All 24 angles captured — keep taking as many photos as you need. Tap ✕ when finished.');
     }
-    await uploadPhoto({ key, id, slotKey, dataUrl, prev });
+    void scheduleUpload(job);
   };
 
   // Advisory quality gate: run a lightweight local analysis on the captured
@@ -287,13 +403,13 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // If analysis throws or returns no warnings, the action runs immediately.
   // The exact original dataUrl is passed through unchanged on Keep.
   const maybeReview = async (dataUrl, action) => {
-    if (qualityBusyRef.current) return;
+    if (qualityBusyRef.current) return false;
     qualityBusyRef.current = true;
     try {
       const warnings = await analyzeDataUrl(dataUrl);
       if (warnings.length > 0) {
         setQualityReview({ dataUrl, warnings, action });
-        return;
+        return true;
       }
     } catch {
       // Fail open — never block saving.
@@ -301,6 +417,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       qualityBusyRef.current = false;
     }
     await action(dataUrl);
+    return false;
   };
 
   // Leaving with unsent shots would lose them — hold the door once.
@@ -312,41 +429,25 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     }
     onClose();
   };
-  // Capture logic ported verbatim from the old Body Quoter app: crop to the
-  // visible (object-fit: cover) region, apply digital-zoom crop, and rotate
-  // upright only in the rotation-lock case (portrait feed, phone sideways).
+  // Crop exactly the frame the browser presents in the live <video>. Modern
+  // mobile browsers already apply camera/sensor orientation before exposing a
+  // MediaStream frame; applying a second gravity-based transform here rotated
+  // otherwise-correct iPhone and Android captures by 90°/180°.
   const capture = async () => {
-    interactedRef.current = true; // preload must not steer the camera anymore
-    setFlash(true); setTimeout(() => setFlash(false), 160);
     const v = videoRef.current;
-    if (!v?.videoWidth) { fileRef.current?.click(); return; }
-    // Rotation-lock fix needs a gravity reading. If none has arrived yet
-    // (shutter can be the session's very first tap) and the feed is portrait,
-    // finish the permission handshake and give the sensor a beat to report —
-    // bounded so the shutter never feels stuck. Once readings flow, this
-    // costs nothing on later shots.
-    if (v.videoHeight > v.videoWidth && !(gravRef.current && (Date.now() - gravRef.current.t) < 1500)) {
-      await enableMotion(); // iOS grants motion access only from a user gesture
-      for (let i = 0; i < 4 && !gravRef.current; i += 1) await new Promise((r) => setTimeout(r, 60));
-    }
-    let rot = 0;
-    const gv = gravRef.current;
-    const fresh = gv && (Date.now() - gv.t) < 1500;
-    if (fresh && v.videoHeight > v.videoWidth) {
-      // iOS and Android report accelerationIncludingGravity with opposite signs.
-      // Android convention (verified against W3C spec + empirical Chrome data):
-      //   portrait upright    → y ≈ +9.8            → no rotation (gy > 0)
-      //   landscape top→right → x ≈ -9.8            → rot = +90 (CW to correct)
-      //   landscape top→left  → x ≈ +9.8            → rot = -90 (CCW to correct)
-      //   upside-down         → y ≈ -9.8            → rot = 180
-      // iOS flips both axes vs Android (y ≈ -9.8 upright, x ≈ +9.8 landscape-right).
-      // S normalises both platforms to the Android sign convention so the
-      // same threshold/direction logic works for all devices.
-      const S = IS_IOS ? -1 : 1;
-      const gx = gv.x * S, gy = gv.y * S;
-      if (Math.abs(gx) > Math.abs(gy) && Math.abs(gx) > 4) rot = gx > 0 ? -90 : 90;
-      else if (Math.abs(gy) > Math.abs(gx) && gy < -4) rot = 180;
-    }
+    if (!accessPrepared) return;
+    // Never let the first shutter press become a hidden fallback capture: the
+    // permission gate must be resolved before any photo can be taken.
+    if (!v?.videoWidth) { await startCamera(); return; }
+    if (shotBusyRef.current) return;
+    shotBusyRef.current = true;
+    setShotBusy(true);
+    const captureMode = mode;
+    const targetSlot = captureMode === 'guided' ? slot : null;
+    if (targetSlot) interactedRef.current = true; // preload must not steer the camera anymore
+    setFlash(true); setTimeout(() => setFlash(false), 160);
+    let reviewPending = false;
+    try {
     let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
     const ew = v.clientWidth, eh = v.clientHeight;
     if (ew > 0 && eh > 0) {
@@ -362,53 +463,70 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const canvas = canvasRef.current || document.createElement('canvas');
     const r = Math.min(1, MAX / Math.max(sw, sh));
     const w = Math.max(1, Math.round(sw * r)); const h = Math.max(1, Math.round(sh * r));
-    const swap = Math.abs(rot) === 90;
-    canvas.width = swap ? h : w; canvas.height = swap ? w : h;
+    canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d');
-    ctx.save();
-    if (rot) { ctx.translate(canvas.width / 2, canvas.height / 2); ctx.rotate(rot * Math.PI / 180); ctx.drawImage(v, sx, sy, sw, sh, -w / 2, -h / 2, w, h); }
-    else ctx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
-    ctx.restore();
+    ctx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-    if (mode === 'damage') {
+    if (captureMode === 'damage') {
       if (!committed) {
-        await maybeReview(dataUrl, async (url) => {
+        reviewPending = await maybeReview(dataUrl, async (url) => {
           damageCloseUpRef.current = url;
           setMode('damage_wide');
         });
       }
-    } else if (mode === 'damage_wide') {
+    } else if (captureMode === 'damage_wide') {
       if (!committed) {
         const closeUp = damageCloseUpRef.current;
-        await maybeReview(dataUrl, async (url) => {
+        reviewPending = await maybeReview(dataUrl, async (url) => {
           damageCloseUpRef.current = null;
           setMode('guided');
           onDamageCapture?.(closeUp, url);
         });
       }
-    } else if (mode === 'extra') await maybeReview(dataUrl, saveExtra);
-    else await maybeReview(dataUrl, saveGuided);
+    } else if (captureMode === 'extra') reviewPending = await maybeReview(dataUrl, saveExtra);
+    else reviewPending = await maybeReview(dataUrl, (url) => saveGuided(url, targetSlot));
+    } catch (err) {
+      showToast?.(err instanceof Error ? err.message : 'Could not save that photo');
+    } finally {
+      if (!reviewPending) releaseShot();
+    }
   };
   const onFile = async (event) => {
-    const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
-    const reader = new FileReader(); reader.onload = async () => {
+    const file = event.target.files?.[0]; event.target.value = ''; if (!file || shotBusyRef.current) return;
+    shotBusyRef.current = true;
+    setShotBusy(true);
+    const captureMode = mode;
+    const targetSlot = captureMode === 'guided' ? slot : null;
+    if (targetSlot) interactedRef.current = true;
+    let reviewPending = false;
+    try {
       if (committed) return;
-      const normalized = await dataUrlImage(reader.result, MAX, 0.8, zoomRef.current);
-      if (mode === 'damage') {
-        await maybeReview(normalized, async (url) => {
+      const source = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('Could not read that photo'));
+        reader.readAsDataURL(file);
+      });
+      const normalized = await dataUrlImage(source, MAX, 0.8, zoomRef.current);
+      if (captureMode === 'damage') {
+        reviewPending = await maybeReview(normalized, async (url) => {
           damageCloseUpRef.current = url;
           setMode('damage_wide');
         });
-      } else if (mode === 'damage_wide') {
+      } else if (captureMode === 'damage_wide') {
         const closeUp = damageCloseUpRef.current;
-        await maybeReview(normalized, async (url) => {
+        reviewPending = await maybeReview(normalized, async (url) => {
           damageCloseUpRef.current = null;
           setMode('guided');
           onDamageCapture?.(closeUp, url);
         });
-      } else if (mode === 'extra') await maybeReview(normalized, saveExtra);
-      else await maybeReview(normalized, saveGuided);
-    }; reader.readAsDataURL(file);
+      } else if (captureMode === 'extra') reviewPending = await maybeReview(normalized, saveExtra);
+      else reviewPending = await maybeReview(normalized, (url) => saveGuided(url, targetSlot));
+    } catch (err) {
+      showToast?.(err instanceof Error ? err.message : 'Could not read that photo');
+    } finally {
+      if (!reviewPending) releaseShot();
+    }
   };
   // Holds the close-up dataUrl while the camera waits for the matching wide shot.
   const damageCloseUpRef = useRef(null);
@@ -429,14 +547,15 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       setMode('guided');
     } else {
       setSkipped((p) => ({ ...p, [slot.key]: true }));
-      setCurrent(nextUntakenSlot(WALK_SLOTS, taken, current + 1) || current);
+      const next = nextUntakenSlot(WALK_SLOTS, taken, current + 1);
+      if (next >= 0) setCurrent(next);
     }
   };
   // Translucent dark camera-chrome buttons (never the app's white .btn styles)
   const chromeBtn = { border: '1px solid rgba(255,255,255,.28)', borderRadius: 20, background: 'rgba(28,26,23,.65)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: 1, padding: '10px 14px' };
   const roundBtn = { ...chromeBtn, borderRadius: '50%', width: 42, height: 42, padding: 0, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(35,32,26,.72)', border: '2px solid rgba(255,255,255,.5)' };
   // Shutter styled like the old Body Quoter: solid white with a translucent ring.
-  const shutterBtn = <button onClick={capture} aria-label="Take photo" style={{ width: 78, height: 78, borderRadius: '50%', background: '#fff', backgroundClip: 'padding-box', border: '5px solid rgba(255,255,255,.4)', flex: 'none', padding: 0 }} />;
+  const shutterBtn = <button onClick={capture} disabled={shotBusy} aria-busy={shotBusy} aria-label="Take photo" style={{ width: 78, height: 78, borderRadius: '50%', background: '#fff', backgroundClip: 'padding-box', border: '5px solid rgba(255,255,255,.4)', flex: 'none', padding: 0, opacity: shotBusy ? 0.55 : 1 }} />;
   // Latest shot thumbnail + count badge (old Body Quoter's gallery button) — opens the shot list.
   const lastShot = [...WALK_SLOTS].reverse().map((s) => photos[s.key]?.thumb).find(Boolean);
   const galleryBtn = (
@@ -471,19 +590,39 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const frame = (
     <div style={{ position: 'relative', flex: 'none', width: '100%', maxWidth: landscape ? 'calc((100dvh) * 4 / 3)' : '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807', alignSelf: 'center' }}>
       <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
-      {(mode === 'damage' || mode === 'damage_wide') && <div style={{ position: 'absolute', top: 10, left: 12, right: 12, textAlign: 'center', textShadow: '0 1px 4px rgba(0,0,0,.8)', pointerEvents: 'none', fontSize: 15, color: '#f0e6d5' }}>{mode === 'damage_wide' ? 'WIDE SHOT — STEP BACK' : 'DAMAGE CLOSE-UP'}</div>}
+      {(!cameraReady || !accessPrepared) && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.76)', textAlign: 'center' }}>
+          <div style={{ maxWidth: 270 }}>
+            <div style={{ color: '#fff', fontWeight: 700, fontSize: 15 }}>{cameraStarting ? 'REQUESTING CAMERA ACCESS…' : 'ALLOW CAMERA ACCESS BEFORE TAKING PHOTOS'}</div>
+            <button
+              className="btn btn-outline"
+              style={{ width: '100%', marginTop: 12, color: '#fff', borderColor: '#fff' }}
+              disabled={cameraStarting}
+              onClick={async () => {
+                const cameraOk = await startCamera();
+                await enableMotion();
+                if (cameraOk) setAccessPrepared(true);
+              }}
+            >
+              {cameraStarting ? 'OPENING CAMERA…' : 'ENABLE CAMERA'}
+            </button>
+            <button
+              className="btn btn-outline"
+              style={{ width: '100%', marginTop: 8, color: '#d9d2c4', borderColor: '#5c554b' }}
+              onClick={() => fileRef.current?.click()}
+            >
+              CHOOSE PHOTO INSTEAD
+            </button>
+          </div>
+        </div>
+      )}
       {error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
       {!landscape && !error && <div style={{ position: 'absolute', bottom: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ pointerEvents: 'auto' }}>{zoomDial(false)}</div></div>}
     </div>
   );
   return (
-    // onPointerDown: iOS only grants motion-sensor access from a user gesture,
-    // and without it the rotation-lock fix has no gravity data — the FIRST tap
-    // anywhere in the camera (not just the shutter) asks for permission, so
-    // by the time the shutter fires the reading is already flowing. Without
-    // this, the first shot of a session (or every shot, if permission was
-    // asked mid-capture and dismissed) saved sideways when the phone was held
-    // landscape with the iPhone orientation lock on.
+    // Keep the explicit motion-permission handshake requested by the shop, but
+    // never use noisy/stale gravity data to rotate photo pixels.
     <div onPointerDown={enableMotion} style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
       {qualityReview && (
         <PhotoQualityReview
@@ -496,15 +635,21 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
             setQualityReview(null);
             try {
               await action(url);
+            } catch (err) {
+              showToast?.(err instanceof Error ? err.message : 'Could not save that photo');
             } finally {
               qualityDecisionRef.current = false;
+              releaseShot();
             }
           }}
           onRetake={() => {
             if (qualityDecisionRef.current) return;
             qualityDecisionRef.current = true;
             setQualityReview(null);
-            queueMicrotask(() => { qualityDecisionRef.current = false; });
+            queueMicrotask(() => {
+              qualityDecisionRef.current = false;
+              releaseShot();
+            });
           }}
         />
       )}
@@ -512,13 +657,13 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
         <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>×</button>
-        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>{mode === 'damage' ? 'DAMAGE CLOSE-UP' : mode === 'damage_wide' ? 'WIDE SHOT' : addOnly ? 'ADD MISSING PHOTOS' : 'WALK-AROUND'}</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'damage_wide' ? 'Step back — frame the whole panel.' : 'Close-ups go to the AI for the body quote.'}</div></div>
+        <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>CAMERA</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : pendingCount ? `sending ${pendingCount}…` : ''}</div></div>
         {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
       {mode === 'review' ? (
         <div style={{ padding: 16, overflow: 'auto' }}>
           <div className="card-title" style={{ color: '#d9d2c4', marginBottom: 12 }}>SHOT LIST · {progress.captured} TAKEN · {progress.skipped} SKIPPED</div>
-          {['Exterior', 'Interior', 'Wheels / tires'].map((group) => <div key={group} style={{ marginBottom: 18 }}><div className="field-label" style={{ color: '#aaa092' }}>{group}</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginTop: 7 }}>{WALK_SLOTS.filter((s) => s.group === group).map((s) => { const i = WALK_SLOTS.indexOf(s); return <button key={s.key} onClick={() => selectSlot(i)} style={{ aspectRatio: '1', padding: 0, overflow: 'hidden', borderRadius: 8, border: '1px solid #4a443c', background: taken[s.key] ? '#2e2a25' : '#25221e', color: '#d9d2c4', position: 'relative' }}>{photos[s.key]?.thumb ? <img src={photos[s.key].thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 10, display: 'block', padding: 5 }}>{s.label}</span>}{skipped[s.key] && <b style={{ position: 'absolute', bottom: 3, left: 4, fontSize: 8, color: '#e7ad62' }}>SKIPPED</b>}</button>; })}</div></div>)}
+          {['Exterior', 'Wheels / tires', 'Interior'].map((group) => <div key={group} style={{ marginBottom: 18 }}><div className="field-label" style={{ color: '#aaa092' }}>{group}</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginTop: 7 }}>{WALK_SLOTS.filter((s) => s.group === group).map((s) => { const i = WALK_SLOTS.indexOf(s); return <button key={s.key} aria-label={s.label} onClick={() => selectSlot(i)} style={{ aspectRatio: '1', padding: 0, overflow: 'hidden', borderRadius: 8, border: '1px solid #4a443c', background: taken[s.key] ? '#2e2a25' : '#25221e', color: '#d9d2c4', position: 'relative' }}>{photos[s.key]?.thumb ? <img src={photos[s.key].thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 10, display: 'block', padding: 5 }}>{s.label}</span>}{skipped[s.key] && <b style={{ position: 'absolute', bottom: 3, left: 4, fontSize: 8, color: '#e7ad62' }}>SKIPPED</b>}</button>; })}</div></div>)}
           <button className="btn btn-red" onClick={() => setMode('guided')}>BACK TO CAMERA</button>
           {!addOnly && <button className="btn btn-outline" style={{ marginTop: 8, color: '#f5f3ee', borderColor: '#5c554b' }} onClick={damage}>+ ADD DAMAGE CLOSE-UP</button>}
         </div>

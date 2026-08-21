@@ -47,6 +47,50 @@ describe('photoQueue', () => {
     expect(await pendingJobs()).toEqual([]);
   });
 
+  it('forwards the original shutter timestamp when flushing a persisted capture', async () => {
+    api.putQuotePhoto.mockResolvedValue({});
+    const timed = { ...job('timed'), captureTs: 1_800_000_000_123 };
+    await persistJob(timed);
+    await flushQueue();
+
+    expect(api.putQuotePhoto).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'timed',
+      captureTs: timed.captureTs,
+    }));
+  });
+
+  it('uses captureTs to keep the newest same-millisecond retake after restart', async () => {
+    const addedAt = 1_800_000_000_000;
+    const older = {
+      ...job('same-slot', 'Q1', 'data:image/jpeg;base64,T0xE'),
+      captureTs: addedAt + 1,
+      addedAt,
+    };
+    const newer = {
+      ...job('same-slot', 'Q1', 'data:image/jpeg;base64,TkVX'),
+      captureTs: addedAt + 2,
+      addedAt,
+    };
+    await persistJob(older);
+    await persistJob(newer);
+
+    expect((await pendingJobs())[0]).toMatchObject({
+      key: newer.key,
+      captureTs: newer.captureTs,
+      dataUrl: newer.dataUrl,
+    });
+
+    api.putQuotePhoto.mockResolvedValue({});
+    await flushQueue();
+    expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
+    expect(api.putQuotePhoto).toHaveBeenCalledWith(expect.objectContaining({
+      id: newer.id,
+      dataUrl: newer.dataUrl,
+      captureTs: newer.captureTs,
+    }));
+    expect(await pendingJobs()).toEqual([]);
+  });
+
   it('keeps jobs on transient failures (network, 401) for a later retry', async () => {
     await persistJob(job('net'));
     api.putQuotePhoto.mockRejectedValueOnce(new Error('offline'));

@@ -202,7 +202,16 @@ export function newJobKey(id) {
 export async function persistJob(job) {
   try {
     const role = validPhotoRoleForSlot(job.role, job.slotKey) ? job.role : inferPhotoRole(job.slotKey);
-    await tx('readwrite', (store) => store.put({ key: job.key, id: job.id, quoteId: job.quoteId, slotKey: job.slotKey, role, dataUrl: job.dataUrl, addedAt: Date.now() }));
+    await tx('readwrite', (store) => store.put({
+      key: job.key,
+      id: job.id,
+      quoteId: job.quoteId,
+      slotKey: job.slotKey,
+      role,
+      dataUrl: job.dataUrl,
+      captureTs: Number.isSafeInteger(job.captureTs) ? job.captureTs : undefined,
+      addedAt: Number.isSafeInteger(job.addedAt) ? job.addedAt : Date.now(),
+    }));
     await refreshCount();
   } catch { /* private mode / quota — in-memory retry still covers the session */ }
 }
@@ -212,13 +221,21 @@ export async function removeJob(key) {
     await refreshCount();
   } catch { /* ignore */ }
 }
+function captureOrder(job) {
+  return Number.isSafeInteger(job?.captureTs)
+    ? job.captureTs
+    : Number(job?.addedAt || 0);
+}
 // Drop superseded records for a server photo id (a retake replaced the shot),
-// keeping the capture identified by exceptKey. When maxAddedAt is given, only
-// records at least that old are dropped — records persisted AFTER it (a newer
-// retake) are never touched.
-export async function removeJobsForPhoto(id, exceptKey, maxAddedAt) {
+// keeping the capture identified by exceptKey. When maxCaptureOrder is given,
+// only STRICTLY older generations are dropped — an equal/newer retake is never
+// touched. captureTs is authoritative; addedAt is only for legacy records.
+export async function removeJobsForPhoto(id, exceptKey, maxCaptureOrder) {
   try {
-    const stale = (await getAllRecords()).filter((j) => j.id === id && j.key !== exceptKey && (maxAddedAt == null || (j.addedAt || 0) <= maxAddedAt));
+    const stale = (await getAllRecords()).filter((j) =>
+      j.id === id &&
+      j.key !== exceptKey &&
+      (maxCaptureOrder == null || captureOrder(j) < maxCaptureOrder));
     if (stale.length) await tx('readwrite', (store) => stale.forEach((j) => store.delete(j.key)));
     await refreshCount();
   } catch { /* ignore */ }
@@ -258,7 +275,13 @@ export async function pendingJobs(quoteId) {
     const newest = new Map();
     for (const j of all) {
       const cur = newest.get(j.id);
-      if (!cur || (j.addedAt || 0) > (cur.addedAt || 0)) newest.set(j.id, j);
+      if (
+        !cur ||
+        captureOrder(j) > captureOrder(cur) ||
+        (captureOrder(j) === captureOrder(cur) && String(j.key) > String(cur.key))
+      ) {
+        newest.set(j.id, j);
+      }
     }
     return [...newest.values()];
   } catch { return []; }
@@ -307,6 +330,7 @@ export async function flushQueue() {
           slot: job.slotKey,
           role: photoRoleOf({ role: job.role, slot: job.slotKey }),
           dataUrl: job.dataUrl,
+          ...(Number.isSafeInteger(job.captureTs) ? { captureTs: job.captureTs } : {}),
         });
         // Check whether the inspector deleted this photo while the PUT was
         // in flight. We consult the explicit deletedPhotoIds registry rather
@@ -325,7 +349,7 @@ export async function flushQueue() {
           // Normal path: clear this capture and any older superseded records
           // for the same slot — but never a newer retake added mid-flight.
           await removeJob(job.key);
-          await removeJobsForPhoto(job.id, job.key, job.addedAt);
+          await removeJobsForPhoto(job.id, job.key, captureOrder(job));
         }
       } catch (e) {
         // Permanent rejections can never succeed later — drop them so the

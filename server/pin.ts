@@ -318,6 +318,87 @@ export function registerPinRoutes(app: Express) {
     }),
   );
 
+  // ----- POST /api/quoter/intakes/:id/correct-stock-miles -----
+  // A committed intake stays immutable except for these two operational
+  // identifiers. The admin's own PIN is verified on every correction and the
+  // before/after values are audited atomically with the update.
+  app.post(
+    "/api/quoter/intakes/:id/correct-stock-miles",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const id = String(req.params.id || "").slice(0, 60);
+      const stock = String(req.body?.stock || "").trim().toUpperCase().slice(0, 40);
+      const miles = String(req.body?.miles || "").trim().slice(0, 20);
+      if (!id) return res.status(400).json({ error: "Missing intake id" });
+      if (!stock || !miles) {
+        return res.status(400).json({ error: "Stock number and miles are required" });
+      }
+
+      // Corrections are admin-only. Always verify the selected admin's own PIN;
+      // "signing for" another employee has no meaning on this route.
+      const sig = await resolveSignature({ ...req.body, forEmployeeId: undefined }, req);
+      if (!sig.ok) return res.status(sig.status).json({ error: sig.error });
+      if (!sig.signer.canOverride) {
+        return res.status(403).json({ error: "An admin PIN is required" });
+      }
+
+      let missing = false;
+      let notCommitted = false;
+      const saved = await db.transaction(async (tx) => {
+        // Lock and read the current values INSIDE this transaction. Two admin
+        // corrections may race, but the second must audit the first correction
+        // as its before-state rather than a stale pre-transaction read.
+        const locked = await tx.execute(sql`
+          SELECT id, vin, stock, miles, committed_by
+          FROM ${intakes}
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        const row = locked.rows?.[0] as any;
+        if (!row) {
+          missing = true;
+          return null;
+        }
+        if (!row.committed_by) {
+          notCommitted = true;
+          return null;
+        }
+        const [updated] = await tx
+          .update(intakes)
+          .set({ stock, miles, updatedAt: new Date() })
+          .where(sql`${intakes.id} = ${id} AND ${intakes.committedBy} IS NOT NULL`)
+          .returning();
+        if (!updated) return null;
+        await auditCommit(tx, "intake_stock_miles_corrected", sig.signer, {
+          intakeId: id,
+          vin: row.vin,
+          previousStock: row.stock,
+          previousMiles: row.miles,
+          stock,
+          miles,
+        });
+        return updated;
+      });
+      if (missing) return res.status(404).json({ error: "Intake not found" });
+      if (notCommitted) {
+        return res.status(409).json({ error: "This intake is not committed yet" });
+      }
+      if (!saved) {
+        return res.status(409).json({ error: "This intake is no longer committed" });
+      }
+
+      invalidateDashboardCache();
+      const updatedMs = new Date(saved.updatedAt as any).getTime();
+      res.json({
+        ok: true,
+        id,
+        stock: saved.stock,
+        miles: saved.miles,
+        updatedAt: Number.isFinite(updatedMs) ? updatedMs : Date.now(),
+      });
+    }),
+  );
+
   // ----- POST /api/quoter/commit-quote -----
   app.post(
     "/api/quoter/commit-quote",

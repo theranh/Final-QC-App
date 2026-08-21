@@ -2,6 +2,7 @@
 // and the manual check-digit override. Complements the pure-function tests in
 // src/lib/vin.test.js by verifying the actual on-screen behavior.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -15,6 +16,9 @@ const getIntake = vi.fn(() => Promise.resolve({ found: false }));
 const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
 const intakePhotos = vi.fn(() => Promise.resolve({ quoteId: null, photos: [] }));
 const commitIntake = vi.fn(() => Promise.resolve({}));
+const correctCommittedIntake = vi.fn(() => Promise.resolve({}));
+const putQuotePhoto = vi.fn(() => Promise.resolve({}));
+const rotateJpegDataUrl = vi.fn(() => Promise.resolve('data:image/jpeg;base64,ROTATED'));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
 let serverIntakes = [];
@@ -30,7 +34,13 @@ vi.mock('../lib/api', () => ({
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
     commitIntake: (...args) => commitIntake(...args),
+    correctCommittedIntake: (...args) => correctCommittedIntake(...args),
+    putQuotePhoto: (...args) => putQuotePhoto(...args),
   },
+}));
+
+vi.mock('../lib/photo', () => ({
+  rotateJpegDataUrl: (...args) => rotateJpegDataUrl(...args),
 }));
 
 vi.mock('../lib/zxingDecode', () => ({
@@ -62,12 +72,18 @@ vi.mock('./VinScanner', async () => {
 vi.mock('./QuoteScreen', () => ({ default: () => <div data-testid="mock-quote" /> }));
 vi.mock('./WalkAroundCamera', () => ({ default: ({ quoteId }) => <div data-testid="mock-walk" data-quote-id={quoteId} /> }));
 vi.mock('./PinDialog', () => ({
-  default: () => <div data-testid="mock-pin" />,
+  default: ({ children, onCommit, adminOnly }) => (
+    <div data-testid="mock-pin" data-admin-only={adminOnly ? 'true' : 'false'}>
+      {children}
+      <button onClick={() => onCommit({ signerId: 2, pin: '2222' })}>mock-pin-submit</button>
+    </div>
+  ),
   SignatureBadge: () => <span />,
 }));
 
 import IntakeScreen from './IntakeScreen';
 import { decodeVinInfo } from '../lib/vin';
+import { pendingJobs, removeJobsForPhoto } from '../lib/photoQueue';
 
 beforeEach(() => {
   localStorage.clear();
@@ -82,6 +98,12 @@ beforeEach(() => {
   intakePhotos.mockResolvedValue({ quoteId: null, photos: [] });
   commitIntake.mockReset();
   commitIntake.mockResolvedValue({});
+  correctCommittedIntake.mockReset();
+  correctCommittedIntake.mockResolvedValue({});
+  putQuotePhoto.mockReset();
+  putQuotePhoto.mockResolvedValue({});
+  rotateJpegDataUrl.mockReset();
+  rotateJpegDataUrl.mockResolvedValue('data:image/jpeg;base64,ROTATED');
   decodeVinInfo.mockReset();
   decodeVinInfo.mockResolvedValue(null);
   serverIntakes = [];
@@ -467,6 +489,69 @@ describe('IntakeScreen cache and request ordering', () => {
     now.mockRestore();
   });
 
+  it('persists a manual photo rotation before upload and retains it when offline', async () => {
+    const storedTs = Date.now() + 10_000;
+    const intake = {
+      ...serverRow(VALID_VIN, 'ROTATE', 100),
+      quoteId: 'q-rotate',
+    };
+    getIntake.mockResolvedValue(intake);
+    intakePhotos.mockResolvedValue({
+      intakeId: intake.id,
+      quoteId: intake.quoteId,
+      photos: [{ id: 'rotate-photo', slot: 'ext_fd_corner', role: 'walk', ts: storedTs }],
+    });
+    putQuotePhoto.mockRejectedValue(new Error('offline'));
+    const showToast = vi.fn();
+
+    render(<IntakeScreen showToast={showToast} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    fireEvent.click(await screen.findByAltText('ext_fd_corner'));
+    fireEvent.click(screen.getByRole('button', { name: /rotate/i }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/will send/i)));
+    expect(rotateJpegDataUrl).toHaveBeenCalledWith(
+      `/api/quoter/photo?id=rotate-photo&v=${storedTs}`,
+      90,
+      1600,
+      0.8,
+    );
+    expect(putQuotePhoto).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'rotate-photo',
+      quoteId: 'q-rotate',
+      slot: 'ext_fd_corner',
+      dataUrl: 'data:image/jpeg;base64,ROTATED',
+      captureTs: storedTs + 1,
+    }));
+    expect(await pendingJobs('q-rotate')).toEqual([
+      expect.objectContaining({ id: 'rotate-photo', dataUrl: 'data:image/jpeg;base64,ROTATED' }),
+    ]);
+
+    await removeJobsForPhoto('rotate-photo', '__none__');
+  });
+
+  it('reconciles instead of claiming success when a newer server photo wins', async () => {
+    const intake = {
+      ...serverRow(VALID_VIN, 'ROTATE-STALE', 100),
+      quoteId: 'q-rotate-stale',
+    };
+    const original = [{ id: 'stale-rotate-photo', slot: 'ext_fd_corner', role: 'walk', ts: 100 }];
+    const newer = [{ id: 'stale-rotate-photo', slot: 'ext_fd_corner', role: 'walk', ts: 200 }];
+    getIntake.mockResolvedValue(intake);
+    intakePhotos
+      .mockResolvedValueOnce({ intakeId: intake.id, quoteId: intake.quoteId, photos: original })
+      .mockResolvedValue({ intakeId: intake.id, quoteId: intake.quoteId, photos: newer });
+    putQuotePhoto.mockResolvedValue({ ok: true, stale: true });
+    const showToast = vi.fn();
+
+    render(<IntakeScreen showToast={showToast} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    fireEvent.click(await screen.findByAltText('ext_fd_corner'));
+    fireEvent.click(screen.getByRole('button', { name: /rotate/i }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/another device/i)));
+    expect(screen.queryByRole('button', { name: /rotate/i })).not.toBeInTheDocument();
+    expect(await pendingJobs('q-rotate-stale')).toEqual([]);
+  });
+
   it('ignores an older response from a previous A→B→A visit', async () => {
     const requests = [];
     getIntake.mockImplementation((vin) => new Promise((resolve) => requests.push({ vin, resolve })));
@@ -654,5 +739,54 @@ describe('IntakeScreen cache and request ordering', () => {
     const cache = JSON.parse(localStorage.getItem('trqc.intake.cache.v2'));
     expect(cache[VIN_B].id).toBe(intakeB.id);
     expect(cache[VIN_B].quoteId).toBeNull();
+  });
+});
+
+describe('IntakeScreen committed stock and miles correction', () => {
+  it('keeps the saved fields locked until an admin-PIN correction is submitted', async () => {
+    getIntake.mockResolvedValue({
+      found: true,
+      id: 'in-locked',
+      vin: VALID_VIN,
+      stock: 'OLD-STOCK',
+      vehicle: '2024 Ford F-150',
+      miles: '100',
+      estimator: 'Estimator',
+      quoteId: null,
+      data: {},
+      completedAt: Date.now(),
+      committedBy: 'Worker',
+      overriddenBy: null,
+      updatedAt: 100,
+    });
+    correctCommittedIntake.mockResolvedValue({
+      ok: true,
+      id: 'in-locked',
+      stock: 'NEW-STOCK',
+      miles: '456',
+      updatedAt: 200,
+    });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    await screen.findByDisplayValue('OLD-STOCK');
+    expect(screen.getByDisplayValue('OLD-STOCK')).toBeDisabled();
+    expect(screen.getByDisplayValue('100')).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /edit stock.*miles.*admin pin/i }));
+    expect(screen.getByTestId('mock-pin')).toHaveAttribute('data-admin-only', 'true');
+    fireEvent.change(screen.getByLabelText('Corrected stock number'), { target: { value: 'new-stock' } });
+    fireEvent.change(screen.getByLabelText('Corrected miles'), { target: { value: '456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mock-pin-submit' }));
+
+    await waitFor(() => expect(correctCommittedIntake).toHaveBeenCalledWith('in-locked', {
+      stock: 'NEW-STOCK',
+      miles: '456',
+      signerId: 2,
+      pin: '2222',
+    }));
+    await waitFor(() => expect(screen.queryByTestId('mock-pin')).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue('NEW-STOCK')).toBeDisabled();
+    expect(screen.getByDisplayValue('456')).toBeDisabled();
+    expect(putIntake).not.toHaveBeenCalled();
   });
 });
