@@ -3,8 +3,14 @@ import { api } from '../lib/api';
 import { WALK_SLOTS, nextUntakenSlot, putSlotPhoto, walkProgress } from '../lib/walkSlots';
 import { persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, setCameraOpen } from '../lib/photoQueue';
 import { orientedJpegDataUrl } from '../lib/photo';
+import {
+  drawLiveVideoFrame,
+  liveCameraCorrection,
+  saveLiveCameraCorrection,
+} from '../lib/livePhoto';
 import { analyzeDataUrl } from '../lib/photoQuality';
 import PhotoQualityReview from './PhotoQualityReview';
+import LivePhotoOrientationReview from './LivePhotoOrientationReview';
 import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
 
 const MAX = 1600;
@@ -109,7 +115,9 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraStarting, setCameraStarting] = useState(false);
   const fileRef = useRef(null); const canvasRef = useRef(null);
-  const gravRef = useRef(null); // last gravity reading {x,y,t} for the rotation-lock fix
+  // Retained for the shop's existing motion-permission handshake only. Live
+  // pixel orientation is calibrated from captured output, never from gravity.
+  const gravRef = useRef(null);
   const motionOnRef = useRef(false);
   const motionRequestRef = useRef(null);
   const motionPermissionSettledRef = useRef(false);
@@ -119,6 +127,9 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const [qualityReview, setQualityReview] = useState(null);
   const qualityBusyRef = useRef(false);
   const qualityDecisionRef = useRef(false);
+  const [orientationReview, setOrientationReview] = useState(null);
+  const orientationDecisionRef = useRef(false);
+  const sessionCorrectionsRef = useRef(new Map());
   // One shutter press owns one immutable guided slot until the image has been
   // normalized, persisted, and reflected in state. This prevents rapid taps
   // from reusing the same render's slot before React advances the sequence.
@@ -141,6 +152,9 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   }, []);
   const startCamera = useCallback(async () => {
     if (streamRef.current) {
+      if (videoRef.current && videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+      }
       setCameraReady(true);
       return true;
     }
@@ -187,16 +201,22 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     void startCamera();
     return stopCamera;
   }, [startCamera, stopCamera]);
+  // Review mode removes the live <video> from the DOM. Reattach the existing
+  // stream whenever the camera frame mounts again (for example, Add Damage).
+  useEffect(() => {
+    if (mode !== 'review' && videoRef.current && streamRef.current
+      && videoRef.current.srcObject !== streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [mode]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  // Gravity readings power the old Body Quoter's rotation-lock fix: if the
-  // phone is held sideways but the feed is still portrait, the shot gets
-  // rotated upright at capture time.
+  // Keep the existing permission flow, but treat motion as non-authoritative:
+  // gravity cannot reveal whether WebKit normalized drawImage(video) pixels.
   const onMotion = useCallback((e) => {
     const g = e.accelerationIncludingGravity;
     if (g && (g.x != null)) gravRef.current = { x: g.x, y: g.y, t: Date.now() };
   }, []);
-  // Resolves once the listener is attached (or permission is denied), so a
-  // caller can wait for gravity to start flowing before it matters.
+  // Resolves once the listener is attached (or permission is denied).
   const enableMotion = useCallback(() => {
     if (motionOnRef.current || motionPermissionSettledRef.current) return Promise.resolve();
     if (motionRequestRef.current) return motionRequestRef.current;
@@ -429,10 +449,10 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     }
     onClose();
   };
-  // Crop exactly the frame the browser presents in the live <video>. Modern
-  // mobile browsers already apply camera/sensor orientation before exposing a
-  // MediaStream frame; applying a second gravity-based transform here rotated
-  // otherwise-correct iPhone and Android captures by 90°/180°.
+  // Most browsers expose the same upright pixels shown in the <video>. Some
+  // iPhone WebKit camera profiles expose a quarter-turned backing frame to
+  // drawImage(), though, so Apple mobile calibrates that mapping once from an
+  // actual captured preview. Gravity never decides pixel orientation.
   const capture = async () => {
     const v = videoRef.current;
     if (!accessPrepared) return;
@@ -448,43 +468,66 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     setFlash(true); setTimeout(() => setFlash(false), 160);
     let reviewPending = false;
     try {
-    let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
-    const ew = v.clientWidth, eh = v.clientHeight;
-    if (ew > 0 && eh > 0) {
-      const va = v.videoWidth / v.videoHeight, ea = ew / eh;
-      if (va > ea) { sw = Math.round(v.videoHeight * ea); sx = Math.round((v.videoWidth - sw) / 2); }
-      else if (va < ea) { sh = Math.round(v.videoWidth / ea); sy = Math.round((v.videoHeight - sh) / 2); }
-    }
-    const dz = nativeZooms.length ? 1 : Math.max(1, zoomRef.current);
-    if (dz > 1) {
-      const nw = sw / dz, nh = sh / dz;
-      sx += (sw - nw) / 2; sy += (sh - nh) / 2; sw = nw; sh = nh;
+    const storedCalibration = liveCameraCorrection(v);
+    const sessionCorrection = sessionCorrectionsRef.current.get(storedCalibration.profile);
+    const correction = sessionCorrection ?? storedCalibration.correction;
+    const needsOrientationReview = sessionCorrection == null && storedCalibration.needsReview;
+    const frameOptions = {
+      max: MAX,
+      zoom: zoomRef.current,
+      nativeZoom: nativeZooms.length > 0,
+      previewWidth: v.clientWidth,
+      previewHeight: v.clientHeight,
+      sourceWidth: v.videoWidth,
+      sourceHeight: v.videoHeight,
+    };
+    let captureSource = v;
+    if (needsOrientationReview) {
+      // Freeze the exact backing frame before showing the calibration prompt.
+      // The chosen turn is then applied to this same frame before crop/zoom,
+      // so the first saved shot follows the identical path as later shots.
+      captureSource = document.createElement('canvas');
+      captureSource.width = v.videoWidth;
+      captureSource.height = v.videoHeight;
+      captureSource.getContext('2d').drawImage(v, 0, 0, v.videoWidth, v.videoHeight);
     }
     const canvas = canvasRef.current || document.createElement('canvas');
-    const r = Math.min(1, MAX / Math.max(sw, sh));
-    const w = Math.max(1, Math.round(sw * r)); const h = Math.max(1, Math.round(sh * r));
-    canvas.width = w; canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
+    drawLiveVideoFrame(captureSource, canvas, {
+      correction,
+      ...frameOptions,
+    });
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    let action;
     if (captureMode === 'damage') {
       if (!committed) {
-        reviewPending = await maybeReview(dataUrl, async (url) => {
+        action = async (url) => {
           damageCloseUpRef.current = url;
           setMode('damage_wide');
-        });
+        };
       }
     } else if (captureMode === 'damage_wide') {
       if (!committed) {
         const closeUp = damageCloseUpRef.current;
-        reviewPending = await maybeReview(dataUrl, async (url) => {
+        action = async (url) => {
           damageCloseUpRef.current = null;
           setMode('guided');
           onDamageCapture?.(closeUp, url);
-        });
+        };
       }
-    } else if (captureMode === 'extra') reviewPending = await maybeReview(dataUrl, saveExtra);
-    else reviewPending = await maybeReview(dataUrl, (url) => saveGuided(url, targetSlot));
+    } else if (captureMode === 'extra') action = saveExtra;
+    else action = (url) => saveGuided(url, targetSlot);
+    if (action && needsOrientationReview) {
+      setOrientationReview({
+        dataUrl,
+        action,
+        profile: storedCalibration.profile,
+        source: captureSource,
+        frameOptions,
+      });
+      reviewPending = true;
+    } else if (action) {
+      reviewPending = await maybeReview(dataUrl, action);
+    }
     } catch (err) {
       showToast?.(err instanceof Error ? err.message : 'Could not save that photo');
     } finally {
@@ -650,6 +693,34 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
               qualityDecisionRef.current = false;
               releaseShot();
             });
+          }}
+        />
+      )}
+      {orientationReview && (
+        <LivePhotoOrientationReview
+          dataUrl={orientationReview.dataUrl}
+          onChoose={async (correction) => {
+            if (orientationDecisionRef.current) return;
+            orientationDecisionRef.current = true;
+            const pending = orientationReview;
+            setOrientationReview(null);
+            try {
+              sessionCorrectionsRef.current.set(pending.profile, correction);
+              saveLiveCameraCorrection(pending.profile, correction);
+              const canvas = canvasRef.current || document.createElement('canvas');
+              drawLiveVideoFrame(pending.source, canvas, {
+                correction,
+                ...pending.frameOptions,
+              });
+              const corrected = canvas.toDataURL('image/jpeg', 0.8);
+              const qualityPending = await maybeReview(corrected, pending.action);
+              if (!qualityPending) releaseShot();
+            } catch (err) {
+              showToast?.(err instanceof Error ? err.message : 'Could not orient that photo');
+              releaseShot();
+            } finally {
+              orientationDecisionRef.current = false;
+            }
           }}
         />
       )}

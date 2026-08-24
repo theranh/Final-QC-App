@@ -1,11 +1,11 @@
 ---
 name: Live camera orientation authority
-description: Browser-presented MediaStream frames are authoritative; gravity must not rotate captured pixels
+description: Safely reconcile live-camera backing frames with the preview without gravity guesses
 ---
-Rule: capture live-camera pixels exactly as the browser presents the MediaStream frame. Do not apply a universal DeviceMotion/gravity transform. Keep explicit EXIF 1–8 normalization for file imports and metadata-free JPEG output.
+Rule: never infer live-camera pixel rotation from DeviceMotion, gravity, or dimensions alone. On Apple mobile browsers, confirm the actual captured backing-frame direction once per browser/camera/screen-orientation profile, then apply that explicit correction before preview-equivalent crop and zoom. Unknown profiles must pause before upload; non-Apple profiles default to no turn. Keep explicit EXIF 1–8 normalization for file imports and metadata-free JPEG output.
 
-**Why:** modern iPhone and Android browsers already normalize live video presentation. Gravity plus frame dimensions cannot distinguish raw sensor pixels from browser-normalized pixels, so a second transform rotated already-upright photos by 90° or 180° across multiple phones.
-**How to apply:** live shutter code may crop/scale the presented frame but must not rotate it from gravity. Stored-photo repair must canonicalize source EXIF before one deliberate user-requested turn, and replacement uploads must retain durable queue/version conflict handling.
+**Why:** some browsers normalize live video presentation, while an observed iPhone WebKit path displayed an upright preview but exposed a quarter-turned canvas backing frame and produced metadata-free sideways pixels. Gravity previously double-rotated already-correct iPhone and Android captures. No standards API can infer semantic direction reliably.
+**How to apply:** freeze the unknown profile's exact backing frame, show it before upload, persist the explicit turn separately for browser engine, camera, screen angle, and frame/preview orientation, then rotate before object-fit crop and digital zoom. If persistence is blocked, retain the correction for the session. Stored-photo repair must canonicalize source EXIF before one deliberate user-requested turn, and replacement uploads must retain durable queue/version conflict handling.
 
 Also: keep the shop-requested opening permission gate if motion permission remains part of the product flow, but motion readings must never influence photo pixels.
 

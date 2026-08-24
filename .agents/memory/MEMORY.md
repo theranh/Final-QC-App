@@ -6,7 +6,7 @@
 - [Quoter merge](quoter-merge.md) — merged-Quoter invariants: /api/quoter/* auth, verbatim pricing, PIN-at-commit immutability, frozen months, parallel run (never retire old app).
 - [Tracker snapshots](tracker-snapshots.md) — frozen months go to prod via the token-guarded sync endpoint's tracker_snapshot phase; re-running a month is the correction path.
 - [Intake completion](intake-completion.md) — checklists removed; PIN commit alone sets completed_at and must invalidate the dashboard cache.
-- [Live camera orientation](ios-gravity-rotation.md) — capture browser-presented MediaStream pixels; never use universal gravity transforms. File imports still require explicit EXIF normalization.
+- [Live camera orientation](ios-gravity-rotation.md) — never infer pixel rotation from gravity; Apple live-camera backing frames use explicit per-profile confirmation before crop/zoom.
 - [Hours-only display](hours-only-display.md) — quote UI shows hours only; usd stays in saved data for tracker sync; awaiting list dedupes per VIN with IN PROGRESS badge.
 - [Migrated re-checks](migrated-rechecks.md) — imported open inspections lacked openItems; admin repair button rebuilds them; 401s in a stale PWA now force the sign-in screen via auth:expired event.
 - [Photo upload queue](photo-upload-queue.md) — queue records keyed per capture, not per slot, or a slow upload's cleanup deletes a retake; 401 is transient, only 413/409/403 drop.

@@ -62,10 +62,12 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     HTMLCanvasElement.prototype.toDataURL = () => 'data:image/jpeg;base64,normalized';
     showToast = vi.fn();
     setCameraOpen(false);
+    localStorage.clear();
     await clearQueue();
   });
   afterEach(() => {
     cleanup();
+    localStorage.clear();
     vi.unstubAllGlobals();
   });
 
@@ -155,6 +157,77 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
       1600,
       900,
     );
+  });
+
+  it('calibrates an iPhone backing frame once, then corrects guided and damage shots before saving', async () => {
+    const onDamageCapture = vi.fn();
+    const track = {
+      getCapabilities: () => ({}),
+      getSettings: () => ({ facingMode: 'environment' }),
+      applyConstraints: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    };
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 Version/18.2 Mobile/15E148 Safari/604.1',
+      platform: 'iPhone',
+      maxTouchPoints: 5,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+    });
+    api.putQuotePhoto.mockResolvedValue({});
+    const { container } = render(
+      <WalkAroundCamera
+        quoteId={QUOTE}
+        committed={false}
+        onClose={() => {}}
+        onDamageCapture={onDamageCapture}
+        showToast={showToast}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
+    const video = container.querySelector('video');
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, value: 1920 },
+      videoHeight: { configurable: true, value: 1080 },
+      clientWidth: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 1200 },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
+    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText('Take photo'));
+    expect(await screen.findByRole('dialog', { name: 'Camera orientation check' })).toBeInTheDocument();
+    expect(api.putQuotePhoto).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'ROTATE LEFT' }));
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
+
+    ctxStub.rotate.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: /add damage close-up/i }));
+    const damageVideo = container.querySelector('video');
+    Object.defineProperties(damageVideo, {
+      videoWidth: { configurable: true, value: 1920 },
+      videoHeight: { configurable: true, value: 1080 },
+      clientWidth: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 1200 },
+    });
+    expect(damageVideo.srcObject).toBe(stream);
+    fireEvent.click(screen.getByLabelText('Take photo'));
+    await waitFor(() => expect(ctxStub.rotate).toHaveBeenCalledWith(-Math.PI / 2));
+    expect(screen.queryByRole('dialog', { name: 'Camera orientation check' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+
+    ctxStub.rotate.mockClear();
+    fireEvent.click(screen.getByLabelText('Take photo'));
+    await waitFor(() => expect(onDamageCapture).toHaveBeenCalledTimes(1));
+    expect(ctxStub.rotate).toHaveBeenCalledWith(-Math.PI / 2);
+    expect(onDamageCapture.mock.calls[0][0]).toMatch(/^data:image\/jpeg/);
+    expect(onDamageCapture.mock.calls[0][1]).toMatch(/^data:image\/jpeg/);
   });
 
   it('binds rapid file selections to only one reserved slot at a time', async () => {
