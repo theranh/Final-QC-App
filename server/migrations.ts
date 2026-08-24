@@ -275,6 +275,39 @@ export const MIGRATIONS: Migration[] = [
       sql`ALTER TABLE photos ALTER COLUMN role SET DEFAULT 'unclassified'`,
     ],
   },
+  {
+    // Every production orientation repair retains the exact original bytes
+    // until an operator chooses to roll it back. The repair endpoint writes
+    // this row in the same transaction as the photo replacement.
+    id: "0012_photo_orientation_backups",
+    statements: [
+      sql`CREATE TABLE IF NOT EXISTS photo_orientation_backups (
+        id bigserial PRIMARY KEY,
+        repair_key text NOT NULL,
+        photo_id text NOT NULL,
+        quote_id text NOT NULL,
+        intake_id text NOT NULL,
+        stock text NOT NULL,
+        slot text,
+        direction text NOT NULL,
+        original_mime text NOT NULL,
+        original_data bytea NOT NULL,
+        original_ts bigint NOT NULL,
+        original_sha256 text NOT NULL,
+        repaired_sha256 text NOT NULL,
+        repaired_ts bigint NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        rolled_back_at timestamptz,
+        rollback_ts bigint,
+        CONSTRAINT photo_orientation_backups_direction_allowed
+          CHECK (direction IN ('left', 'right', '180'))
+      )`,
+      sql`CREATE UNIQUE INDEX IF NOT EXISTS photo_orientation_backups_repair_photo_idx
+          ON photo_orientation_backups (repair_key, photo_id)`,
+      sql`CREATE INDEX IF NOT EXISTS photo_orientation_backups_photo_idx
+          ON photo_orientation_backups (photo_id)`,
+    ],
+  },
 ];
 
 /**

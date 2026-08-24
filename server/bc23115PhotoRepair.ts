@@ -58,7 +58,7 @@ export function getBc23115RepairPhoto(id: string): Bc23115RepairPhoto | null {
   return { id: id as keyof typeof photos, ...photo };
 }
 
-export async function decodeBc23115Replacement(dataUrl: unknown): Promise<{
+export async function decodeJpegDataUrl(dataUrl: unknown): Promise<{
   bytes: Buffer;
   width: number;
   height: number;
@@ -88,8 +88,59 @@ export async function decodeBc23115Replacement(dataUrl: unknown): Promise<{
     throw new Error("Replacement JPEG cannot be decoded");
   }
   const { width, height } = decoded.info;
+  return { bytes, width, height };
+}
+
+export async function decodeBc23115Replacement(dataUrl: unknown): Promise<{
+  bytes: Buffer;
+  width: number;
+  height: number;
+}> {
+  const decoded = await decodeJpegDataUrl(dataUrl);
+  const { width, height } = decoded;
   if (width !== 1600 || height !== 1201) {
     throw new Error("Replacement JPEG must be the inspected 1600×1201 left-turned frame");
   }
-  return { bytes, width, height };
+  return decoded;
+}
+
+export type PhotoTurn = "left" | "right" | "180";
+
+export async function rotateStoredJpeg(
+  bytes: Buffer,
+  direction: PhotoTurn,
+): Promise<{ bytes: Buffer; width: number; height: number; sourceWidth: number; sourceHeight: number }> {
+  if (bytes.length < 1_000 || bytes.length > 2_000_000) {
+    throw new Error("Stored JPEG size is outside the repair bounds");
+  }
+  const image = sharp(bytes, {
+    failOn: "error",
+    limitInputPixels: 40_000_000,
+  });
+  const metadata = await image.metadata();
+  if (
+    metadata.format !== "jpeg"
+    || !metadata.width
+    || !metadata.height
+    || metadata.width > 8_000
+    || metadata.height > 8_000
+    || metadata.width * metadata.height > 40_000_000
+  ) {
+    throw new Error("Stored photo is not a bounded JPEG");
+  }
+
+  const angle = direction === "left" ? -90 : direction === "right" ? 90 : 180;
+  const output = await image
+    .autoOrient()
+    .rotate(angle)
+    .jpeg({ quality: 80 })
+    .toBuffer({ resolveWithObject: true });
+  if (output.info.format !== "jpeg") throw new Error("Rotated output is not a JPEG");
+  return {
+    bytes: output.data,
+    width: output.info.width,
+    height: output.info.height,
+    sourceWidth: metadata.autoOrient.width,
+    sourceHeight: metadata.autoOrient.height,
+  };
 }

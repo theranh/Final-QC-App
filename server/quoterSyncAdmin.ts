@@ -34,9 +34,16 @@
  *  - `repair_bc23115_sideways_photo` phase: accepts one pre-inspected,
  *    left-turned JPEG at a time. A fixed id/slot/timestamp allowlist prevents
  *    the operation from touching newer retakes or the six already-upright rows.
+ *  - `photo_batch` phase: token-guarded, read-only export of selected photo
+ *    bytes for an operator audit.
+ *  - `repair_photo_orientation` phase: one exact, audited replacement for a
+ *    manually confirmed photo, guarded by its current id/slot/timestamp and
+ *    owner intake. The server rotates its locked source and retains a backup.
+ *  - `rollback_photo_orientation` phase: restores that retained original only
+ *    when the repaired bytes and timestamp still match the audited result.
  */
 import type { Express, Request, Response } from "express";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import pg from "pg";
 import { pool } from "./db";
 import { snapshotMonth } from "./tracker";
@@ -45,6 +52,8 @@ import {
   BC23115_ORIENTATION_REPAIR,
   decodeBc23115Replacement,
   getBc23115RepairPhoto,
+  rotateStoredJpeg,
+  type PhotoTurn,
 } from "./bc23115PhotoRepair";
 
 const { Pool } = pg;
@@ -156,6 +165,42 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           `SELECT COALESCE(SUM(octet_length(data)),0)::bigint AS n FROM photos`,
         );
         return res.json({ counts: out, photoBytes: { source: Number(sb.rows[0].n), dest: Number(dbb.rows[0].n) } });
+      }
+
+      if (phase === "photo_batch") {
+        const quoteIds = Array.isArray(req.body?.quoteIds)
+          ? req.body.quoteIds
+              .filter((id: unknown): id is string => typeof id === "string" && id.length <= 120)
+              .slice(0, 25)
+          : [];
+        if (!quoteIds.length) return res.status(400).json({ message: "quoteIds are required" });
+        const cursor = typeof req.body?.cursor === "string" ? req.body.cursor.slice(0, 160) : "";
+        const limit = Math.min(Math.max(Number(req.body?.limit) || 10, 1), 10);
+        const rows = (
+          await destQuery(
+            `SELECT id, quote_id, slot, role, mime, ts,
+                    translate(encode(data, 'base64'), chr(10) || chr(13), '') AS data_base64
+             FROM photos
+             WHERE quote_id = ANY($1::text[]) AND id > $2
+             ORDER BY id
+             LIMIT $3`,
+            [quoteIds, cursor, limit],
+          )
+        ).rows;
+        return res.json({
+          phase,
+          photos: rows.map((row: any) => ({
+            id: row.id,
+            quoteId: row.quote_id,
+            slot: row.slot,
+            role: row.role,
+            mime: row.mime,
+            ts: row.ts,
+            dataBase64: row.data_base64,
+          })),
+          nextCursor: rows.length ? rows[rows.length - 1].id : null,
+          done: rows.length < limit,
+        });
       }
 
       if (phase === "settings") {
@@ -890,6 +935,314 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
             direction: repair.direction,
             width: replacement.width,
             height: replacement.height,
+          });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw error;
+        } finally {
+          client.release();
+        }
+      }
+
+      if (phase === "repair_photo_orientation") {
+        const repairKey = typeof req.body?.repairKey === "string"
+          ? req.body.repairKey.trim().slice(0, 160)
+          : "";
+        const photoId = typeof req.body?.photoId === "string"
+          ? req.body.photoId.trim().slice(0, 160)
+          : "";
+        const quoteId = typeof req.body?.quoteId === "string"
+          ? req.body.quoteId.trim().slice(0, 160)
+          : "";
+        const slot = typeof req.body?.slot === "string"
+          ? req.body.slot.trim().slice(0, 160)
+          : "";
+        const intakeId = typeof req.body?.intakeId === "string"
+          ? req.body.intakeId.trim().slice(0, 160)
+          : "";
+        const stock = typeof req.body?.stock === "string"
+          ? req.body.stock.trim().slice(0, 80).toUpperCase()
+          : "";
+        const expectedTs = Number(req.body?.expectedTs);
+        const direction = typeof req.body?.direction === "string" ? req.body.direction : "";
+        if (
+          !repairKey
+          || !photoId
+          || !quoteId
+          || !slot
+          || !intakeId
+          || !stock
+          || !Number.isSafeInteger(expectedTs)
+          || !["left", "right", "180"].includes(direction)
+        ) {
+          return res.status(400).json({ message: "Incomplete orientation repair identity" });
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [`${repairKey}:${photoId}`],
+          );
+
+          const priorAudit = await client.query(
+            `SELECT details
+             FROM audit_log
+             WHERE action = 'photo_orientation_repaired'
+               AND details->>'repairKey' = $1
+               AND details->>'photoId' = $2
+             LIMIT 1`,
+            [repairKey, photoId],
+          );
+          if (priorAudit.rowCount) {
+            await client.query("COMMIT");
+            return res.json({
+              phase,
+              repairKey,
+              photoId,
+              alreadyApplied: true,
+            });
+          }
+
+          const current = await client.query(
+            `SELECT p.data, p.ts, p.mime,
+                    EXISTS (
+                      SELECT 1
+                      FROM intakes i
+                      WHERE i.id = $5
+                        AND i.quote_id = $2
+                        AND UPPER(TRIM(i.stock)) = $6
+                    ) AS owner_matches
+             FROM photos p
+             WHERE p.id = $1
+               AND p.quote_id = $2
+               AND p.slot = $3
+               AND p.ts = $4
+             FOR UPDATE`,
+            [photoId, quoteId, slot, expectedTs, intakeId, stock],
+          );
+          if (current.rowCount !== 1 || !current.rows[0].owner_matches) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "Photo changed or no longer matches the requested repair identity",
+            });
+          }
+
+          const originalBytes = Buffer.from(current.rows[0].data);
+          let rotated: Awaited<ReturnType<typeof rotateStoredJpeg>>;
+          try {
+            rotated = await rotateStoredJpeg(originalBytes, direction as PhotoTurn);
+          } catch (error) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: error instanceof Error ? error.message : "Stored photo cannot be safely rotated",
+            });
+          }
+
+          const originalSha256 = createHash("sha256").update(originalBytes).digest("hex");
+          const repairedSha256 = createHash("sha256").update(rotated.bytes).digest("hex");
+          const repairedTs = Math.max(Date.now(), expectedTs + 1);
+          await client.query(
+            `INSERT INTO photo_orientation_backups
+               (repair_key, photo_id, quote_id, intake_id, stock, slot, direction,
+                original_mime, original_data, original_ts, original_sha256,
+                repaired_sha256, repaired_ts)
+             VALUES
+               ($1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13)`,
+            [
+              repairKey,
+              photoId,
+              quoteId,
+              intakeId,
+              stock,
+              slot,
+              direction,
+              String(current.rows[0].mime || "image/jpeg"),
+              originalBytes,
+              expectedTs,
+              originalSha256,
+              repairedSha256,
+              repairedTs,
+            ],
+          );
+          const updated = await client.query(
+            `UPDATE photos
+             SET data = $1, mime = 'image/jpeg', ts = $2
+             WHERE id = $3
+               AND quote_id = $4
+               AND slot = $5
+               AND ts = $6`,
+            [rotated.bytes, repairedTs, photoId, quoteId, slot, expectedTs],
+          );
+          if (updated.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Photo changed while repair was running" });
+          }
+
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('photo_orientation_repaired', 'replit-agent', 'system@truckranch.com', 'Replit Agent',
+                $1::jsonb)`,
+            [JSON.stringify({
+              repairKey,
+              photoId,
+              quoteId,
+              intakeId,
+              stock,
+              slot,
+              direction,
+              oldTs: expectedTs,
+              newTs: repairedTs,
+              oldBytes: originalBytes.length,
+              newBytes: rotated.bytes.length,
+              oldWidth: rotated.sourceWidth,
+              oldHeight: rotated.sourceHeight,
+              width: rotated.width,
+              height: rotated.height,
+              originalSha256,
+              repairedSha256,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            repairKey,
+            photoId,
+            alreadyApplied: false,
+            direction,
+            width: rotated.width,
+            height: rotated.height,
+            originalSha256,
+            repairedSha256,
+          });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw error;
+        } finally {
+          client.release();
+        }
+      }
+
+      if (phase === "rollback_photo_orientation") {
+        const repairKey = typeof req.body?.repairKey === "string"
+          ? req.body.repairKey.trim().slice(0, 160)
+          : "";
+        const photoId = typeof req.body?.photoId === "string"
+          ? req.body.photoId.trim().slice(0, 160)
+          : "";
+        if (!repairKey || !photoId) {
+          return res.status(400).json({ message: "repairKey and photoId are required" });
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [`${repairKey}:${photoId}`],
+          );
+          const backupResult = await client.query(
+            `SELECT *
+             FROM photo_orientation_backups
+             WHERE repair_key = $1 AND photo_id = $2
+             FOR UPDATE`,
+            [repairKey, photoId],
+          );
+          if (backupResult.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ message: "Orientation repair backup not found" });
+          }
+          const backup = backupResult.rows[0];
+          if (backup.rolled_back_at) {
+            await client.query("COMMIT");
+            return res.json({
+              phase,
+              repairKey,
+              photoId,
+              alreadyRolledBack: true,
+              rollbackTs: Number(backup.rollback_ts),
+            });
+          }
+
+          const current = await client.query(
+            `SELECT data, ts
+             FROM photos
+             WHERE id = $1
+               AND quote_id = $2
+               AND slot IS NOT DISTINCT FROM $3
+               AND ts = $4
+             FOR UPDATE`,
+            [photoId, backup.quote_id, backup.slot, backup.repaired_ts],
+          );
+          if (current.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "Repaired photo changed after the repair; rollback refused",
+            });
+          }
+          const currentSha256 = createHash("sha256")
+            .update(Buffer.from(current.rows[0].data))
+            .digest("hex");
+          if (currentSha256 !== backup.repaired_sha256) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "Repaired bytes no longer match the backup; rollback refused",
+            });
+          }
+
+          const rollbackTs = Math.max(Date.now(), Number(current.rows[0].ts) + 1);
+          const restored = await client.query(
+            `UPDATE photos
+             SET data = $1, mime = $2, ts = $3
+             WHERE id = $4 AND ts = $5`,
+            [
+              backup.original_data,
+              backup.original_mime,
+              rollbackTs,
+              photoId,
+              backup.repaired_ts,
+            ],
+          );
+          if (restored.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Photo changed while rollback was running" });
+          }
+          await client.query(
+            `UPDATE photo_orientation_backups
+             SET rolled_back_at = NOW(), rollback_ts = $1
+             WHERE repair_key = $2 AND photo_id = $3 AND rolled_back_at IS NULL`,
+            [rollbackTs, repairKey, photoId],
+          );
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('photo_orientation_repair_rolled_back',
+                'replit-agent', 'system@truckranch.com', 'Replit Agent', $1::jsonb)`,
+            [JSON.stringify({
+              repairKey,
+              photoId,
+              quoteId: backup.quote_id,
+              intakeId: backup.intake_id,
+              stock: backup.stock,
+              slot: backup.slot,
+              repairTs: Number(backup.repaired_ts),
+              rollbackTs,
+              restoredSha256: backup.original_sha256,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            repairKey,
+            photoId,
+            alreadyRolledBack: false,
+            rollbackTs,
+            restoredSha256: backup.original_sha256,
           });
         } catch (error) {
           await client.query("ROLLBACK").catch(() => {});

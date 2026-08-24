@@ -4,6 +4,7 @@ import {
   BC23115_ORIENTATION_REPAIR,
   decodeBc23115Replacement,
   getBc23115RepairPhoto,
+  rotateStoredJpeg,
 } from "./bc23115PhotoRepair";
 
 async function jpegDataUrl(width: number, height: number): Promise<string> {
@@ -95,5 +96,40 @@ describe("BC23115 photo repair guard", () => {
         `data:image/jpeg;base64,${mislabeled.toString("base64")}`,
       ),
     ).rejects.toThrow("not a JPEG");
+  });
+
+  it("rotates the locked source itself and strips orientation metadata", async () => {
+    const source = await sharp({
+      create: {
+        width: 1201,
+        height: 1600,
+        channels: 3,
+        background: { r: 30, g: 60, b: 90 },
+      },
+    }).jpeg({ quality: 80 }).withMetadata({ orientation: 1 }).toBuffer();
+    const rotated = await rotateStoredJpeg(source, "left");
+    expect(rotated).toMatchObject({
+      sourceWidth: 1201,
+      sourceHeight: 1600,
+      width: 1600,
+      height: 1201,
+    });
+    const metadata = await sharp(rotated.bytes).metadata();
+    expect(metadata.format).toBe("jpeg");
+    expect(metadata.orientation).toBeUndefined();
+  });
+
+  it("rejects a stored non-JPEG before rotation", async () => {
+    const png = await sharp({
+      create: {
+        width: 1201,
+        height: 1600,
+        channels: 3,
+        background: { r: 30, g: 60, b: 90 },
+      },
+    }).png().toBuffer();
+    await expect(rotateStoredJpeg(png, "left")).rejects.toThrow(
+      "not a bounded JPEG",
+    );
   });
 });

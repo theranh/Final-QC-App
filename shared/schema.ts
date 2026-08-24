@@ -148,6 +148,33 @@ export const photos = pgTable(
   (t) => [index("photos_quote_idx").on(t.quoteId)],
 );
 
+export const photoOrientationBackups = pgTable(
+  "photo_orientation_backups",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    repairKey: text("repair_key").notNull(),
+    photoId: text("photo_id").notNull(),
+    quoteId: text("quote_id").notNull(),
+    intakeId: text("intake_id").notNull(),
+    stock: text("stock").notNull(),
+    slot: text("slot"),
+    direction: text("direction").notNull(),
+    originalMime: text("original_mime").notNull(),
+    originalData: bytea("original_data").notNull(),
+    originalTs: bigint("original_ts", { mode: "number" }).notNull(),
+    originalSha256: text("original_sha256").notNull(),
+    repairedSha256: text("repaired_sha256").notNull(),
+    repairedTs: bigint("repaired_ts", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    rolledBackAt: timestamp("rolled_back_at", { withTimezone: true }),
+    rollbackTs: bigint("rollback_ts", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("photo_orientation_backups_repair_photo_idx").on(t.repairKey, t.photoId),
+    index("photo_orientation_backups_photo_idx").on(t.photoId),
+  ],
+);
+
 export const intakes = pgTable(
   "intakes",
   {
