@@ -31,6 +31,9 @@
  *  - `repair_bc23139_photo_link` phase: one audited, idempotent correction for
  *    the duplicate Tacoma intake whose newer committed row lost the link to
  *    its only verified quote/photo gallery. It changes no quote or photo data.
+ *  - `repair_bc23115_sideways_photo` phase: accepts one pre-inspected,
+ *    left-turned JPEG at a time. A fixed id/slot/timestamp allowlist prevents
+ *    the operation from touching newer retakes or the six already-upright rows.
  */
 import type { Express, Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
@@ -38,6 +41,11 @@ import pg from "pg";
 import { pool } from "./db";
 import { snapshotMonth } from "./tracker";
 import { inferPhotoRole } from "@shared/photoRoles";
+import {
+  BC23115_ORIENTATION_REPAIR,
+  decodeBc23115Replacement,
+  getBc23115RepairPhoto,
+} from "./bc23115PhotoRepair";
 
 const { Pool } = pg;
 const PHOTO_BATCH = 25;
@@ -748,6 +756,144 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
         } catch (e) {
           await client.query("ROLLBACK").catch(() => {});
           throw e;
+        } finally {
+          client.release();
+        }
+      }
+
+      if (phase === "repair_bc23115_sideways_photo") {
+        const repair = BC23115_ORIENTATION_REPAIR;
+        const photo = getBc23115RepairPhoto(String(req.body?.photoId || ""));
+        if (!photo) {
+          return res.status(400).json({ message: "Photo is not in the inspected BC23115 repair set" });
+        }
+
+        let replacement: Awaited<ReturnType<typeof decodeBc23115Replacement>>;
+        try {
+          replacement = await decodeBc23115Replacement(req.body?.dataUrl);
+        } catch (error) {
+          return res.status(400).json({
+            message: error instanceof Error ? error.message : "Invalid replacement JPEG",
+          });
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [`${repair.repairKey}:${photo.id}`],
+          );
+
+          const priorAudit = await client.query(
+            `SELECT details
+             FROM audit_log
+             WHERE action = 'photo_orientation_repaired'
+               AND details->>'repairKey' = $1
+               AND details->>'photoId' = $2
+             LIMIT 1`,
+            [repair.repairKey, photo.id],
+          );
+          if (priorAudit.rowCount) {
+            await client.query("COMMIT");
+            return res.json({
+              phase,
+              repairKey: repair.repairKey,
+              photoId: photo.id,
+              alreadyApplied: true,
+            });
+          }
+
+          const current = await client.query(
+            `SELECT p.id, p.ts, OCTET_LENGTH(p.data)::int AS bytes
+             FROM photos p
+             WHERE p.id = $1
+               AND p.quote_id = $2
+               AND p.slot = $3
+               AND p.ts = $4
+               AND EXISTS (
+                 SELECT 1
+                 FROM intakes i
+                 WHERE i.id = $5
+                   AND i.quote_id = $2
+                   AND UPPER(TRIM(i.stock)) = $6
+               )
+             FOR UPDATE`,
+            [
+              photo.id,
+              repair.quoteId,
+              photo.slot,
+              photo.expectedTs,
+              repair.intakeId,
+              repair.stock,
+            ],
+          );
+          if (current.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23115 photo changed or no longer matches the inspected repair plan; repair refused",
+            });
+          }
+
+          const repairedTs = Math.max(Date.now(), photo.expectedTs + 1);
+          const updated = await client.query(
+            `UPDATE photos
+             SET data = $1, mime = 'image/jpeg', ts = $2
+             WHERE id = $3
+               AND quote_id = $4
+               AND slot = $5
+               AND ts = $6`,
+            [
+              replacement.bytes,
+              repairedTs,
+              photo.id,
+              repair.quoteId,
+              photo.slot,
+              photo.expectedTs,
+            ],
+          );
+          if (updated.rowCount !== 1) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              message: "BC23115 photo changed while the repair was running; repair refused",
+            });
+          }
+
+          await client.query(
+            `INSERT INTO audit_log
+               (action, actor_id, actor_email, actor_name, details)
+             VALUES
+               ('photo_orientation_repaired', 'replit-agent', 'system@truckranch.com', 'Replit Agent',
+                $1::jsonb)`,
+            [JSON.stringify({
+              repairKey: repair.repairKey,
+              stock: repair.stock,
+              intakeId: repair.intakeId,
+              quoteId: repair.quoteId,
+              photoId: photo.id,
+              slot: photo.slot,
+              direction: repair.direction,
+              oldTs: photo.expectedTs,
+              newTs: repairedTs,
+              oldBytes: Number(current.rows[0].bytes),
+              newBytes: replacement.bytes.length,
+              width: replacement.width,
+              height: replacement.height,
+            })],
+          );
+          await client.query("COMMIT");
+          return res.json({
+            phase,
+            repairKey: repair.repairKey,
+            photoId: photo.id,
+            alreadyApplied: false,
+            direction: repair.direction,
+            width: replacement.width,
+            height: replacement.height,
+          });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw error;
         } finally {
           client.release();
         }

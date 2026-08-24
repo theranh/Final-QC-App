@@ -20,3 +20,4 @@
 - [VIN scanner reliability](vin-scanner-reliability.md) — keep ZXing bundled; native barcode APIs are optional, bounded accelerators and must never block/callback after close.
 - [Photo ownership and roles](photo-ownership-roles.md) — reopen through the intake’s exact quote link; persist photo roles and isolate unknown legacy slots rather than guessing.
 - [Guided photo route](guided-photo-route.md) — shop route is exterior → wheels/tires → interior; show the active angle and preserve shutter-time ownership across async work.
+- [Production binary repairs](production-binary-repairs.md) — fully decode and format-check replacement bytes; exact version guards, audit, and recoverable originals are mandatory.
