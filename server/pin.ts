@@ -7,7 +7,7 @@ import { db } from "./db";
 import { requireEmployee } from "./access";
 import { invalidateDashboardCache } from "./dashboard";
 import { and } from "drizzle-orm";
-import { auditLog, employees, quotes, intakes, settings, type Employee } from "@shared/schema";
+import { auditLog, deletedQuotes, employees, quotes, intakes, photos, settings, type Employee } from "@shared/schema";
 import { captureCommitSnapshot } from "./quoteSnapshot";
 
 // ---------------------------------------------------------------------------
@@ -395,6 +395,175 @@ export function registerPinRoutes(app: Express) {
         stock: saved.stock,
         miles: saved.miles,
         updatedAt: Number.isFinite(updatedMs) ? updatedMs : Date.now(),
+      });
+    }),
+  );
+
+  // ----- POST /api/quoter/intakes/:id/repair-gallery-link -----
+  // An accidental duplicate may be the newest VIN row while an older exact
+  // intake-to-quote link owns the truck's gallery. Repair never guesses by VIN:
+  // the admin confirms one concrete source intake, then the server revalidates
+  // both rows and the source gallery inside the audited transaction.
+  app.post(
+    "/api/quoter/intakes/:id/repair-gallery-link",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const targetIntakeId = String(req.params.id || "").slice(0, 60);
+      const sourceIntakeId = String(req.body?.sourceIntakeId || "").slice(0, 60);
+      if (!targetIntakeId || !sourceIntakeId) {
+        return res.status(400).json({ error: "Missing target or source intake id" });
+      }
+      if (targetIntakeId === sourceIntakeId) {
+        return res.status(400).json({ error: "Source intake must be a different record" });
+      }
+
+      const sig = await resolveSignature({ ...req.body, forEmployeeId: undefined }, req);
+      if (!sig.ok) return res.status(sig.status).json({ error: sig.error });
+      if (!sig.signer.canOverride) {
+        return res.status(403).json({ error: "An admin PIN is required" });
+      }
+
+      let missingTarget = false;
+      let missingSource = false;
+      let alreadyLinked = false;
+      let vinMismatch = false;
+      let sourceUnlinked = false;
+      let sourceDeleted = false;
+      let sourceEmpty = false;
+      let photoCounts = {
+        total: 0,
+        walk: 0,
+        damage: 0,
+        damageWide: 0,
+        unclassified: 0,
+      };
+      let linkedQuoteId: string | null = null;
+
+      await db.transaction(async (tx) => {
+        // Lock the target first. Competing repairs for the same duplicate then
+        // serialize before either one can inspect and overwrite quote_id.
+        const targetResult = await tx.execute(sql`
+          SELECT id, vin, stock, miles, quote_id, committed_by
+          FROM ${intakes}
+          WHERE id = ${targetIntakeId}
+          FOR UPDATE
+        `);
+        const target = targetResult.rows?.[0] as any;
+        if (!target) {
+          missingTarget = true;
+          return;
+        }
+        if (target.quote_id) {
+          alreadyLinked = true;
+          linkedQuoteId = String(target.quote_id);
+          return;
+        }
+
+        const sourceResult = await tx.execute(sql`
+          SELECT id, vin, stock, miles, quote_id, committed_by
+          FROM ${intakes}
+          WHERE id = ${sourceIntakeId}
+          FOR UPDATE
+        `);
+        const source = sourceResult.rows?.[0] as any;
+        if (!source) {
+          missingSource = true;
+          return;
+        }
+        if (
+          String(source.vin || "").trim().toUpperCase() !==
+          String(target.vin || "").trim().toUpperCase()
+        ) {
+          vinMismatch = true;
+          return;
+        }
+        const sourceQuoteId = String(source.quote_id || "");
+        if (!sourceQuoteId) {
+          sourceUnlinked = true;
+          return;
+        }
+        // Quote deletion and photo uploads use this same lock. Holding it from
+        // here through tombstone/photo validation and the target update makes
+        // the repair linearizable with a concurrent gallery deletion.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${sourceQuoteId})::bigint)`,
+        );
+        const tombstone = await tx
+          .select({ id: deletedQuotes.id })
+          .from(deletedQuotes)
+          .where(eq(deletedQuotes.id, sourceQuoteId));
+        if (tombstone.length) {
+          sourceDeleted = true;
+          return;
+        }
+        const countResult = await tx.execute(sql`
+          SELECT
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE role = 'walk')::int AS walk,
+            COUNT(*) FILTER (WHERE role = 'damage')::int AS damage,
+            COUNT(*) FILTER (WHERE role = 'damage_wide')::int AS damage_wide,
+            COUNT(*) FILTER (WHERE role NOT IN ('walk', 'damage', 'damage_wide'))::int AS unclassified
+          FROM ${photos}
+          WHERE quote_id = ${sourceQuoteId}
+        `);
+        const counts = (countResult.rows?.[0] || {}) as any;
+        photoCounts = {
+          total: Number(counts.total) || 0,
+          walk: Number(counts.walk) || 0,
+          damage: Number(counts.damage) || 0,
+          damageWide: Number(counts.damage_wide) || 0,
+          unclassified: Number(counts.unclassified) || 0,
+        };
+        if (!photoCounts.total) {
+          sourceEmpty = true;
+          return;
+        }
+
+        const updated = await tx.execute(sql`
+          UPDATE intakes
+          SET quote_id = ${sourceQuoteId}, updated_at = NOW()
+          WHERE id = ${targetIntakeId} AND quote_id IS NULL
+          RETURNING quote_id
+        `);
+        const row = updated.rows?.[0] as any;
+        if (!row) {
+          alreadyLinked = true;
+          return;
+        }
+        linkedQuoteId = String(row.quote_id);
+        await auditCommit(tx, "intake_gallery_link_repaired", sig.signer, {
+          targetIntakeId,
+          sourceIntakeId,
+          vin: String(target.vin || "").trim().toUpperCase(),
+          targetStock: target.stock || "",
+          targetMiles: target.miles || "",
+          sourceStock: source.stock || "",
+          sourceMiles: source.miles || "",
+          quoteId: linkedQuoteId,
+          photoCounts,
+        });
+      });
+
+      if (missingTarget) return res.status(404).json({ error: "Target intake not found" });
+      if (missingSource) return res.status(404).json({ error: "Gallery-owning intake not found" });
+      if (alreadyLinked) {
+        return res.status(409).json({
+          error: "Target intake already has an authoritative quote link",
+          quoteId: linkedQuoteId,
+        });
+      }
+      if (vinMismatch) return res.status(409).json({ error: "The two intakes do not have the same VIN" });
+      if (sourceUnlinked) return res.status(409).json({ error: "The selected source intake has no quote link" });
+      if (sourceDeleted) return res.status(409).json({ error: "The selected quote was deleted" });
+      if (sourceEmpty) return res.status(409).json({ error: "The selected intake no longer owns any photos" });
+      if (!linkedQuoteId) return res.status(409).json({ error: "Gallery link changed before repair completed" });
+
+      res.json({
+        ok: true,
+        intakeId: targetIntakeId,
+        sourceIntakeId,
+        quoteId: linkedQuoteId,
+        photoCounts,
       });
     }),
   );

@@ -57,6 +57,13 @@ function saveToCache(it) {
 
 const newId = () => 'in' + Date.now() + Math.random().toString(36).slice(2, 6);
 
+const galleryDateLabel = (record) => {
+  const value = record?.completedAt || record?.createdAt || record?.updatedAt;
+  if (!value) return 'Date unavailable';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleDateString();
+};
+
 function blankIntake(vin) {
   return {
     id: newId(),
@@ -169,6 +176,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [manualOpen, setManualOpen] = useState(false);
   const [recentQuotes, setRecentQuotes] = useState([]);
   const [dupWarn, setDupWarn] = useState(null); // { vin, intakeRow, quoteRow, proceed }
+  const [galleryConflict, setGalleryConflict] = useState(null);
+  const [galleryRepairCandidate, setGalleryRepairCandidate] = useState(null);
   const intakeRef = useRef(null);
   intakeRef.current = intake;
   // Every open/retry receives a generation. A response from an earlier visit
@@ -301,7 +310,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     try {
       const j = await api.getIntake(v);
       if (!isCurrent()) return;
-      if (!j || !j.found) { setServerCheckFailed(false); return; }
+      if (!j || !j.found) {
+        setGalleryConflict(null);
+        setServerCheckFailed(false);
+        return;
+      }
+      setGalleryConflict(j.galleryConflict || null);
       const cur = intakeRef.current;
       const serverIsFinal = !!(j.completedAt || j.committedBy);
       if (!serverIsFinal && (j.updatedAt || 0) <= (cur.ts || 0)) {
@@ -424,6 +438,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       intakeRef.current = it;
       lastEditTsRef.current = Math.max(lastEditTsRef.current, Number(it.ts) || 0);
       setServerCheckFailed(false);
+      setGalleryConflict(authoritativeRow?.galleryConflict || null);
+      setGalleryRepairCandidate(null);
       setIntake(it);
       if (v.length >= 6 && !authoritativeRow?.found) refreshFromServer(v, generation);
     },
@@ -514,6 +530,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     const linked = { ...intakeRef.current, quoteId: canonical };
     intakeRef.current = linked;
     setIntake(linked);
+    setGalleryConflict(null);
     saveToCache(linked);
     return canonical;
   };
@@ -533,63 +550,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     } catch (e) {
       if (!linkOperationIsCurrent(operation)) return null;
       if (e?.status === 409) {
-        // 409 means "committed or not found". Repair by VIN, never blindly:
-        // another phone may already own this VIN's server row under a
-        // different id, and re-pushing ours would split the truck across two
-        // rows. So: adopt an existing uncommitted VIN row (link against its
-        // id), stop on a committed one, and only re-push our row when the
-        // server has no row for this VIN at all (first save never landed).
-        try {
-          if (String(operation.vin || '').length >= 6) {
-            const j = await api.getIntake(operation.vin).catch(() => null);
-            if (!linkOperationIsCurrent(operation)) return null;
-            if (j?.found && j.id) {
-              if (j.committedBy) {
-                showToast?.('This intake was already committed — it is locked. Refreshing…');
-                refreshFromServer(operation.vin);
-                return null;
-              }
-              if (j.quoteId) {
-                const live = intakeRef.current;
-                const serverIsNewer =
-                  !!(j.completedAt || j.committedBy) ||
-                  (Number(j.updatedAt) || 0) > (Number(live?.ts) || 0);
-                const base = serverIsNewer ? intakeFromServerRow(j) : live;
-                const linked = { ...base, id: j.id, quoteId: j.quoteId };
-                intakeRef.current = linked;
-                setIntake(linked);
-                saveToCache(linked);
-                return j.quoteId;
-              }
-              const qid = 'q' + Date.now() + Math.random().toString(36).slice(2, 6);
-              const r = await api.linkIntakeQuote(j.id, qid);
-              if (!linkOperationIsCurrent(operation)) return null;
-              const canonical = r?.quoteId || qid;
-              const live = intakeRef.current;
-              const serverIsNewer =
-                !!(j.completedAt || j.committedBy) ||
-                (Number(j.updatedAt) || 0) > (Number(live?.ts) || 0);
-              const base = serverIsNewer ? intakeFromServerRow(j) : live;
-              const linked = { ...base, id: j.id, quoteId: canonical };
-              intakeRef.current = linked;
-              setIntake(linked);
-              saveToCache(linked);
-              return canonical;
-            }
-            await api.putIntake(intakePayload(intakeRef.current));
-            if (!linkOperationIsCurrent(operation)) return null;
-            return await ensureIntakeQuote(operation);
-          }
-        } catch {
-          if (linkOperationIsCurrent(operation)) {
-            showToast?.('Could not reach the server — check your connection and try again.');
-          }
-          return null;
-        }
-        if (linkOperationIsCurrent(operation)) {
-          showToast?.('This intake was already committed — it is locked. Refreshing…');
-          refreshFromServer(operation.vin);
-        }
+        // Never recover a link conflict by looking up another row by VIN. That
+        // could silently adopt a legitimate repeat visit. The exact intake must
+        // be reopened or repaired through the explicit gallery-owner warning.
+        showToast?.('This exact intake could not be linked. Reopen it, then review any gallery-owner warning.');
       } else if (e?.status === 401) {
         showToast?.('You are signed out — sign in again first.');
       } else {
@@ -683,6 +647,33 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     });
   };
 
+  const repairGalleryLink = ({ signerId, pin }) => {
+    const cur = intakeRef.current;
+    const candidate = galleryRepairCandidate;
+    if (!cur || !candidate) return Promise.reject(new Error('Choose a gallery to repair'));
+    const operation = {
+      generation: openGenerationRef.current,
+      vin: cur.vin,
+      id: cur.id,
+      sourceIntakeId: candidate.intakeId,
+    };
+    return api.repairIntakeGalleryLink(cur.id, {
+      sourceIntakeId: candidate.intakeId,
+      signerId,
+      pin,
+    }).then((r) => {
+      if (!linkOperationIsCurrent(operation)) return;
+      const linked = { ...intakeRef.current, quoteId: r.quoteId };
+      intakeRef.current = linked;
+      setIntake(linked);
+      saveToCache(linked);
+      setGalleryConflict(null);
+      setGalleryRepairCandidate(null);
+      setPhotoLoadAttempt((n) => n + 1);
+      showToast?.(`Existing gallery linked · ${r.photoCounts?.total || candidate.photoCount} photos`);
+    });
+  };
+
   const cleanVin = vin.trim().toUpperCase();
   const started = intake && cleanVin.length >= 6;
 
@@ -701,6 +692,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const rotationBusyRef = useRef(false);
   const photoQuoteId = intake?.quoteId ?? null;
   const photoIntakeId = intake?.id ?? null;
+  const photoLookupReady = !!photoQuoteId || !!intake?.completedAt || !!intake?.committedBy || Number(intake?.ts) > 0;
   // Photos can still be uploading in the background (weak signal) when the
   // grid first loads — track the retry queue and refresh the list as shots
   // land, so a saved intake never looks like photos went missing.
@@ -714,8 +706,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const photoRequestRef = useRef(0);
   useEffect(() => {
     const effectToken = ++photoRequestRef.current;
-    if (!photoIntakeId || !photoQuoteId || walkOpen) {
-      if (!photoIntakeId || !photoQuoteId) setIntakePhotos([]);
+    if (!photoIntakeId || !photoLookupReady || walkOpen) {
+      if (!photoIntakeId) setIntakePhotos([]);
       return;
     }
     let live = true;
@@ -730,6 +722,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             intakeRef.current?.id === photoIntakeId
           ) {
             setIntakePhotos(j?.photos || []);
+            setGalleryConflict(j?.galleryConflict || null);
             setPhotoLoadError(false);
             // The manifest is server-resolved through this intake row. Repair a
             // stale local link without issuing another save that could race it.
@@ -752,7 +745,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     // pendingUploads dependency triggers a final refresh when it hits zero.
     const t = pendingUploads > 0 ? setInterval(load, 4000) : null;
     return () => { live = false; photoRequestRef.current += 1; if (t) clearInterval(t); };
-  }, [photoIntakeId, photoQuoteId, walkOpen, quoting, pendingUploads, photoLoadAttempt]);
+  }, [photoIntakeId, photoQuoteId, photoLookupReady, walkOpen, quoting, pendingUploads, photoLoadAttempt]);
 
   // Body Quoter sub-view — opens over the checklist for the current VIN and
   // returns here on back. Keeps the Intake tab as the single host.
@@ -1045,6 +1038,44 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 {pendingUploads > 0 && <span style={{ marginLeft: 8, color: 'var(--amber)', fontWeight: 700 }}>· sending {pendingUploads}…</span>}
               </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:5}}>Capture the truck from every angle before the quote is finalized.</div>
+              {!intake.quoteId && galleryConflict?.candidates?.length > 0 && (
+                <div
+                  role="alert"
+                  style={{
+                    marginTop: 10,
+                    padding: '10px 11px',
+                    borderRadius: 9,
+                    background: '#fdf3e0',
+                    border: '1px solid var(--amber)',
+                    color: '#6f4d09',
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 800 }}>ANOTHER INTAKE OWNS THIS VIN’S GALLERY</div>
+                  <div style={{ fontSize: 10.5, marginTop: 4, lineHeight: 1.4 }}>
+                    No photos are linked to this intake. Review the other record before an admin links anything. If this is a legitimate repeat visit, leave it separate and take new photos.
+                  </div>
+                  {galleryConflict.candidates.map((candidate) => (
+                    <div
+                      key={`${candidate.intakeId}:${candidate.quoteId}`}
+                      style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid rgba(138,98,16,.28)' }}
+                    >
+                      <div style={{ fontSize: 11, fontWeight: 800 }}>
+                        {candidate.stock || 'No stock #'} · {candidate.miles || 'No mileage'} mi · {galleryDateLabel(candidate)}
+                      </div>
+                      <div style={{ fontSize: 10.5, marginTop: 2 }}>
+                        {candidate.photoCount} photos · {candidate.walkPhotoCount} walk-around · {candidate.damagePhotoCount} damage
+                      </div>
+                      <button
+                        className="btn btn-outline-brown"
+                        style={{ height: 40, marginTop: 7 }}
+                        onClick={() => setGalleryRepairCandidate(candidate)}
+                      >
+                        REVIEW &amp; LINK {candidate.photoCount} PHOTOS · ADMIN PIN
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {persistenceOk === false && (
                 <div style={{ marginTop: 8, padding: '7px 10px', borderRadius: 8, background: '#fdf3e0', border: '1px solid var(--amber)', fontSize: 11, fontWeight: 700, color: '#8a6210' }}>
                   ⚠ This browser can’t save photos for retry (private mode or blocked storage). Keep the app open until every photo finishes sending.
@@ -1257,6 +1288,41 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 onChange={(e) => setIdentityDraft((d) => ({ ...d, miles: e.target.value }))}
               />
             </label>
+          </div>
+        </PinDialog>
+      )}
+      {galleryRepairCandidate && intake && (
+        <PinDialog
+          title="Repair gallery ownership"
+          subtitle={`${intake.vin} · explicit duplicate repair`}
+          adminOnly
+          confirmLabel="Link this exact gallery"
+          busyLabel="Linking…"
+          onCommit={repairGalleryLink}
+          onClose={() => setGalleryRepairCandidate(null)}
+        >
+          <div role="group" aria-label="Gallery ownership confirmation" style={{ marginTop: 12 }}>
+            <div style={{ padding: '9px 10px', borderRadius: 8, background: 'var(--panel)', border: '1px solid var(--border)' }}>
+              <div className="field-label">SELECTED INTAKE · CURRENTLY 0 PHOTOS</div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 3 }}>
+                {intake.stock || 'No stock #'} · {intake.miles || 'No mileage'} mi · {galleryDateLabel(galleryConflict?.selectedIntake || intake)}
+              </div>
+            </div>
+            <div style={{ textAlign: 'center', fontSize: 18, color: 'var(--amber)', padding: '5px 0' }}>↓</div>
+            <div style={{ padding: '9px 10px', borderRadius: 8, background: '#fdf3e0', border: '1px solid var(--amber)' }}>
+              <div className="field-label">EXISTING GALLERY OWNER</div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 3 }}>
+                {galleryRepairCandidate.stock || 'No stock #'} · {galleryRepairCandidate.miles || 'No mileage'} mi · {galleryDateLabel(galleryRepairCandidate)}
+              </div>
+              <div style={{ fontSize: 10.5, marginTop: 4 }}>
+                {galleryRepairCandidate.photoCount} total · {galleryRepairCandidate.walkPhotoCount} walk-around · {galleryRepairCandidate.damagePhotoCount} damage
+                {galleryRepairCandidate.damageWidePhotoCount ? ` · ${galleryRepairCandidate.damageWidePhotoCount} context` : ''}
+                {galleryRepairCandidate.unclassifiedPhotoCount ? ` · ${galleryRepairCandidate.unclassifiedPhotoCount} legacy` : ''}
+              </div>
+            </div>
+            <div style={{ fontSize: 10.5, color: 'var(--red)', fontWeight: 700, lineHeight: 1.4, marginTop: 9 }}>
+              Confirm only if these records are the same visit. This permanently makes the selected intake point to this exact quote; the app will not choose by VIN automatically.
+            </div>
           </div>
         </PinDialog>
       )}

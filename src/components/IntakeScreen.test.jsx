@@ -12,6 +12,7 @@ const INVALID_VIN = '1HGCM82633A004353'; // same VIN, broken check digit
 // ---- mocks --------------------------------------------------------------
 const putIntake = vi.fn(() => Promise.resolve({}));
 const linkIntakeQuote = vi.fn(() => Promise.resolve({}));
+const repairIntakeGalleryLink = vi.fn(() => Promise.resolve({}));
 const getIntake = vi.fn(() => Promise.resolve({ found: false }));
 const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
 const intakePhotos = vi.fn(() => Promise.resolve({ quoteId: null, photos: [] }));
@@ -33,6 +34,7 @@ vi.mock('../lib/api', () => ({
     intakePhotos: (...args) => intakePhotos(...args),
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
+    repairIntakeGalleryLink: (...args) => repairIntakeGalleryLink(...args),
     commitIntake: (...args) => commitIntake(...args),
     correctCommittedIntake: (...args) => correctCommittedIntake(...args),
     putQuotePhoto: (...args) => putQuotePhoto(...args),
@@ -90,6 +92,8 @@ beforeEach(() => {
   putIntake.mockClear();
   linkIntakeQuote.mockReset();
   linkIntakeQuote.mockResolvedValue({});
+  repairIntakeGalleryLink.mockReset();
+  repairIntakeGalleryLink.mockResolvedValue({});
   getIntake.mockReset();
   getIntake.mockResolvedValue({ found: false });
   quotePhotos.mockReset();
@@ -701,19 +705,13 @@ describe('IntakeScreen cache and request ordering', () => {
     expect(cache[VIN_B].quoteId).toBeNull();
   });
 
-  it('abandons 409 link repair when the open VIN changes', async () => {
-    let resolveRepairLookup;
+  it('does not fall back to another intake by VIN after a link conflict', async () => {
     linkIntakeQuote.mockRejectedValueOnce(Object.assign(new Error('Conflict'), { status: 409 }));
-    getIntake
-      .mockResolvedValueOnce({ found: false })
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveRepairLookup = resolve; }));
     const intakeA = serverRow(VALID_VIN, 'A-STOCK', 100);
-    const intakeB = serverRow(VIN_B, 'B-STOCK', 200);
     localStorage.setItem('trqc.intake.cache.v2', JSON.stringify({
       [VALID_VIN]: { ...intakeA, ts: 100 },
-      [VIN_B]: { ...intakeB, ts: 200 },
     }));
-    const view = render(
+    render(
       <IntakeScreen
         showToast={() => {}}
         openVin={VALID_VIN}
@@ -722,23 +720,133 @@ describe('IntakeScreen cache and request ordering', () => {
     );
     await screen.findByDisplayValue('A-STOCK');
     fireEvent.click(screen.getByRole('button', { name: 'TAKE WALK-AROUND PHOTOS' }));
-    await waitFor(() => expect(getIntake).toHaveBeenCalledTimes(2));
-
-    view.rerender(
-      <IntakeScreen
-        showToast={() => {}}
-        openVin={VIN_B}
-        onOpenVinConsumed={() => {}}
-      />,
-    );
-    expect(await screen.findByDisplayValue('B-STOCK')).toBeInTheDocument();
-    resolveRepairLookup({ ...intakeA, found: true, quoteId: null });
-
-    await waitFor(() => expect(screen.getByDisplayValue('B-STOCK')).toBeInTheDocument());
+    await waitFor(() => expect(linkIntakeQuote).toHaveBeenCalledTimes(1));
+    expect(getIntake).toHaveBeenCalledTimes(1);
+    expect(repairIntakeGalleryLink).not.toHaveBeenCalled();
     expect(linkIntakeQuote).toHaveBeenCalledTimes(1);
     const cache = JSON.parse(localStorage.getItem('trqc.intake.cache.v2'));
-    expect(cache[VIN_B].id).toBe(intakeB.id);
-    expect(cache[VIN_B].quoteId).toBeNull();
+    expect(cache[VALID_VIN].id).toBe(intakeA.id);
+    expect(cache[VALID_VIN].quoteId).toBeNull();
+  });
+});
+
+describe('IntakeScreen duplicate gallery repair', () => {
+  const duplicateRow = {
+    found: true,
+    id: 'in-new-duplicate',
+    vin: VALID_VIN,
+    stock: 'NEW-STOCK',
+    vehicle: '2021 Honda Accord',
+    miles: '50000',
+    estimator: 'Sam',
+    quoteId: null,
+    data: {},
+    completedAt: 1767225600000,
+    committedBy: 'Sam',
+    updatedAt: 1767225600000,
+  };
+  const galleryConflict = {
+    selectedIntake: {
+      intakeId: 'in-new-duplicate',
+      stock: 'NEW-STOCK',
+      miles: '50000',
+      completedAt: 1767225600000,
+      photoCount: 0,
+    },
+    candidates: [{
+      intakeId: 'in-original',
+      quoteId: 'q-original',
+      stock: 'OLD-STOCK',
+      miles: '49000',
+      vehicle: '2021 Honda Accord',
+      completedAt: 1735689600000,
+      photoCount: 32,
+      walkPhotoCount: 29,
+      damagePhotoCount: 3,
+      damageWidePhotoCount: 0,
+      unclassifiedPhotoCount: 0,
+    }],
+  };
+
+  it('warns instead of borrowing photos, then links only the admin-confirmed gallery', async () => {
+    getIntake.mockResolvedValue({ ...duplicateRow, galleryConflict });
+    let repaired = false;
+    intakePhotos.mockImplementation(() => Promise.resolve(
+      repaired
+        ? {
+            intakeId: 'in-new-duplicate',
+            quoteId: 'q-original',
+            photos: [{ id: 'walk-repaired', slot: 'ext_front', role: 'walk', ts: 1 }],
+          }
+        : { intakeId: 'in-new-duplicate', quoteId: null, photos: [], galleryConflict },
+    ));
+    repairIntakeGalleryLink.mockImplementation(() => {
+      repaired = true;
+      return Promise.resolve({
+        ok: true,
+        quoteId: 'q-original',
+        photoCounts: { total: 32, walk: 29, damage: 3 },
+      });
+    });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByText(/another intake owns this vin’s gallery/i)).toBeInTheDocument();
+    expect(screen.getByText(/OLD-STOCK · 49000 mi/i)).toBeInTheDocument();
+    expect(screen.getByText(/32 photos · 29 walk-around · 3 damage/i)).toBeInTheDocument();
+    expect(screen.getByText('WALK-AROUND PHOTOS · 0')).toBeInTheDocument();
+    expect(repairIntakeGalleryLink).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /review & link 32 photos/i }));
+    expect(screen.getByTestId('mock-pin')).toHaveAttribute('data-admin-only', 'true');
+    expect(screen.getByRole('group', { name: /gallery ownership confirmation/i })).toHaveTextContent('NEW-STOCK');
+    expect(screen.getByRole('group', { name: /gallery ownership confirmation/i })).toHaveTextContent('OLD-STOCK');
+    expect(screen.getByRole('group', { name: /gallery ownership confirmation/i })).toHaveTextContent('32 total');
+
+    fireEvent.click(screen.getByRole('button', { name: 'mock-pin-submit' }));
+    await waitFor(() => expect(repairIntakeGalleryLink).toHaveBeenCalledWith('in-new-duplicate', {
+      sourceIntakeId: 'in-original',
+      signerId: 2,
+      pin: '2222',
+    }));
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 1')).toBeInTheDocument();
+  });
+
+  it('keeps a legitimate repeat visit separate unless repair is explicitly confirmed', async () => {
+    getIntake.mockResolvedValue({
+      ...duplicateRow,
+      id: 'in-repeat-visit',
+      stock: 'RETURN-STOCK',
+      miles: '62000',
+      completedAt: null,
+      committedBy: null,
+      galleryConflict: {
+        ...galleryConflict,
+        selectedIntake: {
+          ...galleryConflict.selectedIntake,
+          intakeId: 'in-repeat-visit',
+          stock: 'RETURN-STOCK',
+          miles: '62000',
+        },
+      },
+    });
+    intakePhotos.mockResolvedValue({
+      intakeId: 'in-repeat-visit',
+      quoteId: null,
+      photos: [],
+      galleryConflict,
+    });
+    linkIntakeQuote.mockResolvedValue({ quoteId: 'q-new-repeat-visit' });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByText(/legitimate repeat visit, leave it separate/i)).toBeInTheDocument();
+    expect(screen.getByText('WALK-AROUND PHOTOS · 0')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'TAKE WALK-AROUND PHOTOS' }));
+
+    await waitFor(() => expect(linkIntakeQuote).toHaveBeenCalledWith('in-repeat-visit', expect.stringMatching(/^q/)));
+    expect(repairIntakeGalleryLink).not.toHaveBeenCalled();
+    expect(linkIntakeQuote.mock.calls[0][1]).not.toBe('q-original');
   });
 });
 

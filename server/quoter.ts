@@ -6,7 +6,7 @@ import { db } from "./db";
 import { requireEmployee, requireAdmin } from "./access";
 import { aiAnalyses, corrections, deletedQuotes, intakes, photos, quotes, settings } from "@shared/schema";
 import { validateRates } from "./ratesValidation";
-import { bestWalkPhotoIds } from "./localQuote";
+import { bestWalkPhotoIds, findIntakeGalleryConflict } from "./localQuote";
 import { inferPhotoRole, isPhotoRole, validPhotoRoleForSlot } from "@shared/photoRoles";
 import { readJpegExifOrientation } from "./photoExif";
 
@@ -616,8 +616,9 @@ export function registerQuoterRoutes(app: Express) {
       if (!owner.rows.length) return res.status(404).json({ error: "Intake not found" });
       const quoteId = String((owner.rows[0] as any).quote_id || "");
       if (!quoteId) {
+        const galleryConflict = await findIntakeGalleryConflict(intakeId);
         res.set("Cache-Control", "no-store");
-        return res.json({ intakeId, quoteId: null, photos: [] });
+        return res.json({ intakeId, quoteId: null, photos: [], galleryConflict });
       }
       const manifest = await db.execute(
         sql`SELECT id, slot, role, ts, LENGTH(data) AS bytes
@@ -780,6 +781,7 @@ export function registerQuoterRoutes(app: Express) {
       res.set("Cache-Control", "no-store");
       if (!r.rows.length) return res.json({ found: false, vin });
       const row = r.rows[0] as any;
+      const galleryConflict = row.quote_id ? null : await findIntakeGalleryConflict(String(row.id));
       res.json({
         found: true,
         id: row.id,
@@ -794,6 +796,7 @@ export function registerQuoterRoutes(app: Express) {
         overriddenBy: row.overridden_by || null,
         completedAt: row.completed_ms ? Math.round(Number(row.completed_ms)) : null,
         updatedAt: row.updated_ms ? Math.round(Number(row.updated_ms)) : 0,
+        galleryConflict,
       });
     }),
   );

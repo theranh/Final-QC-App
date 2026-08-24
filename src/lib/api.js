@@ -48,6 +48,8 @@ export const api = {
   listIntakes: () => request('GET', '/api/quoter/intakes'),
   putIntake: (payload) => request('PUT', '/api/quoter/intakes', payload),
   linkIntakeQuote: (id, quoteId) => request('POST', `/api/quoter/intakes/${encodeURIComponent(id)}/link-quote`, { quoteId }),
+  repairIntakeGalleryLink: (id, payload) =>
+    request('POST', `/api/quoter/intakes/${encodeURIComponent(id)}/repair-gallery-link`, payload),
   createInspection: (payload) => request('POST', '/api/inspections', payload),
   commitRecheck: (qc, payload) => request('POST', `/api/inspections/${encodeURIComponent(qc)}/recheck`, payload),
   importLegacy: (payload) => request('POST', '/api/import', payload),

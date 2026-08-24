@@ -26,6 +26,9 @@ const H = vi.hoisted(() => {
   const emps: EmpRow[] = [];
   const intakeRows: any[] = [];
   const quoteRows: any[] = [];
+  const photoRows: any[] = [];
+  const deletedQuoteRows: string[] = [];
+  const sqlTrace: string[] = [];
   const audits: any[] = [];
   const snapRows: any[] = []; // quote_snapshots (Phase 1A)
   const corrRows: any[] = []; // pricing_corrections (Phase 1A)
@@ -126,12 +129,37 @@ const H = vi.hoisted(() => {
     // intake-commit transaction.
     execute: async (q: any) => {
       const { text, params } = sqlParts(q);
+      sqlTrace.push(text);
       // (Table objects contribute no literal text in sqlParts, so match on
       // the FOR UPDATE marker — only the quote read uses it.)
       // Rates-version guard: locked read of the ratesMeta settings row.
       if (/ratesMeta/i.test(text)) {
         const row = settingsRows.find((s) => s.key === "ratesMeta");
         return { rows: row ? [{ value: row.value }] : [] };
+      }
+      if (/COUNT\(\*\)::int AS total/i.test(text) && /FROM/i.test(text)) {
+        const quoteId = params[0];
+        const owned = photoRows.filter((photo) => photo.quoteId === quoteId);
+        return {
+          rows: [{
+            total: owned.length,
+            walk: owned.filter((photo) => photo.role === "walk").length,
+            damage: owned.filter((photo) => photo.role === "damage").length,
+            damage_wide: owned.filter((photo) => photo.role === "damage_wide").length,
+            unclassified: owned.filter(
+              (photo) => !["walk", "damage", "damage_wide"].includes(photo.role),
+            ).length,
+          }],
+        };
+      }
+      if (/UPDATE intakes/i.test(text) && /quote_id IS NULL/i.test(text)) {
+        const quoteId = params[0];
+        const intakeId = params[1];
+        const row = intakeRows.find((intake) => intake.id === intakeId);
+        if (!row || row.quoteId || row.quote_id) return { rows: [] };
+        row.quoteId = quoteId;
+        row.quote_id = quoteId;
+        return { rows: [{ quote_id: quoteId }] };
       }
       if (/for update/i.test(text)) {
         const intake = intakeRows.find((r) => r.id === params[0]);
@@ -142,6 +170,7 @@ const H = vi.hoisted(() => {
               vin: intake.vin,
               stock: intake.stock,
               miles: intake.miles,
+              quote_id: intake.quoteId || intake.quote_id || null,
               committed_by: intake.committedBy,
             }],
           };
@@ -160,6 +189,7 @@ const H = vi.hoisted(() => {
         insert: makeInsert(),
         update: (_table: any) => fakeDb.update(_table),
         execute: fakeDb.execute,
+        select: (_cols?: any) => fakeDb.select(_cols),
       };
       return fn(tx);
     },
@@ -171,7 +201,8 @@ const H = vi.hoisted(() => {
           return {
             then: (res: any, rej: any) => {
               let rows: any[] = [];
-              if (settingsRows.some((s) => s.key === id)) rows = settingsRows.filter((s) => s.key === id);
+               if (deletedQuoteRows.includes(id)) rows = [{ id }];
+               else if (settingsRows.some((s) => s.key === id)) rows = settingsRows.filter((s) => s.key === id);
               else if (emps.some((e) => e.id === id)) rows = emps.filter((e) => e.id === id);
               else if (intakeRows.some((r) => r.id === id)) rows = intakeRows.filter((r) => r.id === id);
               else if (quoteRows.some((r) => r.id === id)) rows = quoteRows.filter((r) => r.id === id);
@@ -233,10 +264,10 @@ const H = vi.hoisted(() => {
       },
     }),
   };
-  return { emps, intakeRows, quoteRows, audits, snapRows, corrRows, settingsRows, fakeDb };
+  return { emps, intakeRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows, fakeDb };
 });
 
-const { emps, intakeRows, quoteRows, audits, snapRows, corrRows, settingsRows } = H;
+const { emps, intakeRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows } = H;
 
 describe("PIN hashing", () => {
   it("round-trips a correct PIN and rejects a wrong one", async () => {
@@ -297,6 +328,9 @@ beforeEach(async () => {
   // don't overflow the per-signer/per-IP buckets mid-suite.
   const { resetPinRateLimits } = await import("./pin");
   resetPinRateLimits();
+  photoRows.length = 0;
+  deletedQuoteRows.length = 0;
+  sqlTrace.length = 0;
 });
 
 async function post(path: string, body: any) {
@@ -483,6 +517,123 @@ describe("commit endpoints", () => {
 
     expect(r.status).toBe(409);
     expect(intakeRows.find((x) => x.id === "in-open").stock).toBe("OPEN");
+  });
+
+  it("uses an admin PIN to link one confirmed same-VIN gallery and audits the repair", async () => {
+    intakeRows.push(
+      {
+        id: "in-gallery-target",
+        vin: "GALLERYVIN1234567",
+        stock: "NEW-STOCK",
+        miles: "50000",
+        quoteId: null,
+        data: {},
+        committedBy: "Worker",
+      },
+      {
+        id: "in-gallery-source",
+        vin: "galleryvin1234567",
+        stock: "OLD-STOCK",
+        miles: "49000",
+        quoteId: "q-gallery-source",
+        data: {},
+        committedBy: "Worker",
+      },
+    );
+    photoRows.push(
+      { id: "gallery-walk", quoteId: "q-gallery-source", role: "walk" },
+      { id: "gallery-damage", quoteId: "q-gallery-source", role: "damage" },
+    );
+    const beforeAudits = audits.length;
+
+    const r = await post("/api/quoter/intakes/in-gallery-target/repair-gallery-link", {
+      sourceIntakeId: "in-gallery-source",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      intakeId: "in-gallery-target",
+      sourceIntakeId: "in-gallery-source",
+      quoteId: "q-gallery-source",
+      photoCounts: { total: 2, walk: 1, damage: 1 },
+    });
+    expect(intakeRows.find((row) => row.id === "in-gallery-target")?.quoteId).toBe("q-gallery-source");
+    expect(audits).toHaveLength(beforeAudits + 1);
+    expect(audits.at(-1)).toMatchObject({
+      action: "intake_gallery_link_repaired",
+      actorName: "Sup",
+      details: {
+        targetIntakeId: "in-gallery-target",
+        sourceIntakeId: "in-gallery-source",
+        quoteId: "q-gallery-source",
+        photoCounts: { total: 2, walk: 1, damage: 1 },
+      },
+    });
+    const advisoryIndex = sqlTrace.findIndex((text) => /pg_advisory_xact_lock/i.test(text));
+    const countIndex = sqlTrace.findIndex((text) => /COUNT\(\*\)::int AS total/i.test(text));
+    const updateIndex = sqlTrace.findIndex((text) => /UPDATE intakes/i.test(text) && /quote_id IS NULL/i.test(text));
+    expect(advisoryIndex).toBeGreaterThanOrEqual(0);
+    expect(countIndex).toBeGreaterThan(advisoryIndex);
+    expect(updateIndex).toBeGreaterThan(countIndex);
+  });
+
+  it("refuses gallery repair without an admin PIN", async () => {
+    intakeRows.push(
+      { id: "in-gallery-no-admin-target", vin: "NOADMINVIN12345", quoteId: null, data: {}, committedBy: null },
+      { id: "in-gallery-no-admin-source", vin: "NOADMINVIN12345", quoteId: "q-no-admin", data: {}, committedBy: "Worker" },
+    );
+    photoRows.push({ id: "no-admin-photo", quoteId: "q-no-admin", role: "walk" });
+
+    const r = await post("/api/quoter/intakes/in-gallery-no-admin-target/repair-gallery-link", {
+      sourceIntakeId: "in-gallery-no-admin-source",
+      signerId: 1,
+      pin: "1111",
+    });
+
+    expect(r.status).toBe(403);
+    expect(r.body.error).toMatch(/admin pin/i);
+    expect(intakeRows.find((row) => row.id === "in-gallery-no-admin-target")?.quoteId).toBeNull();
+  });
+
+  it("rejects a different-VIN source, an empty gallery, and an already-linked target", async () => {
+    intakeRows.push(
+      { id: "in-gallery-guard-target", vin: "TARGETVIN1234567", quoteId: null, data: {}, committedBy: null },
+      { id: "in-gallery-wrong-vin", vin: "OTHERVIN12345678", quoteId: "q-wrong-vin", data: {}, committedBy: "Worker" },
+      { id: "in-gallery-empty", vin: "TARGETVIN1234567", quoteId: "q-empty", data: {}, committedBy: "Worker" },
+      { id: "in-gallery-linked", vin: "TARGETVIN1234567", quoteId: "q-authoritative", data: {}, committedBy: "Worker" },
+      { id: "in-gallery-valid-source", vin: "TARGETVIN1234567", quoteId: "q-valid", data: {}, committedBy: "Worker" },
+    );
+    photoRows.push(
+      { id: "wrong-vin-photo", quoteId: "q-wrong-vin", role: "walk" },
+      { id: "valid-photo", quoteId: "q-valid", role: "walk" },
+    );
+
+    const wrongVin = await post("/api/quoter/intakes/in-gallery-guard-target/repair-gallery-link", {
+      sourceIntakeId: "in-gallery-wrong-vin",
+      signerId: 2,
+      pin: "2222",
+    });
+    expect(wrongVin.status).toBe(409);
+    expect(wrongVin.body.error).toMatch(/same vin/i);
+
+    const empty = await post("/api/quoter/intakes/in-gallery-guard-target/repair-gallery-link", {
+      sourceIntakeId: "in-gallery-empty",
+      signerId: 2,
+      pin: "2222",
+    });
+    expect(empty.status).toBe(409);
+    expect(empty.body.error).toMatch(/no longer owns any photos/i);
+
+    const linked = await post("/api/quoter/intakes/in-gallery-linked/repair-gallery-link", {
+      sourceIntakeId: "in-gallery-valid-source",
+      signerId: 2,
+      pin: "2222",
+    });
+    expect(linked.status).toBe(409);
+    expect(linked.body.quoteId).toBe("q-authoritative");
+    expect(intakeRows.find((row) => row.id === "in-gallery-linked")?.quoteId).toBe("q-authoritative");
   });
 
   it("supervisor override sets committed_by=worker, overridden_by=supervisor", async () => {

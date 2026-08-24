@@ -13,7 +13,21 @@ import { walkCoverRank } from "@shared/photoRoles";
 
 const rowsOf = (res: any): any[] => (res?.rows ?? res) as any[];
 
-// TR-INTAKE-V2 payload: 4 steps (3/6/6/5 sub-steps), 9 RO-Ready items.
+export type IntakeGalleryCandidate = {
+  intakeId: string;
+  quoteId: string;
+  stock: string;
+  miles: string;
+  vehicle: string;
+  createdAt: number | null;
+  completedAt: number | null;
+  updatedAt: number | null;
+  photoCount: number;
+  walkPhotoCount: number;
+  damagePhotoCount: number;
+  damageWidePhotoCount: number;
+  unclassifiedPhotoCount: number;
+};
 const INTAKE_STEP_SIZES: Record<string, number> = { "1": 3, "2": 6, "3": 6, "4": 5 };
 
 function sanitizeIntakeData(raw: unknown) {
@@ -106,8 +120,10 @@ export async function lookupIntakeByVin(vin: string): Promise<any> {
   const clean = vin.trim().toUpperCase();
   if (clean.length < 6) return { found: false, vin: clean };
   const r = await db.execute(sql`
-    SELECT vin, stock, vehicle, miles, estimator, quote_id, data,
-           EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms
+    SELECT id, vin, stock, vehicle, miles, estimator, quote_id, data,
+           EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+           EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms,
+           EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
     FROM intakes WHERE vin = ${clean} ORDER BY updated_at DESC LIMIT 1
   `);
   const rows = rowsOf(r);
@@ -129,8 +145,10 @@ export async function lookupIntakeByVin(vin: string): Promise<any> {
       };
     }
   }
+  const galleryConflict = row.quote_id ? null : await findIntakeGalleryConflict(String(row.id));
   return {
     found: true,
+    intakeId: row.id,
     vin: row.vin,
     stock: row.stock,
     vehicle: row.vehicle,
@@ -141,7 +159,9 @@ export async function lookupIntakeByVin(vin: string): Promise<any> {
     roReady: data.roReady,
     steps: data.steps,
     photoCount: data.photoCount,
+    quoteId: row.quote_id || null,
     quote,
+    galleryConflict,
   };
 }
 
@@ -305,4 +325,104 @@ export function registerIntakeQuoteRoute(app: Express) {
       next(err);
     }
   });
+}
+
+export type IntakeGalleryConflict = {
+  selectedIntake: {
+    intakeId: string;
+    stock: string;
+    miles: string;
+    createdAt: number | null;
+    completedAt: number | null;
+    updatedAt: number | null;
+    photoCount: 0;
+  };
+  candidates: IntakeGalleryCandidate[];
+};
+
+const epochMs = (value: unknown): number | null => {
+  if (value == null) return null;
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * If the selected intake has no canonical quote link, return other exact
+ * intake-to-quote owners for the same VIN that actually have photos. This is
+ * metadata only: callers must never use it as an automatic VIN fallback.
+ */
+export async function findIntakeGalleryConflict(
+  intakeId: string,
+  executor: { execute: (query: any) => Promise<any> } = db,
+): Promise<IntakeGalleryConflict | null> {
+  const cleanId = String(intakeId || "").slice(0, 60);
+  if (!cleanId) return null;
+  const result = await executor.execute(sql`
+    WITH selected AS (
+      SELECT id, vin, stock, miles, quote_id, created_at, completed_at, updated_at
+      FROM intakes
+      WHERE id = ${cleanId}
+    )
+    SELECT
+      s.id AS selected_intake_id,
+      s.stock AS selected_stock,
+      s.miles AS selected_miles,
+      EXTRACT(EPOCH FROM s.created_at) * 1000 AS selected_created_ms,
+      EXTRACT(EPOCH FROM s.completed_at) * 1000 AS selected_completed_ms,
+      EXTRACT(EPOCH FROM s.updated_at) * 1000 AS selected_updated_ms,
+      owner.id AS owner_intake_id,
+      owner.quote_id AS owner_quote_id,
+      owner.stock AS owner_stock,
+      owner.miles AS owner_miles,
+      owner.vehicle AS owner_vehicle,
+      EXTRACT(EPOCH FROM owner.created_at) * 1000 AS owner_created_ms,
+      EXTRACT(EPOCH FROM owner.completed_at) * 1000 AS owner_completed_ms,
+      EXTRACT(EPOCH FROM owner.updated_at) * 1000 AS owner_updated_ms,
+      COUNT(p.id)::int AS photo_count,
+      COUNT(*) FILTER (WHERE p.role = 'walk')::int AS walk_photo_count,
+      COUNT(*) FILTER (WHERE p.role = 'damage')::int AS damage_photo_count,
+      COUNT(*) FILTER (WHERE p.role = 'damage_wide')::int AS damage_wide_photo_count,
+      COUNT(*) FILTER (WHERE p.role NOT IN ('walk', 'damage', 'damage_wide'))::int AS unclassified_photo_count
+    FROM selected s
+    JOIN intakes owner
+      ON owner.id <> s.id
+     AND UPPER(TRIM(owner.vin)) = UPPER(TRIM(s.vin))
+     AND owner.quote_id IS NOT NULL
+    JOIN photos p ON p.quote_id = owner.quote_id
+    WHERE s.quote_id IS NULL
+    GROUP BY
+      s.id, s.stock, s.miles, s.created_at, s.completed_at, s.updated_at,
+      owner.id, owner.quote_id, owner.stock, owner.miles, owner.vehicle,
+      owner.created_at, owner.completed_at, owner.updated_at
+    ORDER BY owner.updated_at DESC, owner.id
+  `);
+  const rows = rowsOf(result);
+  if (!rows.length) return null;
+  const first = rows[0];
+  return {
+    selectedIntake: {
+      intakeId: String(first.selected_intake_id),
+      stock: String(first.selected_stock || ""),
+      miles: String(first.selected_miles || ""),
+      createdAt: epochMs(first.selected_created_ms),
+      completedAt: epochMs(first.selected_completed_ms),
+      updatedAt: epochMs(first.selected_updated_ms),
+      photoCount: 0,
+    },
+    candidates: rows.map((row) => ({
+      intakeId: String(row.owner_intake_id),
+      quoteId: String(row.owner_quote_id),
+      stock: String(row.owner_stock || ""),
+      miles: String(row.owner_miles || ""),
+      vehicle: String(row.owner_vehicle || ""),
+      createdAt: epochMs(row.owner_created_ms),
+      completedAt: epochMs(row.owner_completed_ms),
+      updatedAt: epochMs(row.owner_updated_ms),
+      photoCount: Number(row.photo_count) || 0,
+      walkPhotoCount: Number(row.walk_photo_count) || 0,
+      damagePhotoCount: Number(row.damage_photo_count) || 0,
+      damageWidePhotoCount: Number(row.damage_wide_photo_count) || 0,
+      unclassifiedPhotoCount: Number(row.unclassified_photo_count) || 0,
+    })),
+  };
 }

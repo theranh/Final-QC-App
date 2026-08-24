@@ -152,8 +152,57 @@ const H = vi.hoisted(() => {
     // ----- execute : intakes upsert + photo count + advisory lock -----
     execute: async (q: any) => {
       const { text, params } = sqlParts(q);
+      if (/WITH selected AS/i.test(text) && /owner_quote_id/i.test(text)) {
+        const selected = intakeRows.find((row) => row.id === params[0]);
+        if (!selected || selected.quote_id) return { rows: [] };
+        const vin = String(selected.vin || "").trim().toUpperCase();
+        const owners = intakeRows.filter(
+          (row) =>
+            row.id !== selected.id &&
+            row.quote_id &&
+            String(row.vin || "").trim().toUpperCase() === vin &&
+            photoRows.some((photo) => photo.quoteId === row.quote_id),
+        );
+        return {
+          rows: owners.map((owner) => {
+            const owned = photoRows.filter((photo) => photo.quoteId === owner.quote_id);
+            return {
+              selected_intake_id: selected.id,
+              selected_stock: selected.stock || "",
+              selected_miles: selected.miles || "",
+              selected_created_ms: selected.created_ms ?? null,
+              selected_completed_ms: selected.completed_ms ?? null,
+              selected_updated_ms: selected.updated_ms ?? null,
+              owner_intake_id: owner.id,
+              owner_quote_id: owner.quote_id,
+              owner_stock: owner.stock || "",
+              owner_miles: owner.miles || "",
+              owner_vehicle: owner.vehicle || "",
+              owner_created_ms: owner.created_ms ?? null,
+              owner_completed_ms: owner.completed_ms ?? null,
+              owner_updated_ms: owner.updated_ms ?? null,
+              photo_count: owned.length,
+              walk_photo_count: owned.filter((photo) => photo.role === "walk").length,
+              damage_photo_count: owned.filter((photo) => photo.role === "damage").length,
+              damage_wide_photo_count: owned.filter((photo) => photo.role === "damage_wide").length,
+              unclassified_photo_count: owned.filter(
+                (photo) => !["walk", "damage", "damage_wide"].includes(photo.role),
+              ).length,
+            };
+          }),
+        };
+      }
       if (/FROM intakes i LEFT JOIN quotes/i.test(text)) {
         return { rows: intakeRows.map((i) => ({ ...i, quote_data: quoteRows.find((q) => q.id === i.quote_id)?.data || null })) };
+      }
+      if (/FROM intakes WHERE vin/i.test(text)) {
+        const vin = String(params[0] || "").trim().toUpperCase();
+        const rows = intakeRows
+          .filter((row) => String(row.vin || "").trim().toUpperCase() === vin)
+          .sort((a, b) => Number(b.updated_ms || 0) - Number(a.updated_ms || 0))
+          .slice(0, 1)
+          .map((row) => ({ ...row }));
+        return { rows };
       }
       if (/UPDATE intakes SET quote_id/i.test(text)) {
         const id = params.find((x: any) => x === "cas") || params[0];
@@ -186,6 +235,15 @@ const H = vi.hoisted(() => {
               ts: r.ts,
               bytes: r.data?.length || 0,
             })),
+        };
+      }
+      if (/SELECT id, quote_id, slot FROM photos/i.test(text)) {
+        return {
+          rows: photoRows.map((photo) => ({
+            id: photo.id,
+            quote_id: photo.quoteId,
+            slot: photo.slot,
+          })),
         };
       }
       if (/COUNT\(\*\).*FROM photos WHERE quote_id/is.test(text)) {
@@ -249,10 +307,6 @@ vi.mock("./access", () => ({
 vi.mock("./replit_integrations/auth", () => ({
   isAuthenticated: (_req: any, _res: any, next: any) => next(),
 }));
-vi.mock("./localQuote", () => ({
-  bestWalkPhotoIds: async () => new Map(),
-}));
-
 let server: Server;
 let base: string;
 
@@ -501,6 +555,75 @@ describe("photo mutations blocked once owning quote committed", () => {
     expect(manifest.body.quoteId).toBe("q-canonical");
     expect(manifest.body.photos.map((p: any) => p.id)).toEqual(["walk-right", "damage-right"]);
     expect(manifest.body.photos.map((p: any) => p.role)).toEqual(["walk", "damage"]);
+  });
+
+  it("warns about an older intake-owned gallery without returning those photos", async () => {
+    intakeRows.push(
+      {
+        id: "in-new-duplicate",
+        vin: "SAMEVIN",
+        stock: "NEW",
+        miles: "50000",
+        quote_id: null,
+        committedBy: "Worker",
+        completed_ms: 200,
+        updated_ms: 200,
+      },
+      {
+        id: "in-original",
+        vin: "SAMEVIN",
+        stock: "OLD",
+        miles: "49000",
+        vehicle: "2021 Ford",
+        quote_id: "q-original",
+        committedBy: "Worker",
+        completed_ms: 100,
+        updated_ms: 100,
+      },
+    );
+    photoRows.push(
+      { id: "old-walk", quoteId: "q-original", slot: "ext_front", role: "walk", data: Buffer.from("1"), ts: 1 },
+      { id: "old-damage", quoteId: "q-original", slot: "dmg_door", role: "damage", data: Buffer.from("2"), ts: 2 },
+    );
+
+    const lookup = await req("GET", "/api/quoter/intakes?vin=SAMEVIN");
+    expect(lookup.status).toBe(200);
+    expect(lookup.body.id).toBe("in-new-duplicate");
+    expect(lookup.body.quoteId).toBeNull();
+    expect(lookup.body.galleryConflict.candidates).toEqual([
+      expect.objectContaining({
+        intakeId: "in-original",
+        quoteId: "q-original",
+        stock: "OLD",
+        miles: "49000",
+        photoCount: 2,
+        walkPhotoCount: 1,
+        damagePhotoCount: 1,
+      }),
+    ]);
+
+    const manifest = await req("GET", "/api/quoter/intakes/in-new-duplicate/photos");
+    expect(manifest.status).toBe(200);
+    expect(manifest.body.quoteId).toBeNull();
+    expect(manifest.body.photos).toEqual([]);
+    expect(manifest.body.galleryConflict.candidates[0].quoteId).toBe("q-original");
+  });
+
+  it("keeps a legitimate repeat visit on its exact gallery instead of showing an older visit", async () => {
+    intakeRows.push(
+      { id: "in-repeat", vin: "SAMEVIN", quote_id: "q-repeat", updated_ms: 300, committedBy: null },
+      { id: "in-old", vin: "SAMEVIN", quote_id: "q-old", updated_ms: 100, committedBy: "Worker" },
+    );
+    photoRows.push(
+      { id: "repeat-only", quoteId: "q-repeat", slot: "ext_front", role: "walk", data: Buffer.from("1"), ts: 1 },
+      { id: "old-only", quoteId: "q-old", slot: "ext_rear", role: "walk", data: Buffer.from("2"), ts: 2 },
+    );
+
+    const manifest = await req("GET", "/api/quoter/intakes/in-repeat/photos");
+    expect(manifest.status).toBe(200);
+    expect(manifest.body.quoteId).toBe("q-repeat");
+    expect(manifest.body.photos.map((photo: any) => photo.id)).toEqual(["repeat-only"]);
+    expect(manifest.body.galleryConflict).toBeUndefined();
   });
 
   it("DELETE /api/quoter/photos by quoteId 409s when quote committed", async () => {
