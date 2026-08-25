@@ -13,3 +13,6 @@ dev-dist
 coverage
 .vitest-cache
 dist-server/
+
+# Local database backups — never commit.
+backups/
