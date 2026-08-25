@@ -17,7 +17,14 @@ const VIN_C = "3GTU9DED7LG222222";
 
 // ---------- in-memory "intakes" table (Body Quoter data, now local) ----------
 // Three completed intakes, mirroring the old remote /api/intakes-completed stub.
-type IntakeRow = { vin: string; stock: string; vehicle: string; completedAt: number | null; updatedAt?: number | null };
+type IntakeRow = {
+  vin: string;
+  stock: string;
+  vehicle: string;
+  completedAt: number | null;
+  updatedAt?: number | null;
+  retiredAt?: number | null;
+};
 const intakeStore: IntakeRow[] = [
   { vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
   { vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
@@ -120,9 +127,19 @@ function fakeExecute(q: any) {
   if (text.includes("FROM intakes") && text.includes("ORDER BY COALESCE(completed_at, updated_at) DESC")) {
     return {
       rows: intakeStore
+        .filter((i) => i.retiredAt == null)
         .slice()
         .sort((a, b) => (b.completedAt ?? b.updatedAt ?? 0) - (a.completedAt ?? a.updatedAt ?? 0))
         .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, completed_ms: i.completedAt, updated_ms: i.updatedAt ?? null })),
+    };
+  }
+  // This Week completed-intake strip. The fake timestamps are deliberately
+  // abstract; this branch models the retirement predicate under test.
+  if (text.includes("FROM intakes") && text.includes("COUNT(*)") && text.includes("completed_at IS NOT NULL")) {
+    return {
+      rows: [{
+        n: intakeStore.filter((i) => i.completedAt != null && i.retiredAt == null).length,
+      }],
     };
   }
   // Open (not-yet-completed) intake count.
@@ -371,6 +388,19 @@ describe("awaiting Final QC vs committed inspections", () => {
     const [r1, r2] = await Promise.all([fire(), fire()]);
     expect([r1.status, r2.status].sort()).toEqual([201, 409]);
     expect(store.filter((r) => r.vin.trim().toUpperCase() === VIN_C)).toHaveLength(1);
+  });
+});
+
+describe("This Week intake retirement", () => {
+  it("does not count retired completed intakes", async () => {
+    const retired = intakeStore.find((i) => i.vin === VIN_C)!;
+    retired.retiredAt = Date.now();
+    try {
+      const payload = await getDashboard("2024-01-01", "2024-01-02");
+      expect(payload.thisWeek.intakesCompleted).toBe(2);
+    } finally {
+      delete retired.retiredAt;
+    }
   });
 });
 

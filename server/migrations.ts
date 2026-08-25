@@ -308,6 +308,18 @@ export const MIGRATIONS: Migration[] = [
           ON photo_orientation_backups (photo_id)`,
     ],
   },
+  {
+    // Vehicle-list deletion is archival, never destructive. Intakes need their
+    // own retirement marker because (unlike inspections) they had no archive
+    // column. Quote links and galleries are intentionally retained.
+    id: "0013_intake_retirement",
+    statements: [
+      sql`ALTER TABLE intakes ADD COLUMN IF NOT EXISTS retired_at timestamptz`,
+      sql`CREATE INDEX IF NOT EXISTS intakes_active_activity_idx
+          ON intakes (completed_at DESC, updated_at DESC)
+          WHERE retired_at IS NULL`,
+    ],
+  },
 ];
 
 /**

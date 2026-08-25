@@ -108,7 +108,11 @@ function fakeExecute(q: any) {
   if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
   if (text.includes("UPDATE qc_counter")) return { rows: [{ value: ++H.counter }] };
   // timeline: inspect rows by vin
-  if (text.includes("upper(trim(") && text.includes("FROM inspections")) {
+  if (
+    text.includes("upper(trim(") &&
+    text.includes("FROM inspections") &&
+    !text.includes("FROM intakes i")
+  ) {
     return {
       rows: H.inspections.map((r) => ({
         id: r.id,
@@ -132,12 +136,42 @@ function fakeExecute(q: any) {
       })),
     };
   }
+  // handoff: completed intakes awaiting Final QC
+  if (text.includes("FROM intakes i") && text.includes("i.completed_at IS NOT NULL")) {
+    const rows = H.intakes
+      .filter((r) => r.completedAt != null)
+      .filter((r) => !text.includes("retired_at IS NULL") || r.retiredAt == null)
+      .map((r) => ({
+        vin: r.vin,
+        stock: r.stock,
+        vehicle: r.vehicle,
+        estimator: r.estimator,
+        committed_by: r.committedBy,
+        completed_ms: r.completedAt.getTime(),
+        rn: 1,
+      }));
+    return { rows };
+  }
+  // handoff: stale in-progress intakes
+  if (text.includes("FROM intakes i") && text.includes("i.completed_at IS NULL")) {
+    const rows = H.intakes
+      .filter((r) => r.completedAt == null)
+      .filter((r) => !text.includes("retired_at IS NULL") || r.retiredAt == null)
+      .map((r) => ({
+        id: r.id,
+        vin: r.vin,
+        stock: r.stock,
+        vehicle: r.vehicle,
+        estimator: r.estimator,
+        updated_ms: r.updatedAt.getTime(),
+        created_ms: r.createdAt?.getTime() ?? null,
+      }));
+    return { rows };
+  }
   if (text.includes("FROM intakes") && text.includes("upper(trim(")) return { rows: [] };
   if (text.includes("FROM quotes") && text.includes("upper(data")) return { rows: [] };
   if (text.includes("FROM audit_log") || text.includes("audit_log a")) return { rows: [] };
   if (text.includes("FROM sheet_export_jobs")) return { rows: [] };
-  // handoff: stale intakes
-  if (text.includes("FROM intakes i") && text.includes("completed_at IS NULL")) return { rows: [] };
   // handoff: open rechecks
   if (text.includes("FROM inspections") && text.includes("status = 'open'")) {
     return {
@@ -838,6 +872,64 @@ describe("GET /api/collaboration/handoff", () => {
     expect(b.activeFlags.length).toBeGreaterThan(0);
     expect(b.activeFlags[0].flagKind).toBe("manager_review");
     expect(b.activeFlags[0].nextAction).toMatch(/manager review/i);
+  });
+
+  it("hides retired intakes from both awaiting-QC and stale-intake queues", async () => {
+    const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    H.intakes.push(
+      {
+        id: "awaiting-active",
+        vin: "ACTIVEAWAITINGVIN",
+        stock: "ACTIVE-A",
+        vehicle: "Active awaiting",
+        estimator: "Estimator",
+        committedBy: "Signer",
+        completedAt: old,
+        updatedAt: old,
+        createdAt: old,
+        retiredAt: null,
+      },
+      {
+        id: "awaiting-retired",
+        vin: "RETIREDWAITINGVIN",
+        stock: "RETIRED-A",
+        vehicle: "Retired awaiting",
+        estimator: "Estimator",
+        committedBy: "Signer",
+        completedAt: old,
+        updatedAt: old,
+        createdAt: old,
+        retiredAt: new Date(),
+      },
+      {
+        id: "stale-active",
+        vin: "ACTIVESTALEVIN",
+        stock: "ACTIVE-S",
+        vehicle: "Active stale",
+        estimator: "Estimator",
+        completedAt: null,
+        updatedAt: old,
+        createdAt: old,
+        retiredAt: null,
+      },
+      {
+        id: "stale-retired",
+        vin: "RETIREDSTALEVIN",
+        stock: "RETIRED-S",
+        vehicle: "Retired stale",
+        estimator: "Estimator",
+        completedAt: null,
+        updatedAt: old,
+        createdAt: old,
+        retiredAt: new Date(),
+      },
+    );
+
+    const r = await get("/api/collaboration/handoff");
+    expect(r.status).toBe(200);
+    const b = await r.json();
+    expect(b.awaitingFinalQc.map((row: any) => row.stock)).toEqual(["ACTIVE-A"]);
+    expect(b.staleIntakes.map((row: any) => row.stock)).toEqual(["ACTIVE-S"]);
   });
 });
 

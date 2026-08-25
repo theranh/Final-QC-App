@@ -64,6 +64,95 @@ const galleryDateLabel = (record) => {
   return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleDateString();
 };
 
+function ReorderablePhotoGallery({ photos, borderColor, altFor, onOpen, onPreviewMove, onCommitOrder }) {
+  const dragRef = useRef(null);
+  const suppressClickRef = useRef(false);
+  const finishDrag = (e) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    dragRef.current = null;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    if (drag.moved) {
+      suppressClickRef.current = true;
+      onCommitOrder(drag.originalIds);
+      setTimeout(() => { suppressClickRef.current = false; }, 0);
+    }
+  };
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
+      {photos.map((p, index) => (
+        <div
+          key={p.id}
+          data-photo-id={p.id}
+          style={{ minWidth: 0, touchAction: 'pan-y' }}
+          onPointerDown={(e) => {
+            if (e.button != null && e.button !== 0) return;
+            dragRef.current = {
+              pointerId: e.pointerId,
+              id: p.id,
+              x: e.clientX,
+              y: e.clientY,
+              moved: false,
+              lastTarget: p.id,
+              originalIds: photos.map((photo) => photo.id),
+            };
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== e.pointerId) return;
+            if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 8) return;
+            drag.moved = true;
+            const target = document.elementFromPoint?.(e.clientX, e.clientY)?.closest?.('[data-photo-id]');
+            const targetId = target?.getAttribute('data-photo-id');
+            if (targetId && targetId !== drag.id && targetId !== drag.lastTarget) {
+              drag.lastTarget = targetId;
+              onPreviewMove(drag.id, targetId);
+            }
+          }}
+          onPointerUp={finishDrag}
+          onPointerCancel={finishDrag}
+        >
+          <button
+            type="button"
+            aria-label={`Open ${altFor(p)} ${index + 1}`}
+            onClick={() => {
+              if (!suppressClickRef.current) onOpen(p);
+            }}
+            style={{ display: 'block', width: '100%', border: 0, padding: 0, background: 'transparent', cursor: 'pointer' }}
+          >
+            <img
+              src={p.bust ? `${photoUrl(p)}&b=${p.bust}` : photoUrl(p)}
+              alt={altFor(p)}
+              loading="lazy"
+              draggable="false"
+              style={{ display: 'block', width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: `1px solid ${borderColor}` }}
+            />
+          </button>
+          <div role="group" aria-label={`Reorder ${altFor(p)} ${index + 1}`} style={{ display: 'flex', gap: 3, marginTop: 3 }}>
+            <button
+              type="button"
+              aria-label={`Move ${altFor(p)} earlier`}
+              disabled={index === 0}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => onCommitOrder(photos.map((photo) => photo.id), p.id, photos[index - 1]?.id)}
+              style={{ flex: 1, minHeight: 32 }}
+            >←</button>
+            <button
+              type="button"
+              aria-label={`Move ${altFor(p)} later`}
+              disabled={index === photos.length - 1}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => onCommitOrder(photos.map((photo) => photo.id), p.id, photos[index + 1]?.id)}
+              style={{ flex: 1, minHeight: 32 }}
+            >→</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function blankIntake(vin) {
   return {
     id: newId(),
@@ -680,6 +769,9 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   // Walk-around photos for the opened intake (thumbnails shown inline).
   // Refreshed when the camera closes so new shots appear immediately.
   const [intakePhotos, setIntakePhotos] = useState([]);
+  const intakePhotosRef = useRef([]);
+  intakePhotosRef.current = intakePhotos;
+  const photoOrderSaveRef = useRef(0);
   // Persisted roles are authoritative. Legacy mocked/offline metadata without
   // a role falls back to conservative slot inference, with unknown rows kept
   // out of both primary galleries.
@@ -709,6 +801,62 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [photoLoadError, setPhotoLoadError] = useState(false);
   const [photoLoadAttempt, setPhotoLoadAttempt] = useState(0); // bumped by RETRY
   const photoRequestRef = useRef(0);
+  const previewPhotoMove = useCallback((draggedId, targetId) => {
+    setIntakePhotos((current) => {
+      const dragged = current.find((p) => p.id === draggedId);
+      const target = current.find((p) => p.id === targetId);
+      if (!dragged || !target || photoRoleOf(dragged) !== photoRoleOf(target)) return current;
+      const role = photoRoleOf(dragged);
+      const rolePhotos = current.filter((p) => photoRoleOf(p) === role);
+      const from = rolePhotos.findIndex((p) => p.id === draggedId);
+      const to = rolePhotos.findIndex((p) => p.id === targetId);
+      if (from < 0 || to < 0 || from === to) return current;
+      const reordered = [...rolePhotos];
+      const [moving] = reordered.splice(from, 1);
+      reordered.splice(to, 0, moving);
+      let i = 0;
+      return current.map((p) => photoRoleOf(p) === role ? reordered[i++] : p);
+    });
+  }, []);
+  const commitPhotoOrder = useCallback((previousRoleIds, draggedId, targetId) => {
+    if (draggedId && targetId) previewPhotoMove(draggedId, targetId);
+    // State updates commit after this event. Compute the keyboard order here;
+    // pointer commits read the already-previewed ref.
+    const before = intakePhotosRef.current;
+    let submitting = before;
+    if (draggedId && targetId) {
+      const dragged = before.find((p) => p.id === draggedId);
+      const role = dragged && photoRoleOf(dragged);
+      const rolePhotos = before.filter((p) => photoRoleOf(p) === role);
+      const from = rolePhotos.findIndex((p) => p.id === draggedId);
+      const to = rolePhotos.findIndex((p) => p.id === targetId);
+      const reordered = [...rolePhotos];
+      const [moving] = reordered.splice(from, 1);
+      reordered.splice(to, 0, moving);
+      let i = 0;
+      submitting = before.map((p) => photoRoleOf(p) === role ? reordered[i++] : p);
+    }
+    const intakeId = intakeRef.current?.id;
+    if (!intakeId) return;
+    const token = ++photoOrderSaveRef.current;
+    const previousSet = new Set(previousRoleIds);
+    const byId = new Map(before.map((p) => [p.id, p]));
+    let previousIndex = 0;
+    const previousAll = before.map((p) =>
+      previousSet.has(p.id) ? (byId.get(previousRoleIds[previousIndex++]) || p) : p);
+    api.orderIntakePhotos(intakeId, submitting.map((p) => p.id)).then((saved) => {
+      if (token !== photoOrderSaveRef.current || intakeRef.current?.id !== intakeId) return;
+      const rank = new Map((saved?.photoIds || []).map((id, i) => [id, i]));
+      setIntakePhotos((current) => [...current].sort((a, b) =>
+        (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER)));
+    }).catch(() => {
+      if (token !== photoOrderSaveRef.current || intakeRef.current?.id !== intakeId) return;
+      const rank = new Map(previousAll.map((p, i) => [p.id, i]));
+      setIntakePhotos((current) => [...current].sort((a, b) =>
+        (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER)));
+      showToast?.('Photo order wasn’t saved — the previous order was restored.');
+    });
+  }, [previewPhotoMove, showToast]);
   useEffect(() => {
     const effectToken = ++photoRequestRef.current;
     if (!photoIntakeId || !photoLookupReady) {
@@ -1097,18 +1245,14 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 </div>
               )}
               {walkPhotos.length > 0 && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
-                  {walkPhotos.map((p) => (
-                    <img
-                      key={p.id}
-                      src={p.bust ? `${photoUrl(p)}&b=${p.bust}` : photoUrl(p)}
-                      alt={p.slot || 'walk-around photo'}
-                      loading="lazy"
-                      onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
-                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
-                    />
-                  ))}
-                </div>
+                <ReorderablePhotoGallery
+                  photos={walkPhotos}
+                  borderColor="var(--border)"
+                  altFor={(p) => p.slot || 'walk-around photo'}
+                  onOpen={(p) => setLightbox({ url: photoUrl(p), id: p.id })}
+                  onPreviewMove={previewPhotoMove}
+                  onCommitOrder={commitPhotoOrder}
+                />
               )}
               {!locked && <button className="btn btn-dark" style={{marginTop:9}} onClick={async () => {
                 const quoteId = await ensureIntakeQuoteWithFeedback();
@@ -1131,51 +1275,39 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               <div className="card" style={{ borderLeft: '4px solid var(--red)' }}>
                 <div className="card-title">DAMAGE PHOTOS · {damagePhotos.length}</div>
                 {damagePhotos.length > 0 && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 9 }}>
-                    {damagePhotos.map((p) => (
-                      <img
-                        key={p.id}
-                        src={p.bust ? `${photoUrl(p)}&b=${p.bust}` : photoUrl(p)}
-                        alt="damage photo"
-                        loading="lazy"
-                        onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
-                        style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--red)', cursor: 'pointer' }}
-                      />
-                    ))}
-                  </div>
+                  <ReorderablePhotoGallery
+                    photos={damagePhotos}
+                    borderColor="var(--red)"
+                    altFor={() => 'damage photo'}
+                    onOpen={(p) => setLightbox({ url: photoUrl(p), id: p.id })}
+                    onPreviewMove={previewPhotoMove}
+                    onCommitOrder={commitPhotoOrder}
+                  />
                 )}
                 {damageWidePhotos.length > 0 && (
                   <>
                     <div style={{ fontSize: 9.5, color: 'var(--muted)', letterSpacing: 0.8, fontWeight: 700, marginTop: 12 }}>DAMAGE CONTEXT PHOTOS · {damageWidePhotos.length}</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
-                      {damageWidePhotos.map((p) => (
-                        <img
-                          key={p.id}
-                          src={photoUrl(p)}
-                          alt="damage context photo"
-                          loading="lazy"
-                          onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
-                          style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
-                        />
-                      ))}
-                    </div>
+                    <ReorderablePhotoGallery
+                      photos={damageWidePhotos}
+                      borderColor="var(--amber)"
+                      altFor={() => 'damage context photo'}
+                      onOpen={(p) => setLightbox({ url: photoUrl(p), id: p.id })}
+                      onPreviewMove={previewPhotoMove}
+                      onCommitOrder={commitPhotoOrder}
+                    />
                   </>
                 )}
                 {unclassifiedPhotos.length > 0 && (
                   <>
                     <div style={{ fontSize: 9.5, color: 'var(--amber)', letterSpacing: 0.8, fontWeight: 700, marginTop: 12 }}>LEGACY PHOTOS TO REVIEW · {unclassifiedPhotos.length}</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 6 }}>
-                      {unclassifiedPhotos.map((p) => (
-                        <img
-                          key={p.id}
-                          src={photoUrl(p)}
-                          alt="legacy unclassified photo"
-                          loading="lazy"
-                          onClick={() => setLightbox({ url: photoUrl(p), id: p.id })}
-                          style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
-                        />
-                      ))}
-                    </div>
+                    <ReorderablePhotoGallery
+                      photos={unclassifiedPhotos}
+                      borderColor="var(--amber)"
+                      altFor={() => 'legacy unclassified photo'}
+                      onOpen={(p) => setLightbox({ url: photoUrl(p), id: p.id })}
+                      onPreviewMove={previewPhotoMove}
+                      onCommitOrder={commitPhotoOrder}
+                    />
                   </>
                 )}
               </div>

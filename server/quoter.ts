@@ -126,6 +126,9 @@ function sanitizeIntakeData(raw: unknown) {
     photoCount: Math.max(0, Math.min(999, Number(d.photoCount) || 0)),
     notes: String(d.notes || "").slice(0, 2000),
     mddTags: !!d.mddTags,
+    photoOrder: Array.isArray(d.photoOrder)
+      ? Array.from(new Set(d.photoOrder.map((id: unknown) => String(id || "").slice(0, 60)).filter(Boolean))).slice(0, 160)
+      : [],
   };
 }
 
@@ -295,11 +298,21 @@ export function registerQuoterRoutes(app: Express) {
       const id = String(req.params.id || "").slice(0, 60);
       const quoteId = String(req.body?.quoteId || "").slice(0, 60);
       if (!id || !quoteId) return res.status(400).json({ error: "Missing intake id or quoteId" });
-      const r = await db.execute(sql`
-        UPDATE intakes SET quote_id = COALESCE(quote_id, ${quoteId}), updated_at = NOW()
-        WHERE id = ${id} AND committed_by IS NULL
-        RETURNING quote_id
-      `);
+      let galleryDeleted = false;
+      const r = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`);
+        const tomb = await tx.execute(sql`SELECT 1 FROM deleted_quotes WHERE id = ${quoteId}`);
+        if (tomb.rows.length) {
+          galleryDeleted = true;
+          return { rows: [] };
+        }
+        return tx.execute(sql`
+          UPDATE intakes SET quote_id = COALESCE(quote_id, ${quoteId}), updated_at = NOW()
+          WHERE id = ${id} AND committed_by IS NULL
+          RETURNING quote_id
+        `);
+      });
+      if (galleryDeleted) return res.status(410).json({ error: "Quote gallery was deleted" });
       const row = (r.rows as any[])[0];
       if (!row) return res.status(409).json({ error: "Intake is committed or not found" });
       res.json({ quoteId: row.quote_id });
@@ -427,8 +440,18 @@ export function registerQuoterRoutes(app: Express) {
       // takes — a crash or concurrent upload can no longer leave orphaned
       // photos, and queued uploads for the deleted id are refused (410).
       let committed = false;
+      let linkedIntake = false;
       await db.transaction(async (tx) => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${id})::bigint)`);
+        // A gallery owner cannot disappear while an intake still points to it.
+        // Check under the same per-quote lock used by linking/photo mutation.
+        const refs = await tx.execute(sql`
+          SELECT id FROM intakes WHERE quote_id = ${id} LIMIT 1 FOR UPDATE
+        `);
+        if (refs.rows.length) {
+          linkedIntake = true;
+          return;
+        }
         // A committed quote is a permanent signed record — never deletable.
         const [del] = await tx
           .delete(quotes)
@@ -449,6 +472,9 @@ export function registerQuoterRoutes(app: Express) {
         await tx.delete(photos).where(eq(photos.quoteId, id));
         await tx.insert(deletedQuotes).values({ id }).onConflictDoNothing();
       });
+      if (linkedIntake) {
+        return res.status(409).json({ error: "Quote gallery is linked to an intake and cannot be deleted" });
+      }
       if (committed) return res.status(409).json({ error: "Quote is committed" });
       res.json({ ok: true });
     }),
@@ -610,22 +636,136 @@ export function registerQuoterRoutes(app: Express) {
     guard(async (req, res) => {
       const intakeId = String(req.params.id || "").slice(0, 100);
       if (!intakeId) return res.status(400).json({ error: "Missing intake id" });
-      const owner = await db.execute(
-        sql`SELECT quote_id FROM intakes WHERE id = ${intakeId} LIMIT 1`,
-      );
-      if (!owner.rows.length) return res.status(404).json({ error: "Intake not found" });
-      const quoteId = String((owner.rows[0] as any).quote_id || "");
+      let found = false;
+      let ownershipChanged = false;
+      let quoteId = "";
+      let ownerData: unknown = {};
+      let manifestRows: any[] = [];
+      await db.transaction(async (tx) => {
+        const initial = await tx.execute(
+          sql`SELECT quote_id, data FROM intakes WHERE id = ${intakeId} LIMIT 1`,
+        );
+        if (!initial.rows.length) return;
+        found = true;
+        quoteId = String((initial.rows[0] as any).quote_id || "");
+        ownerData = (initial.rows[0] as any).data || {};
+        if (!quoteId) return;
+        // Upload, delete, manifest reads and order writes serialize on the
+        // canonical quote. Re-read the intake after taking that lock so a
+        // concurrent ownership repair can never mix galleries.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`);
+        const checked = await tx.execute(
+          sql`SELECT quote_id, data FROM intakes WHERE id = ${intakeId} FOR UPDATE`,
+        );
+        const checkedQuoteId = String((checked.rows[0] as any)?.quote_id || "");
+        if (!checked.rows.length || checkedQuoteId !== quoteId) {
+          ownershipChanged = true;
+          return;
+        }
+        ownerData = (checked.rows[0] as any).data || {};
+        const manifest = await tx.execute(
+          sql`SELECT id, slot, role, ts, LENGTH(data) AS bytes
+              FROM photos WHERE quote_id = ${quoteId} ORDER BY ts, id`,
+        );
+        manifestRows = manifest.rows as any[];
+      });
+      if (!found) return res.status(404).json({ error: "Intake not found" });
+      if (ownershipChanged) return res.status(409).json({ error: "Gallery ownership changed — retry" });
       if (!quoteId) {
         const galleryConflict = await findIntakeGalleryConflict(intakeId);
         res.set("Cache-Control", "no-store");
         return res.json({ intakeId, quoteId: null, photos: [], galleryConflict });
       }
-      const manifest = await db.execute(
-        sql`SELECT id, slot, role, ts, LENGTH(data) AS bytes
-            FROM photos WHERE quote_id = ${quoteId} ORDER BY ts, id`,
-      );
+      const order = sanitizeIntakeData(ownerData).photoOrder;
+      const rank = new Map(order.map((id, index) => [id, index]));
+      const ordered = [...manifestRows].sort((a, b) => {
+        const ar = rank.get(String(a.id));
+        const br = rank.get(String(b.id));
+        if (ar != null || br != null) return (ar ?? Number.MAX_SAFE_INTEGER) - (br ?? Number.MAX_SAFE_INTEGER);
+        return (Number(a.ts) - Number(b.ts)) || String(a.id).localeCompare(String(b.id));
+      });
       res.set("Cache-Control", "no-store");
-      res.json({ intakeId, quoteId, photos: manifest.rows });
+      res.json({ intakeId, quoteId, photos: ordered });
+    }),
+  );
+
+  // Intake-only ordering metadata. Photo rows (including slot and role) are
+  // never mutated. The intake's exact canonical quote is checked under the
+  // same transaction that stores the order.
+  app.put(
+    "/api/quoter/intakes/:id/photo-order",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const intakeId = String(req.params.id || "").slice(0, 100);
+      if (!intakeId || !Array.isArray(req.body?.photoIds)) {
+        return res.status(400).json({ error: "Missing intake id or photoIds" });
+      }
+      const requested: string[] = Array.from(new Set<string>(
+        req.body.photoIds.map((id: unknown) => String(id || "").slice(0, 60)).filter(Boolean),
+      ));
+      if (requested.length > 160) {
+        return res.status(400).json({ error: "Too many photo ids" });
+      }
+      let result: string[] | null = null;
+      let wrongOwner = false;
+      let ownershipChanged = false;
+      let missingGallery = false;
+      await db.transaction(async (tx) => {
+        const initial = await tx.execute(
+          sql`SELECT quote_id FROM intakes WHERE id = ${intakeId} LIMIT 1`,
+        );
+        if (!initial.rows.length) return;
+        const quoteId = String((initial.rows[0] as any).quote_id || "");
+        if (!quoteId) {
+          missingGallery = true;
+          return;
+        }
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`);
+        const checked = await tx.execute(
+          sql`SELECT quote_id FROM intakes WHERE id = ${intakeId} FOR UPDATE`,
+        );
+        if (!checked.rows.length || String((checked.rows[0] as any).quote_id || "") !== quoteId) {
+          ownershipChanged = true;
+          return;
+        }
+        const submittedRows = requested.length
+          ? await tx.execute(sql`SELECT id, quote_id FROM photos WHERE id IN (${sql.join(requested.map((id) => sql`${id}`), sql`, `)})`)
+          : { rows: [] };
+        if ((submittedRows.rows as any[]).some((row) => String(row.quote_id) !== quoteId)) {
+          wrongOwner = true;
+          return;
+        }
+        const current = await tx.execute(
+          sql`SELECT id FROM photos WHERE quote_id = ${quoteId} ORDER BY ts, id`,
+        );
+        const currentIds = (current.rows as any[]).map((row) => String(row.id));
+        const currentSet = new Set(currentIds);
+        // Missing IDs were deleted/stale and are ignored. Photos uploaded after
+        // the request was composed are appended in canonical ts/id order.
+        result = [...requested.filter((id) => currentSet.has(id)), ...currentIds.filter((id) => !requested.includes(id))];
+        await tx.execute(sql`
+          UPDATE intakes
+          SET data = jsonb_set(COALESCE(data, '{}'::jsonb), '{photoOrder}', ${JSON.stringify(result)}::jsonb, true)
+          WHERE id = ${intakeId} AND quote_id = ${quoteId}
+        `);
+        const emp = req.employee || {};
+        await tx.execute(sql`
+          INSERT INTO audit_log
+            (action, actor_id, actor_email, actor_name, at, details)
+          VALUES
+            ('intake_photo_ordered',
+             ${String(emp.userId || emp.id || "")},
+             ${String(emp.email || "")},
+             ${String(emp.name || emp.email || "")},
+             NOW(),
+             ${JSON.stringify({ intakeId, quoteId, photoIds: result })}::jsonb)
+        `);
+      });
+      if (wrongOwner) return res.status(409).json({ error: "Photo belongs to another quote" });
+      if (ownershipChanged) return res.status(409).json({ error: "Gallery ownership changed — retry" });
+      if (missingGallery) return res.status(409).json({ error: "Intake has no canonical photo gallery" });
+      if (result == null) return res.status(404).json({ error: "Intake not found" });
+      res.json({ ok: true, photoIds: result });
     }),
   );
 
@@ -635,34 +775,50 @@ export function registerQuoterRoutes(app: Express) {
     requireEmployee,
     withBody(async (req: any, res) => {
       const body = req.body || {};
-      // Deleting a photo mutates the owning quote's signed content, so it is
-      // blocked once that quote is committed.
-      const isCommitted = async (quoteId: string): Promise<boolean> => {
-        if (!quoteId) return false;
-        const [q] = await db
-          .select({ committedBy: quotes.committedBy })
-          .from(quotes)
-          .where(eq(quotes.id, quoteId));
-        return !!(q && q.committedBy);
-      };
       if (body.id) {
         const photoId = String(body.id);
         const [ph] = await db
           .select({ quoteId: photos.quoteId })
           .from(photos)
           .where(eq(photos.id, photoId));
-        if (ph && (await isCommitted(ph.quoteId))) {
-          return res.status(409).json({ error: "Quote is committed" });
-        }
-        await db.delete(photos).where(eq(photos.id, photoId));
+        if (!ph) return res.json({ ok: true });
+        let committed = false;
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ph.quoteId})::bigint)`);
+          const [current] = await tx
+            .select({ quoteId: photos.quoteId })
+            .from(photos)
+            .where(eq(photos.id, photoId));
+          if (!current || current.quoteId !== ph.quoteId) return;
+          const [q] = await tx
+            .select({ committedBy: quotes.committedBy })
+            .from(quotes)
+            .where(eq(quotes.id, ph.quoteId));
+          if (q?.committedBy) {
+            committed = true;
+            return;
+          }
+          await tx.delete(photos).where(eq(photos.id, photoId));
+        });
+        if (committed) return res.status(409).json({ error: "Quote is committed" });
         return res.json({ ok: true });
       }
       if (body.quoteId) {
         const quoteId = String(body.quoteId);
-        if (await isCommitted(quoteId)) {
-          return res.status(409).json({ error: "Quote is committed" });
-        }
-        await db.delete(photos).where(eq(photos.quoteId, quoteId));
+        let committed = false;
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`);
+          const [q] = await tx
+            .select({ committedBy: quotes.committedBy })
+            .from(quotes)
+            .where(eq(quotes.id, quoteId));
+          if (q?.committedBy) {
+            committed = true;
+            return;
+          }
+          await tx.delete(photos).where(eq(photos.quoteId, quoteId));
+        });
+        if (committed) return res.status(409).json({ error: "Quote is committed" });
         return res.json({ ok: true });
       }
       res.status(400).json({ error: "Missing id or quoteId" });
@@ -831,7 +987,19 @@ export function registerQuoterRoutes(app: Express) {
       if (existing && existing.committedBy) {
         return res.status(409).json({ error: "Intake is committed" });
       }
-      await db.execute(sql`
+      let galleryDeleted = false;
+      await db.transaction(async (tx) => {
+        // A full save can establish the initial exact gallery link. Serialize
+        // that with gallery deletion just like the narrow link endpoint.
+        if (quoteId) {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${quoteId})::bigint)`);
+          const tomb = await tx.execute(sql`SELECT 1 FROM deleted_quotes WHERE id = ${quoteId}`);
+          if (tomb.rows.length) {
+            galleryDeleted = true;
+            return;
+          }
+        }
+        await tx.execute(sql`
         INSERT INTO intakes (id, vin, stock, vehicle, miles, estimator, quote_id, data, created_at, completed_at, updated_at)
         VALUES (${id}, ${vin}, ${stock}, ${vehicle}, ${miles}, ${estimator}, ${quoteId}, ${dataJson}::jsonb,
                 to_timestamp(${ts} / 1000.0), NULL, to_timestamp(${ts} / 1000.0))
@@ -842,7 +1010,11 @@ export function registerQuoterRoutes(app: Express) {
           -- a stale full intake save from another device must never replace or
           -- clear that canonical relationship.
           quote_id = COALESCE(intakes.quote_id, ${quoteId}),
-          data = ${dataJson}::jsonb,
+          -- photoOrder is owned by the narrow ordering endpoint. A normal
+          -- autosave from a stale browser must not erase another device's order.
+          data = ${dataJson}::jsonb || jsonb_build_object(
+            'photoOrder', COALESCE(intakes.data->'photoOrder', '[]'::jsonb)
+          ),
           -- created_at is the arrival timestamp: written once at first insert,
           -- deliberately ABSENT from this update list so no later edit (from
           -- any device, any offline queue) can ever overwrite it.
@@ -851,7 +1023,9 @@ export function registerQuoterRoutes(app: Express) {
           completed_at = intakes.completed_at,
           updated_at = to_timestamp(${ts} / 1000.0)
         WHERE intakes.updated_at <= to_timestamp(${ts} / 1000.0) AND intakes.committed_by IS NULL
-      `);
+        `);
+      });
+      if (galleryDeleted) return res.status(410).json({ error: "Quote gallery was deleted" });
       res.json({ ok: true, id });
     }),
   );

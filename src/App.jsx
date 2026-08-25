@@ -869,7 +869,20 @@ function AuthedApp({ me, onAuthRefresh }) {
         onOpenLightbox={setLightbox}
       />
     ) : (
-      <VehiclesScreen dash={dash} filter={vehFilter} onFilter={setVehFilter} q={vehQ} onQ={setVehQ} onOpenIntake={openIntakeFor} onOpenRecord={openRecord} onOpenQuote={(q) => { setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }} />
+      <VehiclesScreen
+        dash={dash}
+        filter={vehFilter}
+        onFilter={setVehFilter}
+        q={vehQ}
+        onQ={setVehQ}
+        onOpenIntake={openIntakeFor}
+        onOpenRecord={openRecord}
+        onOpenQuote={(q) => { setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }}
+        onDeleted={async () => {
+          showToast('Deleted from Vehicles — history retained');
+          await Promise.all([loadData(), refreshDash()]);
+        }}
+      />
     );
   } else if (tab === 'intake') {
     content = <IntakeScreen showToast={showToast} openVin={intakeOpenVin} onOpenVinConsumed={() => setIntakeOpenVin(null)} openQuote={intakeOpenQuote} onOpenQuoteConsumed={() => setIntakeOpenQuote(null)} />;

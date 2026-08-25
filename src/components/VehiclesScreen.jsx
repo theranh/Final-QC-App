@@ -2,10 +2,12 @@
 // and Completed QC's (every vehicle with an inspection). Searchable by stock # or
 // VIN. All figures come from /api/dashboard (server-computed); this screen only renders.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { RecentQuoteCard } from './IntakeScreen';
 import GlobalSearchResults from './GlobalSearch';
 import SavedViews from './SavedViews';
+import PinDialog from './PinDialog';
+import { api } from '../lib/api';
 
 const FILTERS = [
   ['awaitingFinalQc', 'In-Take Quotes'],
@@ -28,7 +30,91 @@ const usd = (v) =>
 // "mike smith" → "Mike Smith" (also after hyphens: "mary-jo" → "Mary-Jo").
 const titleCaseName = (s) => s.replace(/(^|[\s-])([a-zà-ö])/g, (m, sep, ch) => sep + ch.toUpperCase());
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote }) {
+const REVEAL_PX = 82;
+const SWIPE_THRESHOLD = 42;
+
+function SwipeDeleteRow({ children, onDelete, label }) {
+  const [offset, setOffset] = useState(0);
+  const drag = useRef(null);
+  const suppressClick = useRef(false);
+
+  const pointerDown = (e) => {
+    if (e.button != null && e.button !== 0) return;
+    drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, start: offset, horizontal: false };
+  };
+  const pointerMove = (e) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (!d.horizontal) {
+      if (Math.abs(dx) < 7) return;
+      if (Math.abs(dy) > Math.abs(dx)) {
+        drag.current = null;
+        return;
+      }
+      d.horizontal = true;
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    }
+    setOffset(Math.max(-REVEAL_PX, Math.min(0, d.start + dx)));
+  };
+  const pointerEnd = (e) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    if (d.horizontal) {
+      const moved = Math.abs(e.clientX - d.x);
+      suppressClick.current = moved >= 7;
+      setOffset(d.start + (e.clientX - d.x) < -SWIPE_THRESHOLD ? -REVEAL_PX : 0);
+    }
+    drag.current = null;
+  };
+  const captureClick = (e) => {
+    if (suppressClick.current) {
+      suppressClick.current = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (offset) {
+      e.preventDefault();
+      e.stopPropagation();
+      setOffset(0);
+    }
+  };
+
+  return (
+    <div style={{ position: 'relative', overflow: 'hidden', borderRadius: 10 }}>
+      <button
+        type="button"
+        aria-label={`Delete ${label}`}
+        onClick={onDelete}
+        style={{
+          position: 'absolute', inset: '0 0 0 auto', width: REVEAL_PX, border: 0,
+          background: 'var(--red)', color: '#fff', fontWeight: 800, cursor: 'pointer',
+        }}
+      >
+        Delete
+      </button>
+      <div
+        data-testid="swipe-vehicle-row"
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerEnd}
+        onPointerCancel={pointerEnd}
+        onClickCapture={captureClick}
+        style={{
+          position: 'relative', zIndex: 1, transform: `translateX(${offset}px)`,
+          transition: drag.current?.horizontal ? 'none' : 'transform 160ms ease',
+          touchAction: 'pan-y', background: '#fff',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote, onDeleted }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -36,6 +122,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
   // from one bucket never leaks into the other (In-Take → estimator, Completed
   // QC's → inspector).
   const [person, setPerson] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
   // Saved-view apply: update bucket, person, and q together
   const handleApplyView = ({ bucket: b, person: p, q: newQ }) => {
@@ -87,6 +174,17 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
     onFilter(k);
   };
 
+  const retire = async ({ signerId, pin }) => {
+    await api.retireVehicle({
+      kind: deleteTarget.kind,
+      recordId: deleteTarget.recordId,
+      signerId,
+      pin,
+    });
+    setDeleteTarget(null);
+    await onDeleted?.();
+  };
+
   return (
     <div className="screen">
       <div className="screen-topbar" style={{ padding: '8px 14px 10px' }}>
@@ -135,7 +233,17 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
         )}
         {bucket === 'awaitingFinalQc' &&
           awaiting.map((v) => (
-            <RecentQuoteCard key={v.vin} quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} />
+            <SwipeDeleteRow
+              key={v.intakeId}
+              label={v.stock || v.vin || 'intake'}
+              onDelete={() => setDeleteTarget({
+                kind: 'intake',
+                recordId: v.intakeId,
+                label: v.stock || v.vin || 'Intake',
+              })}
+            >
+              <RecentQuoteCard quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} />
+            </SwipeDeleteRow>
           ))}
         {dash && bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
@@ -158,13 +266,21 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
                   ].filter(Boolean).join(' · ')
                 : null;
             return (
-              <button
-                type="button"
+              <SwipeDeleteRow
                 key={v.qcNumber}
-                onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
-                style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit' }}
+                label={v.stock || v.vin || v.qcNumber}
+                onDelete={() => setDeleteTarget({
+                  kind: 'inspection',
+                  recordId: v.qcNumber,
+                  label: v.stock || v.vin || v.qcNumber,
+                })}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <button
+                  type="button"
+                  onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
+                  style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                   <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {v.stock || 'NO STOCK #'} · {v.vehicle || 'Vehicle not recorded'}
                   </span>
@@ -185,8 +301,9 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
                 <div style={{ display: 'flex', gap: 10, marginTop: 4, fontSize: 9.5, color: 'var(--muted)' }}>
                   <span>{v.itemCount || 0} QC issue{v.itemCount === 1 ? '' : 's'}</span>
                   <span>{v.intake ? 'Tap for intake details + walk-around photos' : 'Digital intake unavailable · tap for full QC record'}</span>
-                </div>
-              </button>
+                  </div>
+                </button>
+              </SwipeDeleteRow>
             );
           })}
         {/* Global search: everything the two dash buckets above can't show —
@@ -204,6 +321,17 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
           />
         )}
       </div>
+      {deleteTarget && (
+        <PinDialog
+          title="Delete vehicle"
+          subtitle={`${deleteTarget.label} · history and galleries will be retained`}
+          adminOnly
+          confirmLabel="Delete from Vehicles"
+          busyLabel="Deleting…"
+          onClose={() => setDeleteTarget(null)}
+          onCommit={retire}
+        />
+      )}
     </div>
   );
 }

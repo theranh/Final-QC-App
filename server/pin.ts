@@ -231,6 +231,59 @@ export function registerPinRoutes(app: Express) {
     },
   );
 
+  // ----- POST /api/vehicles/retire -----
+  // "Delete" on Vehicles is deliberately archival. The exact stable record id
+  // is required; VIN is display/search data and is never used as an identifier.
+  app.post(
+    "/api/vehicles/retire",
+    requireEmployee,
+    withBody(async (req: any, res) => {
+      const kind = String(req.body?.kind || "");
+      const recordId = String(req.body?.recordId || "").trim().slice(0, 100);
+      if (!recordId || (kind !== "inspection" && kind !== "intake")) {
+        return res.status(400).json({ error: "A valid record type and exact record id are required" });
+      }
+
+      // Never trust client-side admin filtering/state. Verify the selected
+      // signer's own PIN, then enforce server-owned canOverride.
+      const sig = await resolveSignature({ ...req.body, forEmployeeId: undefined }, req);
+      if (!sig.ok) return res.status(sig.status).json({ error: sig.error });
+      if (!sig.signer.canOverride) {
+        return res.status(403).json({ error: "An admin PIN is required" });
+      }
+
+      let retired: any = null;
+      await db.transaction(async (tx) => {
+        const result = kind === "inspection"
+          ? await tx.execute(sql`
+              UPDATE inspections
+              SET archived = true, updated_at = NOW()
+              WHERE qc_number = ${recordId}
+              RETURNING qc_number AS record_id, vin, stock
+            `)
+          : await tx.execute(sql`
+              UPDATE intakes
+              SET retired_at = COALESCE(retired_at, NOW()), updated_at = NOW()
+              WHERE id = ${recordId}
+              RETURNING id AS record_id, vin, stock, quote_id
+            `);
+        retired = result.rows?.[0] || null;
+        if (!retired) return;
+        await auditCommit(tx, "vehicle_retired", sig.signer, {
+          kind,
+          recordId: String(retired.record_id),
+          vin: retired.vin || "",
+          stock: retired.stock || "",
+          quoteId: retired.quote_id || null,
+        });
+      });
+      if (!retired) return res.status(404).json({ error: "Vehicle record not found" });
+
+      invalidateDashboardCache();
+      res.json({ ok: true, kind, recordId: String(retired.record_id) });
+    }),
+  );
+
   // ----- POST /api/quoter/commit-intake -----
   app.post(
     "/api/quoter/commit-intake",

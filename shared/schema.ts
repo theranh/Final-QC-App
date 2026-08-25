@@ -191,6 +191,9 @@ export const intakes = pgTable(
     // predate this column — unknown, not backfilled (no defensible source).
     createdAt: timestamp("created_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    // Retirement only removes a unit from active Vehicles/dashboard views.
+    // The intake, its exact quote link, and all gallery/history rows remain.
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
     committedBy: text("committed_by"),
     overriddenBy: text("overridden_by"), // supervisor countersign; null on normal sign-off

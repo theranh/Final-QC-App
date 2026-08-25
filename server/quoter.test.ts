@@ -18,6 +18,8 @@ const H = vi.hoisted(() => {
   const photoRows: any[] = [];
   const deletedQuoteRows: string[] = []; // tombstones
   const intakeUpsertSql: string[] = []; // captured raw upsert SQL text
+  const auditRows: any[] = [];
+  const advisoryLockKeys: string[] = [];
 
   // Drizzle pgTable name (works for the real schema objects passed through).
   const tableName = (t: any): string => String(t?.[Symbol.for("drizzle:Name")] ?? "");
@@ -195,6 +197,10 @@ const H = vi.hoisted(() => {
       if (/FROM intakes i LEFT JOIN quotes/i.test(text)) {
         return { rows: intakeRows.map((i) => ({ ...i, quote_data: quoteRows.find((q) => q.id === i.quote_id)?.data || null })) };
       }
+      if (/SELECT id FROM intakes WHERE quote_id/i.test(text)) {
+        const row = intakeRows.find((intake) => intake.quote_id === params[0]);
+        return { rows: row ? [{ id: row.id }] : [] };
+      }
       if (/FROM intakes WHERE vin/i.test(text)) {
         const vin = String(params[0] || "").trim().toUpperCase();
         const rows = intakeRows
@@ -214,14 +220,42 @@ const H = vi.hoisted(() => {
       }
       // Advisory lock acquire — no-op in tests (serialization is implicit in sync mock)
       if (/pg_advisory_xact_lock/i.test(text)) {
+        advisoryLockKeys.push(String(params[0] || ""));
         return { rows: [] };
       }
       if (/FROM deleted_quotes/i.test(text)) {
         return { rows: deletedQuoteRows.includes(params[0]) ? [{ "?column?": 1 }] : [] };
       }
-      if (/SELECT quote_id FROM intakes WHERE id/i.test(text)) {
+      if (/SELECT quote_id(?:, data)? FROM intakes WHERE id/i.test(text)) {
         const row = intakeRows.find((r) => r.id === params[0]);
-        return { rows: row ? [{ quote_id: row.quote_id || null }] : [] };
+        return { rows: row ? [{ quote_id: row.quote_id || null, data: row.data || {} }] : [] };
+      }
+      if (/SELECT id, quote_id FROM photos WHERE id IN/i.test(text)) {
+        return { rows: photoRows.filter((photo) => params.includes(photo.id)).map((photo) => ({ id: photo.id, quote_id: photo.quoteId })) };
+      }
+      if (/SELECT id FROM photos WHERE quote_id/i.test(text)) {
+        return {
+          rows: photoRows
+            .filter((photo) => photo.quoteId === params[0])
+            .sort((a, b) => (Number(a.ts) - Number(b.ts)) || String(a.id).localeCompare(String(b.id)))
+            .map((photo) => ({ id: photo.id })),
+        };
+      }
+      if (/UPDATE intakes[\s\S]*photoOrder/i.test(text)) {
+        const order = JSON.parse(String(params[0] || "[]"));
+        const row = intakeRows.find((intake) => intake.id === params[1] && intake.quote_id === params[2]);
+        if (row) row.data = { ...(row.data || {}), photoOrder: order };
+        return { rows: [] };
+      }
+      if (/INSERT INTO audit_log/i.test(text)) {
+        auditRows.push({
+          action: "intake_photo_ordered",
+          actorId: params[0],
+          actorEmail: params[1],
+          actorName: params[2],
+          details: JSON.parse(String(params[3] || "{}")),
+        });
+        return { rows: [] };
       }
       if (/SELECT id, slot, role, ts, LENGTH\(data\) AS bytes/i.test(text)) {
         const quoteId = params[0];
@@ -290,10 +324,10 @@ const H = vi.hoisted(() => {
     transaction: async (fn: any) => fn(fakeDb),
   };
 
-  return { quoteRows, intakeRows, photoRows, deletedQuoteRows, intakeUpsertSql, fakeDb };
+  return { quoteRows, intakeRows, photoRows, deletedQuoteRows, intakeUpsertSql, auditRows, advisoryLockKeys, fakeDb };
 });
 
-const { quoteRows, intakeRows, photoRows, deletedQuoteRows } = H;
+const { quoteRows, intakeRows, photoRows, deletedQuoteRows, auditRows, advisoryLockKeys } = H;
 
 vi.mock("./db", () => ({ db: H.fakeDb }));
 vi.mock("./access", () => ({
@@ -341,6 +375,8 @@ beforeEach(() => {
   intakeRows.length = 0;
   photoRows.length = 0;
   deletedQuoteRows.length = 0;
+  auditRows.length = 0;
+  advisoryLockKeys.length = 0;
 });
 
 describe("quote immutability once committed", () => {
@@ -375,6 +411,20 @@ describe("quote immutability once committed", () => {
 });
 
 describe("quote delete integrity (no orphans, tombstoned uploads)", () => {
+  it("refuses to delete a gallery while an exact intake link points to it", async () => {
+    quoteRows.push({ id: "linked-gallery", data: {}, committedBy: null, overriddenBy: null });
+    intakeRows.push({ id: "linked-intake", vin: "VIN123", quote_id: "linked-gallery" });
+    photoRows.push({ id: "linked-photo", quoteId: "linked-gallery" });
+
+    const r = await req("DELETE", "/api/quoter/quotes?id=linked-gallery");
+
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/linked to an intake/i);
+    expect(quoteRows.some((q) => q.id === "linked-gallery")).toBe(true);
+    expect(photoRows.some((p) => p.id === "linked-photo")).toBe(true);
+    expect(deletedQuoteRows).not.toContain("linked-gallery");
+  });
+
   it("deleting a quote also deletes its photos and tombstones the id", async () => {
     quoteRows.push({ id: "qd", data: {}, committedBy: null, overriddenBy: null });
     photoRows.push({ id: "pd1", quoteId: "qd" }, { id: "pd2", quoteId: "qd" }, { id: "keep", quoteId: "other" });
@@ -557,6 +607,73 @@ describe("photo mutations blocked once owning quote committed", () => {
     expect(manifest.body.photos.map((p: any) => p.role)).toEqual(["walk", "damage"]);
   });
 
+  it("atomically saves canonical intake order, ignores stale ids, and appends new photos", async () => {
+    intakeRows.push({ id: "in-order", quote_id: "q-order", data: {}, committedBy: null });
+    photoRows.push(
+      { id: "a", quoteId: "q-order", ts: 1, slot: "ext_front", role: "walk", data: Buffer.from("a") },
+      { id: "b", quoteId: "q-order", ts: 2, slot: "ext_rear", role: "walk", data: Buffer.from("b") },
+      { id: "new", quoteId: "q-order", ts: 3, slot: "xtra_1", role: "walk", data: Buffer.from("n") },
+    );
+    const saved = await req("PUT", "/api/quoter/intakes/in-order/photo-order", {
+      photoIds: ["b", "deleted-stale", "a"],
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body.photoIds).toEqual(["b", "a", "new"]);
+    expect(advisoryLockKeys).toContain("q-order");
+
+    const manifest = await req("GET", "/api/quoter/intakes/in-order/photos");
+    expect(manifest.body.photos.map((photo: any) => photo.id)).toEqual(["b", "a", "new"]);
+  });
+
+  it("allows presentation-only ordering for committed intake/quote rows and audits the actor and exact ids", async () => {
+    intakeRows.push({
+      id: "in-committed-order",
+      quote_id: "q-committed-order",
+      data: {},
+      committedBy: "Signer",
+    });
+    quoteRows.push({
+      id: "q-committed-order",
+      data: {},
+      committedBy: "Signer",
+    });
+    photoRows.push(
+      { id: "committed-a", quoteId: "q-committed-order", ts: 1 },
+      { id: "committed-b", quoteId: "q-committed-order", ts: 2 },
+    );
+
+    const saved = await req("PUT", "/api/quoter/intakes/in-committed-order/photo-order", {
+      photoIds: ["committed-b", "committed-a"],
+    });
+
+    expect(saved.status).toBe(200);
+    expect(intakeRows[0].data.photoOrder).toEqual(["committed-b", "committed-a"]);
+    expect(auditRows).toEqual([{
+      action: "intake_photo_ordered",
+      actorId: "u99",
+      actorEmail: "z@truckranch.com",
+      actorName: "Caller",
+      details: {
+        intakeId: "in-committed-order",
+        quoteId: "q-committed-order",
+        photoIds: ["committed-b", "committed-a"],
+      },
+    }]);
+  });
+
+  it("rejects an order containing a photo owned by another quote", async () => {
+    intakeRows.push({ id: "in-order-owner", quote_id: "q-order-owner", data: {}, committedBy: null });
+    photoRows.push(
+      { id: "mine", quoteId: "q-order-owner", ts: 1 },
+      { id: "theirs", quoteId: "q-other", ts: 2 },
+    );
+    const saved = await req("PUT", "/api/quoter/intakes/in-order-owner/photo-order", {
+      photoIds: ["mine", "theirs"],
+    });
+    expect(saved.status).toBe(409);
+    expect(intakeRows[0].data).toEqual({});
+  });
+
   it("warns about an older intake-owned gallery without returning those photos", async () => {
     intakeRows.push(
       {
@@ -731,6 +848,19 @@ describe("intake created_at (arrival timestamp) immutability", () => {
     expect(r.status).toBe(200);
     const updateClause = H.intakeUpsertSql[0].split(/DO UPDATE SET/i)[1] ?? "";
     expect(updateClause).toMatch(/quote_id\s*=\s*COALESCE\s*\(\s*intakes\.quote_id\s*,/i);
+  });
+
+  it("preserves server-owned photoOrder during a broad intake autosave", async () => {
+    H.intakeUpsertSql.length = 0;
+    const r = await req("PUT", "/api/quoter/intakes", {
+      id: "ordered-autosave",
+      vin: "1FTFW1E55MFA00003",
+      data: { notes: "ordinary edit" },
+      ts: Date.now(),
+    });
+    expect(r.status).toBe(200);
+    const updateClause = H.intakeUpsertSql[0].split(/DO UPDATE SET/i)[1] ?? "";
+    expect(updateClause).toMatch(/COALESCE\s*\(\s*intakes\.data\s*->\s*'photoOrder'\s*,\s*'\[\]'/i);
   });
 });
 

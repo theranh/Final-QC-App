@@ -759,6 +759,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
       SELECT COUNT(*)::int AS n
       FROM intakes
       WHERE completed_at IS NOT NULL
+        AND retired_at IS NULL
         AND completed_at AT TIME ZONE ${TZ} >= date_trunc('week', now() AT TIME ZONE ${TZ})
     `),
     db.execute(sql`

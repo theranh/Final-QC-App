@@ -21,3 +21,5 @@
 - [Photo ownership and roles](photo-ownership-roles.md) — reopen through the intake’s exact quote link; persist photo roles and isolate unknown legacy slots rather than guessing.
 - [Guided photo route](guided-photo-route.md) — shop route is exterior → wheels/tires → interior; show the active angle and preserve shutter-time ownership across async work.
 - [Production binary repairs](production-binary-repairs.md) — fully decode and format-check replacement bytes; exact version guards, audit, and recoverable originals are mandatory.
+- [Vehicle retirement](vehicle-retirement.md) — Vehicles “Delete” is admin-PIN retirement by exact ID; preserve history/galleries and hide retired rows from operational surfaces.
+- [Intake photo ordering](intake-photo-ordering.md) — gallery order is audited presentation metadata, editable after commit under the same quote lock as photo mutations.

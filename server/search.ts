@@ -49,6 +49,7 @@ export async function searchTrucks(qRaw: string): Promise<SearchResult[]> {
         SELECT id, stock, vehicle, quote_id, committed_by, updated_at
         FROM intakes
         WHERE UPPER(vin) = UPPER(insp.vin)
+          AND retired_at IS NULL
         ORDER BY updated_at DESC NULLS LAST
         LIMIT 1
       ) linked ON TRUE
@@ -60,7 +61,8 @@ export async function searchTrucks(qRaw: string): Promise<SearchResult[]> {
       SELECT id, vin, stock, vehicle, quote_id, committed_by,
              EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
       FROM intakes
-      WHERE UPPER(vin) LIKE ${like} OR UPPER(stock) LIKE ${like}
+      WHERE retired_at IS NULL
+        AND (UPPER(vin) LIKE ${like} OR UPPER(stock) LIKE ${like})
       ORDER BY updated_at DESC NULLS LAST
       LIMIT 20
     `),

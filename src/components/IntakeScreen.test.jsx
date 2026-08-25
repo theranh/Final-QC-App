@@ -16,6 +16,7 @@ const repairIntakeGalleryLink = vi.fn(() => Promise.resolve({}));
 const getIntake = vi.fn(() => Promise.resolve({ found: false }));
 const quotePhotos = vi.fn(() => Promise.resolve({ photos: [] }));
 const intakePhotos = vi.fn(() => Promise.resolve({ quoteId: null, photos: [] }));
+const orderIntakePhotos = vi.fn(() => Promise.resolve({ photoIds: [] }));
 const commitIntake = vi.fn(() => Promise.resolve({}));
 const correctCommittedIntake = vi.fn(() => Promise.resolve({}));
 const putQuotePhoto = vi.fn(() => Promise.resolve({}));
@@ -32,6 +33,7 @@ vi.mock('../lib/api', () => ({
     getIntake: (...args) => getIntake(...args),
     quotePhotos: (...args) => quotePhotos(...args),
     intakePhotos: (...args) => intakePhotos(...args),
+    orderIntakePhotos: (...args) => orderIntakePhotos(...args),
     putIntake: (...args) => putIntake(...args),
     linkIntakeQuote: (...args) => linkIntakeQuote(...args),
     repairIntakeGalleryLink: (...args) => repairIntakeGalleryLink(...args),
@@ -100,6 +102,8 @@ beforeEach(() => {
   quotePhotos.mockResolvedValue({ photos: [] });
   intakePhotos.mockReset();
   intakePhotos.mockResolvedValue({ quoteId: null, photos: [] });
+  orderIntakePhotos.mockReset();
+  orderIntakePhotos.mockImplementation((_id, photoIds) => Promise.resolve({ photoIds }));
   commitIntake.mockReset();
   commitIntake.mockResolvedValue({});
   correctCommittedIntake.mockReset();
@@ -318,6 +322,8 @@ describe('IntakeScreen scan wiring', () => {
     expect(screen.queryByText('WRONG QUOTE')).not.toBeInTheDocument();
     expect(screen.queryByTestId('mock-quote')).not.toBeInTheDocument();
     expect(intakePhotos).toHaveBeenCalledWith('in-vehicle-tab');
+    // Completion locks signed content, but gallery order is presentation-only.
+    expect(screen.getByRole('button', { name: /move xtra_1 earlier/i })).toBeEnabled();
   });
 
   it('still opens the damage quoter for a true quote-only record', async () => {
@@ -486,6 +492,58 @@ describe('IntakeScreen cache and request ordering', () => {
     committedBy: null,
     data: {},
     updatedAt,
+  });
+
+  it('reorders an Intake gallery with pointer events and persists the full order', async () => {
+    const intake = { ...serverRow(VALID_VIN, 'ORDER', 100), id: 'in-order-ui', quoteId: 'q-order-ui' };
+    getIntake.mockResolvedValue(intake);
+    intakePhotos.mockResolvedValue({
+      intakeId: intake.id,
+      quoteId: intake.quoteId,
+      photos: [
+        { id: 'walk-a', slot: 'ext_front', role: 'walk', ts: 1 },
+        { id: 'walk-b', slot: 'ext_rear', role: 'walk', ts: 2 },
+        { id: 'walk-c', slot: 'xtra_1', role: 'walk', ts: 3 },
+      ],
+    });
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    const first = (await screen.findByRole('button', { name: /open ext_front 1/i })).closest('[data-photo-id]');
+    const last = screen.getByRole('button', { name: /open xtra_1 3/i }).closest('[data-photo-id]');
+    const originalElementFromPoint = document.elementFromPoint;
+    document.elementFromPoint = vi.fn(() => last);
+
+    fireEvent.pointerDown(first, { pointerId: 7, clientX: 10, clientY: 10, button: 0 });
+    fireEvent.pointerMove(first, { pointerId: 7, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(first, { pointerId: 7, clientX: 100, clientY: 100 });
+
+    await waitFor(() => expect(orderIntakePhotos).toHaveBeenCalledWith(
+      'in-order-ui',
+      ['walk-b', 'walk-c', 'walk-a'],
+    ));
+    if (originalElementFromPoint) document.elementFromPoint = originalElementFromPoint;
+    else delete document.elementFromPoint;
+  });
+
+  it('offers accessible reorder controls and restores the order when persistence fails', async () => {
+    const intake = { ...serverRow(VALID_VIN, 'ORDER-FAIL', 100), id: 'in-order-fail', quoteId: 'q-order-fail' };
+    getIntake.mockResolvedValue(intake);
+    intakePhotos.mockResolvedValue({
+      intakeId: intake.id,
+      quoteId: intake.quoteId,
+      photos: [
+        { id: 'fail-a', slot: 'ext_front', role: 'walk', ts: 1 },
+        { id: 'fail-b', slot: 'ext_rear', role: 'walk', ts: 2 },
+      ],
+    });
+    orderIntakePhotos.mockRejectedValue(new Error('offline'));
+    const showToast = vi.fn();
+    render(<IntakeScreen showToast={showToast} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /move ext_rear earlier/i }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/previous order was restored/i)));
+    expect(screen.getByRole('button', { name: /open ext_front 1/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /open ext_rear 2/i })).toBeInTheDocument();
   });
 
   it('uses strictly increasing timestamps for edits made in the same millisecond', async () => {

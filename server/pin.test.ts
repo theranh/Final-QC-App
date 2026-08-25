@@ -161,6 +161,20 @@ const H = vi.hoisted(() => {
         row.quote_id = quoteId;
         return { rows: [{ quote_id: quoteId }] };
       }
+      if (/UPDATE intakes/i.test(text) && /retired_at/i.test(text)) {
+        const intakeId = params[0];
+        const row = intakeRows.find((intake) => intake.id === intakeId);
+        if (!row) return { rows: [] };
+        row.retiredAt = row.retiredAt || new Date();
+        return {
+          rows: [{
+            record_id: row.id,
+            vin: row.vin,
+            stock: row.stock,
+            quote_id: row.quoteId || row.quote_id || null,
+          }],
+        };
+      }
       if (/for update/i.test(text)) {
         const intake = intakeRows.find((r) => r.id === params[0]);
         if (intake) {
@@ -496,6 +510,60 @@ describe("commit endpoints", () => {
       stock: "UNCHANGED",
       miles: "999",
     });
+  });
+
+  it("retires an intake by exact id with an admin PIN while retaining its gallery link", async () => {
+    intakeRows.push({
+      id: "retire-exact-id",
+      vin: "SHAREDVIN12345678",
+      stock: "RETIRE-ME",
+      quoteId: "gallery-kept",
+      data: {},
+      committedBy: "Worker",
+    });
+    intakeRows.push({
+      id: "same-vin-stays",
+      vin: "SHAREDVIN12345678",
+      stock: "KEEP-ME",
+      quoteId: "other-gallery",
+      data: {},
+      committedBy: "Worker",
+    });
+
+    const r = await post("/api/vehicles/retire", {
+      kind: "intake",
+      recordId: "retire-exact-id",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(r.status).toBe(200);
+    expect(intakeRows.find((x) => x.id === "retire-exact-id").retiredAt).toBeInstanceOf(Date);
+    expect(intakeRows.find((x) => x.id === "retire-exact-id").quoteId).toBe("gallery-kept");
+    expect(intakeRows.find((x) => x.id === "same-vin-stays").retiredAt).toBeUndefined();
+    expect(audits.at(-1)).toMatchObject({
+      action: "vehicle_retired",
+      details: { kind: "intake", recordId: "retire-exact-id", quoteId: "gallery-kept" },
+    });
+  });
+
+  it("rejects vehicle retirement by a valid non-admin PIN", async () => {
+    intakeRows.push({
+      id: "retire-denied",
+      vin: "DENIEDVIN1234567",
+      stock: "STAYS",
+      quoteId: "gallery-stays",
+      data: {},
+      committedBy: "Worker",
+    });
+    const r = await post("/api/vehicles/retire", {
+      kind: "intake",
+      recordId: "retire-denied",
+      signerId: 1,
+      pin: "1111",
+    });
+    expect(r.status).toBe(403);
+    expect(intakeRows.find((x) => x.id === "retire-denied").retiredAt).toBeUndefined();
   });
 
   it("does not allow the protected correction route on an uncommitted intake", async () => {

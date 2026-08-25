@@ -123,6 +123,23 @@ describe("searchTrucks", () => {
     });
   });
 
+  it("excludes retired intakes from direct intake search", async () => {
+    await searchTrucks("T211");
+    const direct = H.calls.find((c) =>
+      /FROM intakes/i.test(c.text) && !/LEFT JOIN LATERAL/i.test(c.text),
+    );
+    expect(direct?.text).toMatch(/WHERE\s+retired_at IS NULL/i);
+    expect(direct?.text).toMatch(/AND\s+\(UPPER\(vin\) LIKE/i);
+  });
+
+  it("does not enrich an inspection search result with a retired intake", async () => {
+    await searchTrucks("FQ-1011");
+    const inspection = H.calls.find((c) => /FROM inspections insp/i.test(c.text));
+    expect(inspection?.text).toMatch(
+      /FROM intakes\s+WHERE UPPER\(vin\) = UPPER\(insp\.vin\)\s+AND retired_at IS NULL/i,
+    );
+  });
+
   it("escapes user-typed LIKE wildcards instead of interpreting them", async () => {
     await searchTrucks("50%_T");
     expect(H.calls.length).toBeGreaterThan(0);

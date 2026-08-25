@@ -180,9 +180,10 @@ export async function fetchIntakeStats(from: string, to: string): Promise<Intake
       -- bare ::date cast previously used the server's UTC day, so intakes
       -- completed after 6-7pm local drifted into the next day's bar.
       LEFT JOIN intakes i ON (i.completed_at AT TIME ZONE 'America/Chicago')::date = d.day::date
+        AND i.retired_at IS NULL
       GROUP BY d.day ORDER BY d.day
     `),
-    db.execute(sql`SELECT COUNT(*)::int AS n FROM intakes WHERE completed_at IS NULL`),
+    db.execute(sql`SELECT COUNT(*)::int AS n FROM intakes WHERE completed_at IS NULL AND retired_at IS NULL`),
   ]);
   const days = rowsOf(byDay).map((r) => ({ day: String(r.day), intakes: Number(r.intakes) || 0 }));
   const openIntakes = Number(rowsOf(open)[0]?.n) || 0;
@@ -211,6 +212,7 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
            EXTRACT(EPOCH FROM completed_at) * 1000 AS completed_ms,
            EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
     FROM intakes
+    WHERE retired_at IS NULL
     ORDER BY COALESCE(completed_at, updated_at) DESC
   `);
   return rowsOf(r)

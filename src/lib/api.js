@@ -81,6 +81,8 @@ export const api = {
   putQuotePhoto: (payload) => request('POST', '/api/quoter/photos', payload),
   quotePhotos: (quoteId) => request('GET', `/api/quoter/photos?quote=${encodeURIComponent(quoteId)}`),
   intakePhotos: (intakeId) => request('GET', `/api/quoter/intakes/${encodeURIComponent(intakeId)}/photos`),
+  orderIntakePhotos: (intakeId, photoIds) =>
+    request('PUT', `/api/quoter/intakes/${encodeURIComponent(intakeId)}/photo-order`, { photoIds }),
   deleteQuotePhoto: (payload) => request('DELETE', '/api/quoter/photos', payload),
   postCorrection: (payload) => request('POST', '/api/quoter/corrections', payload),
   classify: (payload) => request('POST', '/api/quoter/classify', payload),
@@ -94,6 +96,7 @@ export const api = {
   commitQuote: (payload) => request('POST', '/api/quoter/commit-quote', payload),
   correctCommittedIntake: (id, payload) =>
     request('POST', `/api/quoter/intakes/${encodeURIComponent(id)}/correct-stock-miles`, payload),
+  retireVehicle: (payload) => request('POST', '/api/vehicles/retire', payload),
 
   // ---------- Collaboration / Operations Handoff ----------
   /** GET /api/collaboration/timeline?vin=… => { events, flags } */

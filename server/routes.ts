@@ -1884,6 +1884,7 @@ export function registerAppRoutes(app: Express) {
                      ) AS rn
               FROM intakes i
               WHERE i.completed_at IS NOT NULL
+                AND i.retired_at IS NULL
                 AND NOT EXISTS (
                   SELECT 1 FROM inspections fq
                   WHERE upper(trim(fq.vin)) = upper(trim(i.vin))
@@ -1912,6 +1913,7 @@ export function registerAppRoutes(app: Express) {
                    extract(epoch from i.created_at) * 1000 AS created_ms
             FROM intakes i
             WHERE i.completed_at IS NULL
+              AND i.retired_at IS NULL
               AND i.updated_at < now() - interval '${sql.raw(String(STALE_INTAKE_HOURS))} hours'
             ORDER BY i.updated_at ASC
             LIMIT ${sql.raw(String(HANDOFF_CAP))}`
