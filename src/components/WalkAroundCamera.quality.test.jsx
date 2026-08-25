@@ -203,7 +203,7 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
 
     await waitFor(() => {
       expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
-      expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+      expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false');
     });
     fireEvent.change(input, { target: { files: [shotFile()] } });
 
@@ -250,8 +250,9 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Still in guided mode — the shutter is ready again.
-    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    // Still in guided mode — photo processing is ready again. The live
+    // shutter remains disabled in this file-import-only test environment.
+    expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false');
   });
 
   it('camera remains in extra mode after Retake', async () => {
@@ -282,7 +283,7 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false');
     expect(screen.queryByText(/DAMAGE CLOSE-UP/i)).not.toBeInTheDocument();
     expect(onDamageCapture).not.toHaveBeenCalled();
     expect(api.putQuotePhoto).not.toHaveBeenCalled();
@@ -297,14 +298,14 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     const input = container.querySelector('input[type="file"]');
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
-    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false'));
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('Retake photo'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(screen.getByLabelText('Take photo')).not.toBeDisabled();
+    expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false');
     expect(screen.queryByText(/WIDE SHOT/i)).not.toBeInTheDocument();
     expect(onDamageCapture).not.toHaveBeenCalled();
   });
@@ -318,7 +319,7 @@ describe('WalkAroundCamera — advisory photo-quality feedback', () => {
     const input = container.querySelector('input[type="file"]');
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
-    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false'));
 
     fireEvent.change(input, { target: { files: [shotFile()] } });
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());

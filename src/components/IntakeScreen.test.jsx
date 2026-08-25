@@ -175,6 +175,17 @@ describe('IntakeScreen scan wiring', () => {
     expect(screen.getByRole('button', { name: 'SAVE' })).toBeInTheDocument();
   });
 
+  it('does not treat a newly scanned VIN with no linked gallery as a photo connection failure', async () => {
+    intakePhotos.mockRejectedValue(new Error('the gallery endpoint must not run yet'));
+    await openScanner();
+    fireEvent.click(screen.getByText('emit-valid-scan'));
+
+    expect(await screen.findByText('WALK-AROUND PHOTOS · 0')).toBeInTheDocument();
+    await waitFor(() => expect(getIntake).toHaveBeenCalledWith(VALID_VIN));
+    expect(intakePhotos).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Photos didn’t load/i)).not.toBeInTheDocument();
+  });
+
   it('opens walk-around capture with the newly linked quote after scanning a VIN', async () => {
     linkIntakeQuote.mockResolvedValue({ quoteId: 'q-newly-linked' });
     await openScanner();

@@ -692,7 +692,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const rotationBusyRef = useRef(false);
   const photoQuoteId = intake?.quoteId ?? null;
   const photoIntakeId = intake?.id ?? null;
-  const photoLookupReady = !!photoQuoteId || !!intake?.completedAt || !!intake?.committedBy || Number(intake?.ts) > 0;
+  // A brand-new scanned VIN has no gallery until its canonical quote link is
+  // created. Do not probe the intake-photo endpoint merely because an early
+  // field edit gave the local draft a timestamp: that can race the first
+  // server save and turn a normal empty gallery into a misleading 404 /
+  // "check your connection" warning.
+  const photoLookupReady = !!photoQuoteId;
   // Photos can still be uploading in the background (weak signal) when the
   // grid first loads — track the retry queue and refresh the list as shots
   // land, so a saved intake never looks like photos went missing.
@@ -706,8 +711,12 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const photoRequestRef = useRef(0);
   useEffect(() => {
     const effectToken = ++photoRequestRef.current;
-    if (!photoIntakeId || !photoLookupReady || walkOpen) {
-      if (!photoIntakeId) setIntakePhotos([]);
+    if (!photoIntakeId || !photoLookupReady) {
+      setIntakePhotos([]);
+      setPhotoLoadError(false);
+      return;
+    }
+    if (walkOpen) {
       return;
     }
     let live = true;

@@ -112,16 +112,10 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const videoRef = useRef(null); const streamRef = useRef(null); const trackRef = useRef(null);
   const cameraStartRef = useRef(null);
   const cameraEpochRef = useRef(0);
+  const cameraReadyRef = useRef(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraStarting, setCameraStarting] = useState(false);
   const fileRef = useRef(null); const canvasRef = useRef(null);
-  // Retained for the shop's existing motion-permission handshake only. Live
-  // pixel orientation is calibrated from captured output, never from gravity.
-  const gravRef = useRef(null);
-  const motionOnRef = useRef(false);
-  const motionRequestRef = useRef(null);
-  const motionPermissionSettledRef = useRef(false);
-  const [accessPrepared, setAccessPrepared] = useState(false);
   // Advisory quality review: null = no pending review; otherwise { dataUrl, warnings, action }
   // where action is the deferred save function to call on Keep.
   const [qualityReview, setQualityReview] = useState(null);
@@ -143,19 +137,69 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const slot = WALK_SLOTS[current] || WALK_SLOTS[0];
   const zooms = useMemo(() => [0.5, 1, 2, 3, 5], []);
 
+  const waitForVideoFrame = useCallback((video, stream, epoch) => {
+    if (!video) return Promise.resolve(false);
+    if (video.srcObject !== stream) video.srcObject = stream;
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer;
+      const events = ['loadeddata', 'canplay', 'playing', 'resize'];
+      const cleanup = () => {
+        clearTimeout(timer);
+        for (const event of events) video.removeEventListener(event, check);
+      };
+      const settle = (ready) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(ready);
+      };
+      const check = (event) => {
+        if (epoch !== cameraEpochRef.current || video.srcObject !== stream) {
+          settle(false);
+          return;
+        }
+        const hasPixels = video.videoWidth > 0 && video.videoHeight > 0;
+        const hasFrame = video.readyState >= 2 || event?.type === 'canplay' || event?.type === 'playing';
+        if (hasPixels && hasFrame) settle(true);
+      };
+      for (const event of events) video.addEventListener(event, check);
+      timer = setTimeout(() => {
+        settle(
+          epoch === cameraEpochRef.current
+          && video.srcObject === stream
+          && video.videoWidth > 0
+          && video.videoHeight > 0
+          && video.readyState >= 2,
+        );
+      }, 5000);
+      try {
+        const playing = video.play?.();
+        playing?.catch?.(() => {});
+      } catch {
+        // autoplay attributes normally handle this; the readiness events below
+        // remain authoritative if an explicit play() call is blocked.
+      }
+      queueMicrotask(() => check());
+    });
+  }, []);
+
   const stopCamera = useCallback(() => {
     cameraEpochRef.current += 1;
     if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     trackRef.current = null;
+    cameraReadyRef.current = false;
     setCameraReady(false);
   }, []);
   const startCamera = useCallback(async () => {
-    if (streamRef.current) {
-      if (videoRef.current && videoRef.current.srcObject !== streamRef.current) {
-        videoRef.current.srcObject = streamRef.current;
-      }
-      setCameraReady(true);
+    if (
+      streamRef.current
+      && cameraReadyRef.current
+      && videoRef.current?.videoWidth > 0
+      && videoRef.current?.videoHeight > 0
+    ) {
+      if (videoRef.current.srcObject !== streamRef.current) videoRef.current.srcObject = streamRef.current;
       return true;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -166,23 +210,32 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const epoch = cameraEpochRef.current;
     const request = (async () => {
       setCameraStarting(true);
+      cameraReadyRef.current = false;
+      setCameraReady(false);
       setError('');
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }, audio: false });
-        if (epoch !== cameraEpochRef.current) {
-          stream.getTracks().forEach((t) => t.stop());
-          return false;
+        let stream = streamRef.current;
+        if (!stream) {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }, audio: false });
+          if (epoch !== cameraEpochRef.current) {
+            stream.getTracks().forEach((t) => t.stop());
+            return false;
+          }
+          streamRef.current = stream;
+          trackRef.current = stream.getVideoTracks()[0];
+          const caps = trackRef.current.getCapabilities ? trackRef.current.getCapabilities() : {};
+          setZoomCaps(caps.zoom || null);
+          if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
         }
-        streamRef.current = stream;
-        trackRef.current = stream.getVideoTracks()[0];
-        if (videoRef.current) videoRef.current.srcObject = stream;
-        const caps = trackRef.current.getCapabilities ? trackRef.current.getCapabilities() : {};
-        setZoomCaps(caps.zoom || null);
-        if (caps.zoom) trackRef.current.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, zoomRef.current)) }] }).catch(() => {});
-        setCameraReady(true);
-        return true;
+        const ready = await waitForVideoFrame(videoRef.current, stream, epoch);
+        if (epoch !== cameraEpochRef.current) return false;
+        cameraReadyRef.current = ready;
+        setCameraReady(ready);
+        if (!ready) setError('The camera opened but the video is still starting. Tap Enable Camera to retry.');
+        return ready;
       } catch (e) {
         if (epoch === cameraEpochRef.current) {
+          cameraReadyRef.current = false;
           setCameraReady(false);
           setError(e?.name === 'NotAllowedError'
             ? 'Allow camera access to use the live camera, or choose a photo from your device.'
@@ -196,7 +249,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     })();
     cameraStartRef.current = request;
     return request;
-  }, []);
+  }, [waitForVideoFrame]);
   useEffect(() => {
     void startCamera();
     return stopCamera;
@@ -204,44 +257,14 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // Review mode removes the live <video> from the DOM. Reattach the existing
   // stream whenever the camera frame mounts again (for example, Add Damage).
   useEffect(() => {
-    if (mode !== 'review' && videoRef.current && streamRef.current
-      && videoRef.current.srcObject !== streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
+    if (mode === 'review') {
+      cameraReadyRef.current = false;
+      setCameraReady(false);
+      return;
     }
-  }, [mode]);
+    void startCamera();
+  }, [mode, startCamera]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  // Keep the existing permission flow, but treat motion as non-authoritative:
-  // gravity cannot reveal whether WebKit normalized drawImage(video) pixels.
-  const onMotion = useCallback((e) => {
-    const g = e.accelerationIncludingGravity;
-    if (g && (g.x != null)) gravRef.current = { x: g.x, y: g.y, t: Date.now() };
-  }, []);
-  // Resolves once the listener is attached (or permission is denied).
-  const enableMotion = useCallback(() => {
-    if (motionOnRef.current || motionPermissionSettledRef.current) return Promise.resolve();
-    if (motionRequestRef.current) return motionRequestRef.current;
-    const attach = () => { motionOnRef.current = true; window.addEventListener('devicemotion', onMotion); };
-    const request = (async () => {
-      try {
-        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-          const result = await DeviceMotionEvent.requestPermission();
-          if (result === 'granted') attach();
-        } else if (typeof DeviceMotionEvent !== 'undefined') {
-          attach();
-        }
-      } catch {
-        // Denial is allowed: the camera still works, just without gravity data.
-      } finally {
-        motionPermissionSettledRef.current = true;
-        motionRequestRef.current = null;
-      }
-    })();
-    motionRequestRef.current = request;
-    return request;
-  }, [onMotion]);
-  useEffect(() => {
-    return () => { if (motionOnRef.current) window.removeEventListener('devicemotion', onMotion); };
-  }, [onMotion]);
   useEffect(() => {
     const mq = window.matchMedia?.('(orientation: landscape)');
     if (!mq) return;
@@ -454,12 +477,21 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // drawImage(), though, so Apple mobile calibrates that mapping once from an
   // actual captured preview. Gravity never decides pixel orientation.
   const capture = async () => {
-    const v = videoRef.current;
-    if (!accessPrepared) return;
-    // Never let the first shutter press become a hidden fallback capture: the
-    // permission gate must be resolved before any photo can be taken.
-    if (!v?.videoWidth) { await startCamera(); return; }
     if (shotBusyRef.current) return;
+    let v = videoRef.current;
+    if (
+      !cameraReadyRef.current
+      || !v?.videoWidth
+      || !v?.videoHeight
+      || v.readyState < 2
+    ) {
+      const ready = await startCamera();
+      v = videoRef.current;
+      if (!ready || !v?.videoWidth || !v?.videoHeight || v.readyState < 2) {
+        showToast?.('Camera is still starting — wait for the live picture, then try again.');
+        return;
+      }
+    }
     shotBusyRef.current = true;
     setShotBusy(true);
     const captureMode = mode;
@@ -598,7 +630,8 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const chromeBtn = { border: '1px solid rgba(255,255,255,.28)', borderRadius: 20, background: 'rgba(28,26,23,.65)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: 1, padding: '10px 14px' };
   const roundBtn = { ...chromeBtn, borderRadius: '50%', width: 42, height: 42, padding: 0, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(35,32,26,.72)', border: '2px solid rgba(255,255,255,.5)' };
   // Shutter styled like the old Body Quoter: solid white with a translucent ring.
-  const shutterBtn = <button onClick={capture} disabled={shotBusy} aria-busy={shotBusy} aria-label="Take photo" style={{ width: 78, height: 78, borderRadius: '50%', background: '#fff', backgroundClip: 'padding-box', border: '5px solid rgba(255,255,255,.4)', flex: 'none', padding: 0, opacity: shotBusy ? 0.55 : 1 }} />;
+  const shutterDisabled = shotBusy || cameraStarting || !cameraReady;
+  const shutterBtn = <button onClick={capture} disabled={shutterDisabled} aria-busy={shotBusy || cameraStarting} aria-label="Take photo" style={{ width: 78, height: 78, borderRadius: '50%', background: '#fff', backgroundClip: 'padding-box', border: '5px solid rgba(255,255,255,.4)', flex: 'none', padding: 0, opacity: shutterDisabled ? 0.45 : 1 }} />;
   // Latest shot thumbnail + count badge (old Body Quoter's gallery button) — opens the shot list.
   const lastShot = [...WALK_SLOTS].reverse().map((s) => photos[s.key]?.thumb).find(Boolean);
   const galleryBtn = (
@@ -633,25 +666,24 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   const frame = (
     <div style={{ position: 'relative', flex: 'none', width: '100%', maxWidth: landscape ? 'calc((100dvh) * 4 / 3)' : '100%', maxHeight: '100%', aspectRatio: landscape ? '4 / 3' : '3 / 4', overflow: 'hidden', background: '#080807', alignSelf: 'center' }}>
       <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${nativeZooms.length ? 1 : Math.max(1, zoom)})` }} />
-      {(!cameraReady || !accessPrepared) && (
+      {!cameraReady && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.76)', textAlign: 'center' }}>
           <div style={{ maxWidth: 270 }}>
-            <div style={{ color: '#fff', fontWeight: 700, fontSize: 15 }}>{cameraStarting ? 'REQUESTING CAMERA ACCESS…' : 'ALLOW CAMERA ACCESS BEFORE TAKING PHOTOS'}</div>
+            <div style={{ color: '#fff', fontWeight: 700, fontSize: 15 }}>{cameraStarting || !error ? 'OPENING CAMERA…' : 'CAMERA ACCESS NEEDED'}</div>
+            {!cameraStarting && error && <div style={{ color: '#f2c8a8', fontSize: 12, lineHeight: 1.45, marginTop: 8 }}>{error}</div>}
+            {!cameraStarting && error && (
+              <button
+                type="button"
+                aria-label="Enable camera"
+                style={{ width: '100%', height: 52, marginTop: 12, borderRadius: 12, color: '#fff', background: '#2b2823', border: '2px solid #fff', fontWeight: 800, fontSize: 14, letterSpacing: '.08em' }}
+                onClick={() => { void startCamera(); }}
+              >
+                ENABLE CAMERA
+              </button>
+            )}
             <button
-              className="btn btn-outline"
-              style={{ width: '100%', marginTop: 12, color: '#fff', borderColor: '#fff' }}
-              disabled={cameraStarting}
-              onClick={async () => {
-                const cameraOk = await startCamera();
-                await enableMotion();
-                if (cameraOk) setAccessPrepared(true);
-              }}
-            >
-              {cameraStarting ? 'OPENING CAMERA…' : 'ENABLE CAMERA'}
-            </button>
-            <button
-              className="btn btn-outline"
-              style={{ width: '100%', marginTop: 8, color: '#d9d2c4', borderColor: '#5c554b' }}
+              type="button"
+              style={{ width: '100%', height: 52, marginTop: 8, borderRadius: 12, color: '#f5f3ee', background: '#3a352f', border: '1px solid #8c8377', fontWeight: 700, fontSize: 13 }}
               onClick={() => fileRef.current?.click()}
             >
               CHOOSE PHOTO INSTEAD
@@ -659,14 +691,12 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
           </div>
         </div>
       )}
-      {error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
+      {cameraReady && error && <div style={{ position: 'absolute', bottom: 16, left: 16, right: 16, padding: 12, borderRadius: 8, background: 'rgba(58,54,47,.9)', color: '#f2c8a8', textAlign: 'center', fontSize: 12 }}>{error}</div>}
       {!landscape && !error && <div style={{ position: 'absolute', bottom: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ pointerEvents: 'auto' }}>{zoomDial(false)}</div></div>}
     </div>
   );
   return (
-    // Keep the explicit motion-permission handshake requested by the shop, but
-    // never use noisy/stale gravity data to rotate photo pixels.
-    <div onPointerDown={enableMotion} style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: '#171512', color: '#f5f3ee', display: 'flex', flexDirection: 'column' }}>
       {qualityReview && (
         <PhotoQualityReview
           dataUrl={qualityReview.dataUrl}

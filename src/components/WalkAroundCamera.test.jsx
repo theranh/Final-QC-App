@@ -60,6 +60,7 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     vi.stubGlobal('Image', FakeImage);
     HTMLCanvasElement.prototype.getContext = () => ctxStub;
     HTMLCanvasElement.prototype.toDataURL = () => 'data:image/jpeg;base64,normalized';
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
     showToast = vi.fn();
     setCameraOpen(false);
     localStorage.clear();
@@ -86,7 +87,7 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     expect(screen.queryByText(/WIDE SHOT — STEP BACK/i)).not.toBeInTheDocument();
   });
 
-  it('requests camera access and blocks the shutter until the opening permission gate completes', async () => {
+  it('opens automatically and blocks the shutter until the first playable frame is ready', async () => {
     let resolveCamera;
     const track = {
       getCapabilities: () => ({}),
@@ -99,19 +100,43 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     };
     const getUserMedia = vi.fn(() => new Promise((resolve) => { resolveCamera = resolve; }));
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+    api.putQuotePhoto.mockResolvedValue({});
     const { container } = renderCamera();
 
     await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/requesting camera access/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Take photo'));
+    expect(screen.getByText(/opening camera/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Take photo')).toBeDisabled();
     expect(api.putQuotePhoto).not.toHaveBeenCalled();
 
     resolveCamera(stream);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
-    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
-    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
-    expect(container.querySelector('video').srcObject).toBe(stream);
-    expect(api.putQuotePhoto).not.toHaveBeenCalled();
+    const video = container.querySelector('video');
+    await waitFor(() => expect(video.srcObject).toBe(stream));
+    expect(screen.getByLabelText('Take photo')).toBeDisabled();
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, value: 1920 },
+      videoHeight: { configurable: true, value: 1080 },
+      readyState: { configurable: true, value: 2 },
+    });
+    fireEvent.canPlay(video);
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+    expect(screen.queryByText(/camera access needed/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Take photo'));
+    await waitFor(() => expect(api.putQuotePhoto).toHaveBeenCalledTimes(1));
+  });
+
+  it('shows a clearly labeled fallback when automatic camera access is denied', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' })),
+      },
+    });
+
+    renderCamera();
+
+    expect(await screen.findByRole('button', { name: /enable camera/i })).toHaveTextContent('ENABLE CAMERA');
+    expect(screen.getByText(/allow camera access to use the live camera/i)).toBeInTheDocument();
   });
 
   it('captures the browser-presented live frame without a hidden gravity rotation', async () => {
@@ -131,14 +156,14 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     api.putQuotePhoto.mockResolvedValue({});
     const { container } = renderCamera();
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
     const video = container.querySelector('video');
     Object.defineProperties(video, {
       videoWidth: { configurable: true, value: 1920 },
       videoHeight: { configurable: true, value: 1080 },
+      readyState: { configurable: true, value: 2 },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
-    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
+    fireEvent.canPlay(video);
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
     ctxStub.drawImage.mockClear();
     ctxStub.rotate.mockClear();
 
@@ -189,16 +214,16 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'ENABLE CAMERA' })).not.toBeDisabled());
     const video = container.querySelector('video');
     Object.defineProperties(video, {
       videoWidth: { configurable: true, value: 1920 },
       videoHeight: { configurable: true, value: 1080 },
       clientWidth: { configurable: true, value: 900 },
       clientHeight: { configurable: true, value: 1200 },
+      readyState: { configurable: true, value: 2 },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'ENABLE CAMERA' }));
-    await waitFor(() => expect(screen.queryByText(/allow camera access before taking photos/i)).not.toBeInTheDocument());
+    fireEvent.canPlay(video);
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
 
     fireEvent.click(screen.getByLabelText('Take photo'));
     expect(await screen.findByRole('dialog', { name: 'Camera orientation check' })).toBeInTheDocument();
@@ -215,8 +240,11 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
       videoHeight: { configurable: true, value: 1080 },
       clientWidth: { configurable: true, value: 900 },
       clientHeight: { configurable: true, value: 1200 },
+      readyState: { configurable: true, value: 2 },
     });
     expect(damageVideo.srcObject).toBe(stream);
+    fireEvent.canPlay(damageVideo);
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
     fireEvent.click(screen.getByLabelText('Take photo'));
     await waitFor(() => expect(ctxStub.rotate).toHaveBeenCalledWith(-Math.PI / 2));
     expect(screen.queryByRole('dialog', { name: 'Camera orientation check' })).not.toBeInTheDocument();
@@ -261,7 +289,7 @@ describe('WalkAroundCamera — continuous shooting & durability', () => {
     const input = container.querySelector('input[type="file"]');
     fireEvent.change(input, { target: { files: [shotFile()] } });
 
-    await waitFor(() => expect(screen.getByLabelText('Take photo')).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByLabelText('Take photo')).toHaveAttribute('aria-busy', 'false'));
     expect(api.putQuotePhoto).toHaveBeenCalledTimes(1);
 
     failFirstUpload(Object.assign(new Error('too large'), { status: 413 }));
