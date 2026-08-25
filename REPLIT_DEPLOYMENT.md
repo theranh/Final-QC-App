@@ -1,96 +1,84 @@
-# Replit Deployment Guide — Truck Ranch Final QC
+# Replit Deployment — Truck Ranch Intake & QC
 
-Scope: `project/replit-app/`. This is the only deployable artifact in this repo.
+> **Status:** rewritten 2026-08-25. The previous version of this file described a client-only static app with no backend, no database and `deploymentTarget = "static"`. That is not this application. Deploying Static would publish the client with no API behind it. See `design/ARCHITECTURE_AUDIT.md` §12 R1.
 
-## Application architecture
+## What is being deployed
 
-Client-only React 18 + Vite 5 single-page app. No backend server, no API routes, no database, no authentication provider. All persistence is the browser's `localStorage` on whichever device opens the app. Offline support is provided by a `vite-plugin-pwa`-generated service worker that precaches the built app shell and fonts on first load. There is nothing dynamic on the server side to run, scale, or monitor — `npm run build` produces a static `dist/` folder and that folder *is* the entire production artifact.
+A long-running Node process: Express 5 (TypeScript) serving both the `/api/*` surface and the built React client, backed by PostgreSQL and Replit Auth. There is server-side state, an identity provider, scheduled/queued background work, and reviewed schema migrations that run at startup.
 
-## Required runtime
+## Runtime
 
-Node.js 20 (already pinned in `project/replit-app/replit.nix` via `pkgs.nodejs_20`). Not required at all for serving the built app (Static deployments serve pre-built files) — only required to run the build step itself.
+Node.js 20+. Required both to build and to run.
 
 ## Package manager
 
-npm (a committed `package-lock.json` is present and kept in sync — verified with `npm ci`).
+npm. `package-lock.json` is committed; `npm ci` for clean installs.
 
-## Install command
+## Commands
 
-```bash
-cd project/replit-app
-npm install
-```
+| Step | Command |
+|---|---|
+| Install | `npm install` (or `npm ci`) |
+| Build | `npm run build` → Vite client build into `dist/` + esbuild server bundle into `dist-server/index.js` |
+| Run (production) | `npm run start` → `node dist-server/index.js`, `NODE_ENV=production`, port 5000 |
+| Run (development) | `PORT=5000 npm run dev` → `tsx server/index.ts` with Vite middleware |
+| Migrations | Automatic at startup (`server/migrations.ts`). Schema changes during development: `npm run db:push` |
+| Validate | `npm run test` · `npm run lint` · `npx tsc --noEmit` |
 
-(`npm ci` also works and is what CI/clean-room verification used for this audit.)
+## Deployment target
 
-## Build command
+**Reserved VM** (currently 0.5 vCPU / 2 GiB RAM), North America, production database connected. Live at `https://tr-intake-and-qc-live.replit.app`.
 
-```bash
-npm run build
-```
+This is a defensible choice, not a legacy artifact: the server runs the durable Google Sheets export worker on an interval, so a warm always-on process is genuinely useful, and it avoids cold-start latency for shop-floor users. Autoscale would also work; Reserved VM trades idle cost for predictable response.
 
-Produces `project/replit-app/dist/` — this directory is what gets published.
+*Verify the live `.replit` `[deployment]` block matches the Reserved VM configuration and that no stale `deploymentTarget = "static"` / `publicDir = "dist"` block survives from the earlier client-only architecture.*
 
-## Production run command
+Do not switch to Static under any circumstances — there is no API behind it.
 
-**There is no production server process.** The recommended deployment (Static, see below) serves `dist/` directly; nothing needs to be started or kept alive.
+### Sizing note
 
-If you ever need to run the production build as a long-lived process instead (e.g., to smoke-test it, or if a future requirement forces Autoscale/Reserved VM instead of Static):
+0.5 vCPU / 2 GiB is modest for a process that accepts 40 MB JSON bodies containing base64 photo payloads. Several concurrent inspection commits with photos can contend for memory. Watch the Monitoring tab for memory pressure and restarts — that would be a symptom of the photo-storage issue in audit phase 8, not a configuration mistake.
 
-```bash
-npm run preview
-```
+## Host, port, health check
 
-This binds `0.0.0.0` and listens on `$PORT` (falls back to `5173` if unset) — confirmed by testing both the default port and a `PORT=5555` override.
+- Binds `0.0.0.0` on `$PORT`, default **5000**.
+- Health check: **`GET /api/health`**.
+- The port opens *immediately* at startup; requests then wait behind an internal readiness gate while migrations and auth initialize. So a passing health check means "process is up," not "fully ready" — that's deliberate, to avoid a bricked publish.
 
-## Required environment variables
+## Required secrets
 
-**None.** (`PORT` is recognized but optional and dev/preview-only — see `.env.example` in `project/replit-app/`.)
+`DATABASE_URL`, `SESSION_SECRET`, `REPL_ID`, `REPLIT_DOMAINS`, and — **in production** — `QUOTER_SYNC_TOKEN`. Optional: `QUOTER_DATABASE_URL` (read-only legacy source), Anthropic credentials (classification; absent → 503 + manual fallback), Google service credentials (tracker sheet + export queue).
 
-## Database migration command
+Any missing required secret is logged as an explicit `STARTUP ERROR:` line. **Read the deploy logs after every publish** — the process intentionally keeps serving rather than crashing, so a missing secret shows up as a log line, not an outage.
 
-**N/A — there is no database.** The closest equivalent is `src/lib/storage.js#migrateRecord`, an in-memory shim that upgrades older-shaped localStorage records to the current shape; it runs automatically on every app boot and on every backup import. There is nothing to run manually.
+## Migrations
 
-## Recommended Replit publishing type
+Versioned, reviewed migrations in `server/migrations.ts` run before the request gate opens. On total failure (database unreachable after bounded retries) the server logs `STARTUP ERROR: serving with incomplete migrations` and still serves. **That line means stop and investigate immediately** — do not treat a green deploy as success without checking for it.
 
-**Static.** Already configured in `project/replit-app/.replit`:
+Never run ad-hoc `db:push` against production. Take a database snapshot before any migration that touches existing rows.
 
-```toml
-[deployment]
-deploymentTarget = "static"
-publicDir = "dist"
-build = ["npm", "run", "build"]
-```
+## Post-deployment verification
 
-Do not use Autoscale or Reserved VM — there is no server process for either of those targets to run or keep warm, so they'd add operational overhead (a port to bind, a process to restart on crash, compute cost while idle) for zero benefit over Static.
+- [ ] `GET /api/health` returns OK.
+- [ ] Deploy logs contain no `STARTUP ERROR:` lines.
+- [ ] Signed-out `/api/*` request → 401. Non-company email → 403. New company email → `pending` row and "Access pending approval."
+- [ ] Sign in as an active employee; the app loads (`/api/bootstrap` succeeds).
+- [ ] Create an inspection → next `FQ-####`, no gap, no collision.
+- [ ] Fail an item with note + photo → sign → commit → re-check → clear → commit. Original fail preserved.
+- [ ] Commit a quote with PIN sign-off → a `quote_snapshots` row exists and its totals equal what the UI displayed.
+- [ ] Walk-around camera: capture / skip / retake — retake replaces, does not duplicate.
+- [ ] Photo upload works from a phone on cellular, including after a brief offline period (durable queue drains).
+- [ ] Admin: `GET /api/sheet-exports` shows no stuck `failed` jobs.
+- [ ] Install the PWA to a home screen and confirm it opens and authenticates.
 
-## Port and host configuration
+## Rollback
 
-- **Production (Static deployment)**: not applicable — Replit serves the static files directly; there is no process that binds a host/port.
-- **Development / `npm run preview`**: binds `0.0.0.0` (required so Replit's proxy can reach it) on `$PORT` if set, else `5173`. `project/replit-app/.replit` sets `[env] PORT = "5173"` and maps `[[ports]] localPort = 5173 → externalPort = 80` for the Replit "Run" workflow.
+1. Redeploy the previous known-good commit (deploy from `main` at that SHA).
+2. If a migration is implicated, restore from the pre-migration database snapshot — application rollback alone does not revert schema changes.
+3. Record the SHA of every deploy. Consider having `/api/health` report the build SHA so a running instance can be traced to a commit.
 
-## Health-check path
+## Known operational limits
 
-**N/A — no backend process to health-check.** Replit Static deployments don't use a custom health-check endpoint; they serve files directly. If this app is ever migrated to a server-based deployment target, a health check would need to be added at that time (there is currently no server code to attach one to).
-
-## Post-deployment verification checklist
-
-After deploying (or before, against a local `npm run preview`):
-
-- [ ] App loads and shows the "Final QC" home screen with the bottom nav (Inspect/Records/Reports/Settings).
-- [ ] Settings → Inspectors shows the three seeded inspectors (R. Delgado, Theran, Ryan) with no import needed.
-- [ ] Tap **+ New Inspection** → fill VIN (17 chars) + stock # + vehicle → add the VIN photo → **Start Checklist** becomes enabled.
-- [ ] Mark at least one item **Fail**, add a note + photo, finish the checklist, sign, and **Commit** — confirm it lands in Records with the correct FQ-#### ID and an "OPEN RE-CHECK" badge.
-- [ ] From Records, open that inspection, **Start re-check**, clear the item, sign, commit — confirm status flips to "PASS · RE-CHECK".
-- [ ] Reports tab shows non-zero totals for the current period; **Excel (CSV)** and **PDF Report** both produce output.
-- [ ] Settings → **Export backup** downloads a JSON file and the "last backup" note updates.
-- [ ] Reload the page after the first load with the network disabled (e.g., DevTools → Offline) — the app should still render fully (confirms the service worker installed).
-- [ ] Open the app in a second tab and commit something in the first — the second tab should show the "changed in another tab" banner.
-
-## Known limitations
-
-- **No multi-device sync.** Data lives on one device/browser; moving it requires a manual Export/Import of the JSON backup.
-- **No access control.** Anyone with the URL or device can view and modify all data, including a destructive full-data Import. Do not publish this deployment's URL somewhere public without a plan for that (see `PRODUCTION_AUDIT.md` §6).
-- **Finite local storage.** Measured photo compression produces roughly 45–90 KB per photo; typical mobile browser `localStorage` quotas (5–10 MB) give headroom for roughly 60–100+ photos before the device risks running out, with no automatic pruning. The app now warns on a failed write instead of silently losing it, but there's still no proactive "you're getting close" meter.
-- **No automated multi-tab data merge.** Concurrent tabs/windows of the same browser are detected and warned about (not silently corrupted), but not merged — reload the stale tab rather than continuing in it.
-- **Minimal accessibility support.** Most interactive elements are non-semantic `<div onClick>` (inherited from the original design prototype), with limited keyboard/screen-reader support beyond the bottom navigation.
+- Photos are stored in Postgres (`photos.data` bytea) and inspection photos as data URLs inside `inspections.data` jsonb, with a 40 MB JSON body limit. Backup size and memory pressure grow with usage — see audit phase 8.
+- Auth is tied to Replit (`REPL_ID` / `REPLIT_DOMAINS`); a custom domain requires updating the allowed domains.
+- External users (vendors, carriers) have no path into this app today, by design.

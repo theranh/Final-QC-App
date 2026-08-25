@@ -1,88 +1,128 @@
-# Truck Ranch — Final QC
+# Truck Ranch — Intake & QC
 
-A mobile-first, offline-capable Final QC inspection app for Truck Ranch FRPS. Built with React + Vite. No backend — everything (inspections, photos, inspectors, ID counter) is stored locally in the browser via `localStorage`, matching the original design brief: something a VRA can run on his phone today with zero server setup.
+Employee-facing web application for vehicle **intake**, **body quoting**, and **Final QC inspection**, used by Truck Ranch VPC and store staff. Mobile-first PWA client, server-authenticated, backed by PostgreSQL.
 
-For a full production-readiness assessment, see [`PRODUCTION_AUDIT.md`](../../PRODUCTION_AUDIT.md). For exact Replit deployment steps, see [`REPLIT_DEPLOYMENT.md`](../../REPLIT_DEPLOYMENT.md).
+> **Status of this document:** rewritten 2026-08-25 to describe the application as it actually exists. Earlier versions of this file described an earlier, client-only architecture (no backend, `localStorage` persistence, Static deployment). That description is obsolete and following it would break the API or lose data. See `design/ARCHITECTURE_AUDIT.md` §12 R1.
 
-## Running on Replit
+## Architecture
 
-This repo is already wired for Replit:
+```text
+browser (React 18 + Vite 8 PWA)
+   │  JSON over /api/*
+   ▼
+Express 5 + TypeScript  (server/, run via tsx in dev, esbuild bundle in prod)
+   ├── Replit Auth (OIDC) + Postgres-backed sessions
+   ├── access control: verified @truckranch.com + active employees row
+   ├── ~47 /api routes
+   └── append-only audit log on every mutation
+   ▼
+PostgreSQL (Drizzle ORM) · Anthropic (damage classification) · Google Sheets (production tracker)
+```
 
-1. Import/open this folder as a Repl (Node.js template is auto-detected via `replit.nix` / `.replit`).
-2. Click **Run** — it installs dependencies and starts the Vite dev server, proxied through Replit's `https://*.replit.dev` domain.
-3. Open the webview. The app should load full-screen, phone-width.
+Not a static site. There is a long-running server process, a database, an identity provider, and background workers.
 
-## Running locally
+- **Client:** `src/` — React 18, Vite 8, `vite-plugin-pwa` (installable, offline app shell). `src/App.jsx` holds top-level state and screen routing; `src/components/` is one component per screen/UI piece; `src/lib/` is pure logic with co-located tests.
+- **Server:** `server/` — Express 5. `server/index.ts` binds the port immediately, then holds incoming requests behind a readiness gate while migrations and auth initialize, so a deploy health check never hits a half-migrated schema.
+- **Shared:** `shared/schema.ts` (Drizzle schema, re-exports `shared/models/auth.ts`), `shared/photoRoles.ts`.
+
+## Commands
+
+Run from the repository root:
 
 ```bash
-npm install          # or: npm ci (lockfile is committed and kept in sync)
-npm run dev           # dev server — http://localhost:5173 (or $PORT if set)
-npm run lint          # ESLint
-npm run test          # Vitest — unit tests for src/lib/*
-npm run build         # production build to dist/
-npm run preview       # serve the production build locally, for a final smoke test
+npm install          # or npm ci — lockfile is committed
+npm run dev          # NODE_ENV=development tsx server/index.ts (Vite middleware)
+npm run test         # Vitest
+npm run lint         # ESLint
+npx tsc --noEmit     # TypeScript check
+npm run build        # Vite client build + esbuild server bundle → dist/ and dist-server/
+npm run start        # production server, port 5000
+npm run db:push      # push Drizzle schema changes
 ```
+
+Replit development workflow: **Start application** → `PORT=5000 npm run dev`.
 
 ## Environment variables
 
-**None are required.** This app has no backend, no API keys, and no secrets — see `.env.example` for the one *optional* variable (`PORT`, which only affects the local dev/preview server, not the deployed static site). Copy it to `.env` only if you want to override the default dev port locally; nothing needs to be set for Replit or for `npm run build`.
+All required unless noted. Provisioned by Replit in that environment.
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string. The server refuses to start without it. |
+| `SESSION_SECRET` | Session cookie signing. |
+| `REPL_ID` | Replit Auth OIDC client id. |
+| `REPLIT_DOMAINS` | Allowed callback domains for Replit Auth. |
+| `QUOTER_SYNC_TOKEN` | Required **in production** — gates the quoter admin sync route. |
+| `QUOTER_DATABASE_URL` | Optional. Legacy Quoter database, **read-only** migration/sync source. Never written to. |
+| Anthropic credentials | Optional. Damage classification; absent → the classify endpoint returns 503 and the UI falls back to manual classification. |
+| Google service credentials | Optional. Production-tracker sheet reads and the sheet-export queue. |
+| `PORT` | Optional in dev. Defaults to 5000. |
+
+Missing required variables are logged as explicit `STARTUP ERROR:` lines rather than failing silently.
+
+## Access control
+
+Server-enforced, never client-trusted (`server/access.ts`):
+
+1. Sign in through Replit Auth. Sessions live in the `sessions` table.
+2. The email claim must be **verified** and end in `@truckranch.com`.
+3. The employee must also have an `active` row in the `employees` allowlist.
+
+First sign-in from a valid company email creates a `pending` row — the user sees "Access pending approval" until an admin approves them in Settings. Guards: `requireEmployee` (401 signed out, 403 blocked/pending/inactive) and `requireAdmin`. Inspector identity is always the signed-in user; records carry creator and last-modifier attribution.
+
+Sign-off on commits uses a separate hashed 4-digit PIN (`employees.pin_hash`, scrypt, reset-not-lookup). Supervisor override is a countersign recorded in `overridden_by`, audited as a distinct action.
+
+## Data
+
+Schema: `shared/schema.ts`. Highlights:
+
+- `employees` — allowlist, `is_admin`, `can_override`, `pin_hash`, status `pending|active|inactive`.
+- `inspections` — unique `qc_number` (`FQ-####`) handed out transactionally from the single-row `qc_counter`; full payload in jsonb `data`; `archived` rows stay viewable but leave every aggregation.
+- `audit_log` — append-only. No route updates or deletes rows here.
+- Quoter tables (`quotes`, `corrections`, `ai_analyses`, `photos`, `intakes`, `settings`) copied from the legacy Quoter with no renames.
+- `quote_snapshots` — immutable snapshot of a quote exactly as approved at PIN commit, with the rate tables in force and a server-recomputed engine breakdown; `content_hash` makes retries idempotent.
+- `pricing_corrections` — per-line engine-vs-approved deltas. Ground truth for future rate tuning.
+- `production_tracker` (+ `_archive`) — closed months frozen exactly as typed in the sheet, never recomputed; every re-snapshot archives what it replaces.
+- `vehicle_activity_events` (append-only) and `vehicle_handoff_flags` — the per-vehicle timeline and handoff flags.
+- `deleted_quotes` — tombstones, so a queued offline photo upload can't resurrect a deliberately deleted quote.
+
+The **in-progress inspection draft** stays in `localStorage` on purpose, so a refresh or crash mid-inspection loses nothing. Everything committed lives in the database.
 
 ## Deployment
 
-`npm run build` produces a fully static `dist/` folder (HTML/CSS/JS + a service worker). Deploy it to any static host:
+Replit **Reserved VM** (configured in `.replit`), live at `https://tr-intake-and-qc-live.replit.app`:
 
-- **Replit Deployments**: the `.replit` file already sets `deploymentTarget = "static"` with `publicDir = "dist"` and the build command — use Replit's Deploy button. See `REPLIT_DEPLOYMENT.md` for the full checklist.
-- **Anywhere else** (Netlify, Vercel, GitHub Pages, S3, etc.): upload the contents of `dist/` as-is. No server-side code, no environment variables, no database.
+- build: `npm run build`
+- run: `npm run start` (port 5000)
+- health check: `GET /api/health`
 
-## Offline support
+Do **not** use a Static deployment target. There is a server process, and static hosting would serve the client with no API behind it.
 
-The app registers a service worker (via `vite-plugin-pwa`) that precaches the app shell and fonts on first load, so it keeps working with no signal after that — matching the "works offline after first load" requirement from the original design brief. It's also installable as a home-screen PWA on iOS/Android (Add to Home Screen).
+### Post-deploy checks
 
-## Data model — no backend, by design
+- [ ] `GET /api/health` returns OK.
+- [ ] Signed-out request to any `/api` route returns 401; a non-allowlisted company email sees "Access pending approval."
+- [ ] Sign in, create an inspection, confirm it receives the next `FQ-####` with no gap or collision.
+- [ ] Fail an item (note + photo required), sign, commit; start a re-check, clear it, commit; confirm status transition and that the original fail is preserved.
+- [ ] Commit a quote with PIN sign-off; confirm a `quote_snapshots` row and that totals match what was displayed.
+- [ ] Walk-around camera: capture, skip, retake — confirm retake replaces rather than duplicates.
+- [ ] Reports/exports produce output; the sheet-export queue drains (`GET /api/sheet-exports`, admin).
+- [ ] Deploy logs contain no `STARTUP ERROR:` lines.
 
-This mirrors the original design brief exactly: no login, no server, no database. All state lives in the browser's `localStorage` on whichever device/browser opened the app:
+## Hard rules for anyone changing this code
 
-- `fqc_users` — inspectors (name, title, email)
-- `fqc_inspections` — every committed inspection + its re-check history, with photos stored as compressed JPEG data URLs
-- `fqc_seq` — the next sequential inspection ID (`FQ-1001`, `FQ-1002`, …)
-- `fqc_default` — the default inspector shown pre-selected on a new inspection
-- `fqc_draft` — an in-progress (uncommitted) inspection, auto-saved every 250ms so a refresh or crash mid-inspection doesn't lose data
-- `fqc_lastBackupAt` — timestamp of the last successful "Export backup," used only to nudge you in Settings if it's been a while
+1. **Preserve server-side auth and the database model.** Do not replace it with client-only storage.
+2. **Preserve the Quoter pricing pipeline exactly.** Saved pricing, PIN sign-off, committed snapshots and frozen tracker months are financial records. Identical totals is a requirement, not a goal — prove it with a golden-file test before and after any refactor.
+3. **Never recompute a frozen tracker month.**
+4. Capture live camera frames as-is. File imports may need EXIF normalization; do not reintroduce universal gravity-based rotation.
+5. Keep inspection data, photos and credentials out of commits.
+6. `QUOTER_DATABASE_URL` is read-only. Never modify or delete the legacy Quoter database.
+7. GitHub `main` is the source of truth. Sync with fetch → `pull --ff-only` → validate → commit → push → **pull again to confirm heads agree**. Never force-push `main`.
 
-**Because storage is per-device, there is no automatic multi-device sync.** Settings → Data & Backup has an Export/Import JSON button for moving data between phones or backing it up:
+## Related documents
 
-- **Export backup** downloads a single JSON file with everything.
-- **Import backup** replaces *all* data on the current device with a chosen backup file — only do this on a device you're OK overwriting.
-- Settings shows a reminder if this device has never been backed up, or hasn't been in 7+ days.
-
-For a single inspector on a single phone (the original use case), this is sufficient. If Truck Ranch later needs multiple inspectors entering data concurrently from separate devices with real-time sync, that's the point at which this app would need a real backend (API + database) instead of `localStorage` — a deliberate, documented tradeoff, not an oversight.
-
-### Known safety nets (and their limits)
-
-- **Storage-full warnings**: if a `localStorage` write ever fails (device quota exceeded, private-browsing restrictions), the app shows a persistent toast telling you to back up and free up space, instead of silently losing the write.
-- **Multi-tab guard**: if this app is open in two tabs/windows of the same browser and one of them commits an inspection, the *other* tab shows a banner telling you to reload before doing anything else. There is no cross-tab merge — the fix is to only ever use one tab, and reload when warned.
-- **No access control**: there is no login, by design (see the original brief). Anyone with the device or the URL can view all records and use Import Backup to replace all data. Treat the deployed URL/device accordingly — don't publish it somewhere public without a plan for that.
-
-## Project structure
-
-```
-src/
-  lib/          pure logic: constants, formatting, VIN validation + barcode decode,
-                localStorage persistence, stats/period math, CSV/backup export
-                (each has a co-located *.test.js — run with `npm run test`)
-  components/   one component per screen/UI piece (NewInspectionForm, ChecklistSheet,
-                ResultScreen, RecheckSheet, RecordsList, RecordDetail, ReportsScreen,
-                PrintReport, SettingsScreen, SignaturePad, VinScanner, ...)
-  App.jsx       top-level state + screen routing
-  App.css       design tokens (Truck Ranch palette) + shared UI classes
-```
-
-## Feature checklist (matches the Final QC design spec)
-
-- New inspection: VIN scan (camera + Code 39/128 barcode detection, with a manual-entry fallback) or manual 17-character VIN entry with ISO 3779 check-digit validation, required door-jamb VIN photo, stock #, vehicle, inspector picker, optional Bed Liner / Ceramic Coating / Undercoating toggles.
-- Checklist grouped by category (Mechanical, Cosmetic, Detail, Bed Liner, Ceramic, Undercoating) with Pass/Fail/N/A per item; a Fail requires a note and a photo.
-- Result screen with pass/fail banner, per-category breakdown, and a draw-to-sign signature pad that locks the inspection on commit.
-- Re-check flow: only previously-failed items are re-tested, each clearable independently, its own signature, and the original fail record is preserved for reporting.
-- Records: search by stock #/vehicle/VIN/inspector, filter by result and date range, full locked detail view with fail photos and re-check history.
-- Reports: week-to-date / month-to-date / any past month with data, fails-by-category, most-failed items, per-inspector breakdown, Excel (CSV) export, and a print-ready PDF report.
-- Settings: manage inspectors (name/title/email, no passwords), set a default inspector, export/import a full JSON backup, backup-staleness reminder.
+- `replit.md` — accurate; Replit-specific operational notes.
+- `CLAUDE.md` — accurate; rules for coding agents.
+- `design/ARCHITECTURE_AUDIT.md` — Truck Ranch OS integration architecture and migration plan.
+- `PRODUCTION_AUDIT.md` — **stale.** Written against the earlier client-only architecture; needs the same correction this file received. Do not treat it as current.
+- `LIVE_DASHBOARD.md` — verify before relying on it.
