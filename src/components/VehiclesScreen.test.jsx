@@ -25,6 +25,49 @@ import { api } from '../lib/api';
 afterEach(cleanup);
 
 describe('VehiclesScreen completed vehicle navigation', () => {
+  it('keeps completed inspections visible when dashboard enrichment is unavailable', () => {
+    const onOpenRecord = vi.fn();
+    render(
+      <VehiclesScreen
+        dash={null}
+        records={[
+          {
+            id: 'FQ-1888',
+            stock: 'SAFE-1888',
+            vehicle: 'Fallback truck',
+            vin: 'FALLBACKVIN1234567',
+            status: 'pass',
+            inspector: 'alex smith',
+            createdAt: 100,
+            archived: false,
+          },
+          {
+            id: 'FQ-ARCHIVED',
+            stock: 'HIDDEN',
+            vehicle: 'Archived truck',
+            vin: 'ARCHIVEDVIN12345',
+            status: 'pass',
+            archived: true,
+          },
+        ]}
+        filter="completed"
+        onFilter={() => {}}
+        q=""
+        onQ={() => {}}
+        onOpenIntake={() => {}}
+        onOpenRecord={onOpenRecord}
+        onOpenQuote={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/SAFE-1888 · Fallback truck/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Archived truck/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Loading vehicles/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Fallback truck/i }));
+    expect(onOpenRecord).toHaveBeenCalledWith('FQ-1888');
+  });
+
   it('opens the intake overview instead of the damage-oriented vehicle detail', () => {
     const onOpenIntake = vi.fn();
     const onOpenVehicle = vi.fn();

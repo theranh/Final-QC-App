@@ -871,6 +871,7 @@ function AuthedApp({ me, onAuthRefresh }) {
     ) : (
       <VehiclesScreen
         dash={dash}
+        records={activeRecs}
         filter={vehFilter}
         onFilter={setVehFilter}
         q={vehQ}

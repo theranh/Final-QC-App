@@ -114,7 +114,32 @@ function SwipeDeleteRow({ children, onDelete, label }) {
   );
 }
 
-export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote, onDeleted }) {
+function fallbackVehicle(record) {
+  const qcNumber = String(record?.qcNumber || record?.id || '');
+  const createdTs = Number(record?.clearedTs ?? record?.ts ?? record?.createdAt ?? 0) || 0;
+  return {
+    vin: record?.vin || '',
+    stock: record?.stock || '',
+    vehicle: record?.vehicle || '',
+    qcNumber,
+    result: record?.result || '',
+    status: record?.status || '',
+    statusKey: record?.status === 'open' ? 'openRecheck' : 'frontlineReady',
+    inspector: record?.inspector || '',
+    imported: !!record?.imported,
+    createdTs,
+    finalizedTs: createdTs,
+    segments: [],
+    itemCount: Array.isArray(record?.openItems) ? record.openItems.length : 0,
+    note: '',
+    daysInProduction: null,
+    quote: null,
+    tracker: null,
+    intake: null,
+  };
+}
+
+export default function VehiclesScreen({ dash, records = [], filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote, onDeleted }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -130,13 +155,26 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
     setPerson(p || '');
     onQ(newQ || '');
   };
-  const vehicles = dash?.vehicles || [];
+  // The bootstrap inspection list is authoritative and loads independently of
+  // dashboard enrichment (tracker, quote, and intake metadata). Keep every
+  // active completed inspection visible if the dashboard request is delayed or
+  // temporarily fails during a publish, then replace its fallback card with the
+  // enriched dashboard card when that payload arrives.
+  const vehicles = useMemo(() => {
+    const byQc = new Map((dash?.vehicles || []).map((vehicle) => [vehicle.qcNumber, vehicle]));
+    for (const record of records) {
+      if (record?.archived) continue;
+      const qcNumber = String(record?.qcNumber || record?.id || '');
+      if (qcNumber && !byQc.has(qcNumber)) byQc.set(qcNumber, fallbackVehicle(record));
+    }
+    return [...byQc.values()];
+  }, [dash, records]);
   const needle = q.trim().toUpperCase();
 
   // Names present in the current bucket (estimators for In-Take, inspectors for
   // Completed QC's), for the dropdown. Sorted, de-duped, non-empty.
   const people = useMemo(() => {
-    const src = bucket === 'awaitingFinalQc' ? dash?.awaiting || [] : dash?.vehicles || [];
+    const src = bucket === 'awaitingFinalQc' ? dash?.awaiting || [] : vehicles;
     const key = bucket === 'awaitingFinalQc' ? 'estimator' : 'inspector';
     // Keyed by lowercase so "mike" and "Mike" collapse to one entry, always
     // displayed in Title Case.
@@ -146,7 +184,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
       if (name && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
     }
     return [...names.values()].sort((a, b) => a.localeCompare(b));
-  }, [dash, bucket]);
+  }, [dash, bucket, vehicles]);
 
   // If a data refresh drops the selected name from the current bucket, clear the
   // selection so the list isn't silently filtered down to nothing.
@@ -227,7 +265,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
         <SavedViews bucket={bucket} person={person} q={q} onApply={handleApplyView} />
       </div>
       <div className="screen-body">
-        {!dash && <div className="empty-note">Loading vehicles…</div>}
+        {!dash && bucket === 'awaitingFinalQc' && <div className="empty-note">Loading vehicles…</div>}
         {dash && bucket === 'awaitingFinalQc' && awaiting.length === 0 && (
           <div className="empty-note">No in-take quotes are waiting for QC{needle ? ' that match' : ''}.</div>
         )}
@@ -245,7 +283,7 @@ export default function VehiclesScreen({ dash, filter, onFilter, q, onQ, onOpenI
               <RecentQuoteCard quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} />
             </SwipeDeleteRow>
           ))}
-        {dash && bucket === 'completed' && list.length === 0 && (
+        {bucket === 'completed' && list.length === 0 && (
           <div className="empty-note">No completed QC's{needle ? ' match' : ' yet'}.</div>
         )}
         {bucket === 'completed' &&
