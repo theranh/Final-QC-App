@@ -311,6 +311,24 @@ export function registerPinRoutes(app: Express) {
     withBody(async (req: any, res) => {
       const id = String(req.body?.id || "");
       if (!id) return res.status(400).json({ error: "Missing id" });
+      const rawPhotoManifest = req.body?.photoManifest;
+      if (rawPhotoManifest != null && !Array.isArray(rawPhotoManifest)) {
+        return res.status(400).json({ error: "Invalid photo manifest" });
+      }
+      if (Array.isArray(rawPhotoManifest) && rawPhotoManifest.length > 160) {
+        return res.status(400).json({ error: "Too many photo manifest entries" });
+      }
+      const photoManifest = Array.isArray(rawPhotoManifest)
+        ? rawPhotoManifest.map((entry: any) => ({
+            id: String(entry?.id || "").slice(0, 60),
+            captureTs: Number.isSafeInteger(Number(entry?.captureTs))
+              ? Number(entry.captureTs)
+              : null,
+          }))
+        : [];
+      if (photoManifest.some((entry: any) => !entry.id)) {
+        return res.status(400).json({ error: "Invalid photo manifest entry" });
+      }
 
       const [row] = await db.select().from(intakes).where(eq(intakes.id, id));
       if (!row) return res.status(404).json({ error: "Intake not found" });
@@ -323,16 +341,71 @@ export function registerPinRoutes(app: Express) {
       }
       const sig = await resolveSignature(req.body, req);
       if (!sig.ok) return res.status(sig.status).json({ error: sig.error });
+      const initialQuoteId = String(row.quoteId || "");
 
       // Commit + audit atomically: the immutability-guarded UPDATE and the
       // audit INSERT share one transaction, so a commit never lands without
       // its audit row (and a failed audit rolls the commit back).
       let ratesConflict: { current?: number } | null = null;
+      let photoConflict: Array<{ id: string; captureTs: number | null }> | null = null;
+      let photoProtocolConflict = false;
+      let galleryOwnershipConflict = false;
       const committedRow = await db.transaction(async (tx) => {
         const rv = await ratesVersionConflict(tx, req.body);
         if (rv.conflict) {
           ratesConflict = { current: rv.current };
           return null;
+        }
+        // Match the manifest endpoint's lock order: quote advisory lock first,
+        // then the intake row. Re-reading quote_id under FOR UPDATE prevents a
+        // concurrent gallery repair from validating one gallery and completing
+        // an intake that now owns another.
+        if (initialQuoteId) {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${initialQuoteId})::bigint)`);
+        }
+        const lockedResult = await tx.execute(sql`
+          SELECT id, vin, stock, quote_id, committed_by
+          FROM ${intakes}
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        const lockedIntake = lockedResult.rows?.[0] as any;
+        if (!lockedIntake || lockedIntake.committed_by) return null;
+        const lockedQuoteId = String(lockedIntake.quote_id || "");
+        if (lockedQuoteId !== initialQuoteId) {
+          galleryOwnershipConflict = true;
+          return null;
+        }
+        // Linked intakes require an explicit manifest handshake. Older/stale
+        // clients omit this field and must refresh rather than silently using
+        // the legacy completion path that had no photo-delivery invariant.
+        if (lockedQuoteId && !Array.isArray(rawPhotoManifest)) {
+          photoProtocolConflict = true;
+          return null;
+        }
+        // The client sends its durable local capture receipts after flushing
+        // and reading the canonical intake manifest. Recheck them under the
+        // same per-quote lock used by photo uploads so an upload cannot race
+        // the final completed_at write.
+        if (lockedQuoteId && photoManifest.length) {
+          const ids = photoManifest.map((entry: any) => entry.id);
+          const manifestRows = await tx.execute(sql`
+            SELECT id, ts
+            FROM ${photos}
+            WHERE quote_id = ${lockedQuoteId}
+              AND id IN (${sql.join(ids.map((photoId: string) => sql`${photoId}`), sql`, `)})
+          `);
+          const serverById = new Map(
+            (manifestRows.rows as any[]).map((photo: any) => [String(photo.id), Number(photo.ts || 0)]),
+          );
+          const missing = photoManifest.filter((entry: any) => {
+            const serverTs = serverById.get(entry.id);
+            return serverTs == null || (entry.captureTs != null && serverTs < entry.captureTs);
+          });
+          if (missing.length) {
+            photoConflict = missing;
+            return null;
+          }
         }
         // Immutability guard: only write when committed_by is still NULL.
         const [saved] = await tx
@@ -345,8 +418,8 @@ export function registerPinRoutes(app: Express) {
         if (!saved) return null;
         await auditCommit(tx, sig.overriddenBy ? "intake_committed_override" : "intake_committed", sig.signer, {
           intakeId: id,
-          vin: row.vin,
-          stock: row.stock,
+          vin: lockedIntake.vin,
+          stock: lockedIntake.stock,
           committedBy: sig.committedBy,
           overriddenBy: sig.overriddenBy,
         });
@@ -355,9 +428,9 @@ export function registerPinRoutes(app: Express) {
         // The quote is read HERE, under FOR UPDATE, so a concurrent autosave
         // can neither change the document mid-commit nor leave the snapshot
         // stale relative to what was approved.
-        if (row.quoteId) {
+        if (lockedQuoteId) {
           const qr = await tx.execute(
-            sql`SELECT id, data, committed_by, overridden_by FROM ${quotes} WHERE id = ${row.quoteId} FOR UPDATE`,
+            sql`SELECT id, data, committed_by, overridden_by FROM ${quotes} WHERE id = ${lockedQuoteId} FOR UPDATE`,
           );
           const q = qr.rows?.[0] as any;
           if (q) {
@@ -373,6 +446,22 @@ export function registerPinRoutes(app: Express) {
       });
       if (ratesConflict) {
         return res.status(409).json({ ...RATES_CHANGED_409, currentRatesVersion: (ratesConflict as any).current });
+      }
+      if (photoConflict) {
+        return res.status(409).json({
+          error: "Photos are still missing from the server. Retry uploads before completing this intake.",
+          missingPhotoIds: (photoConflict as Array<{ id: string }>).map((entry) => entry.id),
+        });
+      }
+      if (photoProtocolConflict) {
+        return res.status(409).json({
+          error: "Photo confirmation is required. Refresh the app and retry completion.",
+        });
+      }
+      if (galleryOwnershipConflict) {
+        return res.status(409).json({
+          error: "Gallery ownership changed. Reload the intake and retry.",
+        });
       }
       if (!committedRow) {
         return res.status(409).json({ error: "This intake was just committed by someone else." });

@@ -15,9 +15,14 @@
 
 import { api } from './api';
 import { inferPhotoRole, photoRoleOf, validPhotoRoleForSlot } from '../../shared/photoRoles';
+import { WALK_SLOTS } from './walkSlots';
 
 const DB_NAME = 'fqPhotoQueue';
 const STORE = 'photos';
+// Durable receipt for every locally captured photo. Queue rows disappear after
+// a successful PUT; receipts remain until intake commit so close/reload/commit
+// can still prove that every capture exists in the server manifest.
+const RECEIPT_STORE = 'captureReceipts';
 // Deletion tombstones: lines the inspector deleted locally that may not have
 // reached the server yet (offline autosave). Stored durably so hydration on
 // the next session can filter them out before they re-attach a wide shot.
@@ -32,7 +37,7 @@ function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(DB_NAME, 4);
+    const req = indexedDB.open(DB_NAME, 5);
     req.onupgradeneeded = (ev) => {
       const db = req.result;
       // v2 re-keys records per capture (`key`) instead of per slot (`id`).
@@ -47,6 +52,28 @@ function openDb() {
       // v4 adds the pending server-delete store (offline photo deletions).
       if (ev.oldVersion < 4) {
         db.createObjectStore(DELETE_STORE, { keyPath: 'id' });
+      }
+      if (ev.oldVersion < 5) {
+        const receipts = db.createObjectStore(RECEIPT_STORE, { keyPath: 'id' });
+        // Existing v4 queue rows also represent locally captured photos. Copy
+        // them during the upgrade so an app update cannot erase that evidence.
+        if (db.objectStoreNames.contains(STORE)) {
+          const cursor = req.transaction.objectStore(STORE).openCursor();
+          cursor.onsuccess = () => {
+            const row = cursor.result?.value;
+            if (!row) return;
+            receipts.put({
+              id: row.id,
+              quoteId: row.quoteId,
+              slotKey: row.slotKey,
+              role: row.role,
+              captureTs: row.captureTs,
+              addedAt: row.addedAt,
+              confirmedAt: null,
+            });
+            cursor.result.continue();
+          };
+        }
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -74,6 +101,14 @@ function getAllRecords() {
   }));
 }
 
+function getAllFromStore(storeName) {
+  return openDb().then((db) => new Promise((resolve, reject) => {
+    const r = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+    r.onsuccess = () => resolve(r.result || []);
+    r.onerror = () => reject(r.error);
+  }));
+}
+
 // Session-scoped registry of photo IDs that were explicitly deleted by the
 // inspector. Populated ONLY by markPhotoDeleted (called from
 // purgeDeletedDamagePhoto). flushQueue checks this after a PUT lands to
@@ -94,7 +129,15 @@ export function markPhotoDeleted(id) { deletedPhotoIds.add(id); }
 export async function queueServerDelete(id) {
   deletedPhotoIds.add(id);
   try {
-    await tx('readwrite', (store) => store.put({ id, queuedAt: Date.now() }), DELETE_STORE);
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const t = db.transaction([DELETE_STORE, RECEIPT_STORE], 'readwrite');
+      t.objectStore(DELETE_STORE).put({ id, queuedAt: Date.now() });
+      t.objectStore(RECEIPT_STORE).delete(id);
+      t.oncomplete = resolve;
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
   } catch { /* private mode / quota — the immediate DELETE attempt still runs */ }
 }
 async function getPendingServerDeletes() {
@@ -161,7 +204,9 @@ export async function probePersistence() {
 
 // ---------- pending-count subscription (drives the "sending…" indicator) ----------
 const listeners = new Set();
+const detailListeners = new Set();
 let lastCount = 0;
+let lastPendingDetails = [];
 function notify(count) {
   lastCount = count;
   listeners.forEach((fn) => { try { fn(count); } catch { /* listener error */ } });
@@ -170,6 +215,12 @@ export function subscribePending(fn) {
   listeners.add(fn);
   fn(lastCount);
   return () => listeners.delete(fn);
+}
+export function subscribePendingDetails(fn) {
+  detailListeners.add(fn);
+  fn(lastPendingDetails);
+  refreshCount();
+  return () => detailListeners.delete(fn);
 }
 const failureListeners = new Set();
 let permanentFailure = null;
@@ -188,8 +239,10 @@ export function clearQueueFailure() {
 async function refreshCount() {
   try {
     const all = await getAllRecords();
-    // One slot = one photo: count distinct server ids, not raw records.
-    notify(new Set(all.map((j) => j.id)).size);
+    const newest = newestJobs(all);
+    lastPendingDetails = newest;
+    detailListeners.forEach((fn) => { try { fn(newest); } catch { /* listener error */ } });
+    notify(newest.length);
   } catch { /* no IDB — indicator stays quiet */ }
 }
 
@@ -202,7 +255,7 @@ export function newJobKey(id) {
 export async function persistJob(job) {
   try {
     const role = validPhotoRoleForSlot(job.role, job.slotKey) ? job.role : inferPhotoRole(job.slotKey);
-    await tx('readwrite', (store) => store.put({
+    const storedJob = {
       key: job.key,
       id: job.id,
       quoteId: job.quoteId,
@@ -211,7 +264,24 @@ export async function persistJob(job) {
       dataUrl: job.dataUrl,
       captureTs: Number.isSafeInteger(job.captureTs) ? job.captureTs : undefined,
       addedAt: Number.isSafeInteger(job.addedAt) ? job.addedAt : Date.now(),
-    }));
+    };
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const t = db.transaction([STORE, RECEIPT_STORE], 'readwrite');
+      t.objectStore(STORE).put(storedJob);
+      t.objectStore(RECEIPT_STORE).put({
+        id: storedJob.id,
+        quoteId: storedJob.quoteId,
+        slotKey: storedJob.slotKey,
+        role: storedJob.role,
+        captureTs: storedJob.captureTs,
+        addedAt: storedJob.addedAt,
+        confirmedAt: null,
+      });
+      t.oncomplete = resolve;
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
     await refreshCount();
   } catch { /* private mode / quota — in-memory retry still covers the session */ }
 }
@@ -225,6 +295,63 @@ function captureOrder(job) {
   return Number.isSafeInteger(job?.captureTs)
     ? job.captureTs
     : Number(job?.addedAt || 0);
+}
+
+function newestJobs(all) {
+  const newest = new Map();
+  for (const j of all) {
+    const cur = newest.get(j.id);
+    if (
+      !cur ||
+      captureOrder(j) > captureOrder(cur) ||
+      (captureOrder(j) === captureOrder(cur) && String(j.key) > String(cur.key))
+    ) {
+      newest.set(j.id, j);
+    }
+  }
+  return [...newest.values()];
+}
+
+export async function captureReceipts(quoteId, { unconfirmedOnly = false } = {}) {
+  try {
+    let rows = await getAllFromStore(RECEIPT_STORE);
+    if (quoteId) rows = rows.filter((row) => row.quoteId === quoteId);
+    if (unconfirmedOnly) rows = rows.filter((row) => !row.confirmedAt);
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+async function markReceiptConfirmed(id) {
+  try {
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const t = db.transaction(RECEIPT_STORE, 'readwrite');
+      const store = t.objectStore(RECEIPT_STORE);
+      const get = store.get(id);
+      get.onsuccess = () => {
+        if (get.result) store.put({ ...get.result, confirmedAt: Date.now() });
+      };
+      t.oncomplete = resolve;
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
+  } catch { /* reconciliation remains conservative */ }
+}
+
+export async function removePhotoReceipt(id) {
+  try {
+    await tx('readwrite', (store) => store.delete(id), RECEIPT_STORE);
+  } catch { /* ignore */ }
+}
+
+export async function clearPhotoReceipts(quoteId) {
+  try {
+    const rows = await captureReceipts(quoteId);
+    if (!rows.length) return;
+    await tx('readwrite', (store) => rows.forEach((row) => store.delete(row.id)), RECEIPT_STORE);
+  } catch { /* ignore */ }
 }
 // Drop superseded records for a server photo id (a retake replaced the shot),
 // keeping the capture identified by exceptKey. When maxCaptureOrder is given,
@@ -272,19 +399,129 @@ export async function pendingJobs(quoteId) {
     let all = await getAllRecords();
     if (quoteId) all = all.filter((j) => j.quoteId === quoteId);
     // Newest capture wins per server id — older records are superseded shots.
-    const newest = new Map();
-    for (const j of all) {
-      const cur = newest.get(j.id);
-      if (
-        !cur ||
-        captureOrder(j) > captureOrder(cur) ||
-        (captureOrder(j) === captureOrder(cur) && String(j.key) > String(cur.key))
-      ) {
-        newest.set(j.id, j);
-      }
-    }
-    return [...newest.values()];
+    return newestJobs(all);
   } catch { return []; }
+}
+
+const walkLabels = new Map(WALK_SLOTS.map((slot) => [slot.key, slot.label]));
+export function photoQueueLabel(photo) {
+  if (walkLabels.has(photo?.slotKey)) return walkLabels.get(photo.slotKey);
+  const role = photoRoleOf({ role: photo?.role, slot: photo?.slotKey });
+  if (role === 'damage_wide') return 'Damage context photo';
+  if (role === 'damage') return 'Damage close-up';
+  if (String(photo?.slotKey || '').startsWith('xtra_')) return 'Additional walk-around photo';
+  return String(photo?.slotKey || 'Photo').replaceAll('_', ' ');
+}
+
+const reconciliationListeners = new Set();
+let lastReconciliation = null;
+function notifyReconciliation(result) {
+  lastReconciliation = result;
+  reconciliationListeners.forEach((fn) => { try { fn(result); } catch { /* listener error */ } });
+}
+export function subscribePhotoReconciliation(fn) {
+  reconciliationListeners.add(fn);
+  fn(lastReconciliation);
+  return () => reconciliationListeners.delete(fn);
+}
+
+function manifestHasCapture(receipt, manifestById) {
+  const serverPhoto = manifestById.get(receipt.id);
+  if (!serverPhoto) return false;
+  const expectedTs = Number(receipt.captureTs || receipt.addedAt || 0);
+  const serverTs = Number(serverPhoto.ts || 0);
+  return !expectedTs || serverTs >= expectedTs;
+}
+
+export async function reconcileIntakePhotos({
+  intakeId,
+  quoteId,
+  flush = true,
+  captured: sessionCaptured = [],
+} = {}) {
+  if (!quoteId) {
+    return { complete: true, captured: [], pending: [], unresolved: [], photos: [] };
+  }
+  if (flush) await flushQueue({ quoteId, includeCamera: true });
+
+  const receipts = await captureReceipts(quoteId);
+  const queuedBeforeManifest = await pendingJobs(quoteId);
+  const expectedById = new Map(receipts.map((row) => [row.id, row]));
+  for (const row of sessionCaptured) {
+    if (row?.id && row.quoteId === quoteId) expectedById.set(row.id, row);
+  }
+  // Compatibility for queue rows created by a very old client before receipt
+  // migration completed.
+  for (const row of queuedBeforeManifest) {
+    if (!expectedById.has(row.id)) expectedById.set(row.id, row);
+  }
+  const captured = [...expectedById.values()];
+
+  let manifest;
+  try {
+    manifest = intakeId ? await api.intakePhotos(intakeId) : await api.quotePhotos(quoteId);
+  } catch (error) {
+    const unresolved = captured.map((row) => ({
+      ...row,
+      label: photoQueueLabel(row),
+      pending: queuedBeforeManifest.some((job) => job.id === row.id),
+    }));
+    return {
+      complete: false,
+      captured,
+      pending: queuedBeforeManifest,
+      unresolved,
+      photos: [],
+      connectionError: true,
+      error,
+    };
+  }
+
+  if (manifest?.quoteId && manifest.quoteId !== quoteId) {
+    return {
+      complete: false,
+      captured,
+      pending: queuedBeforeManifest,
+      unresolved: captured.map((row) => ({ ...row, label: photoQueueLabel(row), pending: true })),
+      photos: manifest?.photos || [],
+      ownershipChanged: true,
+    };
+  }
+
+  const manifestById = new Map((manifest?.photos || []).map((photo) => [String(photo.id), photo]));
+  const confirmed = captured.filter((row) => manifestHasCapture(row, manifestById));
+  for (const row of confirmed) {
+    await markReceiptConfirmed(row.id);
+    // A PUT may have reached the server even when its response was aborted.
+    // Manifest confirmation is authoritative, so that queued retry can go.
+    const queued = queuedBeforeManifest.filter((job) => job.id === row.id);
+    for (const job of queued) await removeJob(job.key);
+    await removeJobsForPhoto(row.id, '__none__');
+  }
+  const pending = await pendingJobs(quoteId);
+  const pendingIds = new Set(pending.map((row) => row.id));
+  const unresolved = captured
+    .filter((row) => !manifestHasCapture(row, manifestById))
+    .map((row) => ({ ...row, label: photoQueueLabel(row), pending: pendingIds.has(row.id) }));
+  const result = {
+    complete: unresolved.length === 0 && pending.length === 0,
+    captured,
+    pending,
+    unresolved,
+    photos: manifest?.photos || [],
+    confirmedCount: confirmed.length,
+  };
+  if (result.complete && confirmed.length) {
+    notifyReconciliation({ quoteId, confirmedCount: confirmed.length, complete: true, at: Date.now() });
+  }
+  return result;
+}
+
+export async function reconcileQueuedPhotos() {
+  await flushQueue();
+  const receipts = await captureReceipts(null, { unconfirmedOnly: true });
+  const quoteIds = [...new Set(receipts.map((row) => row.quoteId).filter(Boolean))];
+  return Promise.all(quoteIds.map((quoteId) => reconcileIntakePhotos({ quoteId, flush: false })));
 }
 
 // ---------- background flush ----------
@@ -302,18 +539,19 @@ export function setCameraOpen(open) { cameraOpen = open; if (!open) flushQueue()
 // the role field are inferred once from their established slot convention.
 const isDamageJob = (job) => ['damage', 'damage_wide'].includes(photoRoleOf({ role: job.role, slot: job.slotKey }));
 
-let flushing = false;
-export async function flushQueue() {
-  if (flushing) return;
-  flushing = true;
+let flushPromise = null;
+export async function flushQueue(options = {}) {
+  if (flushPromise) await flushPromise;
+  const { quoteId = null, includeCamera = false } = options;
+  flushPromise = (async () => {
   try {
     // Owed server deletes go first: a lingering server copy of a deleted
     // photo must never outlive connectivity coming back.
     await flushServerDeletes();
-    let jobs = await pendingJobs(); // newest per server id
+    let jobs = await pendingJobs(quoteId); // newest per server id
     // Camera open: only damage close-ups are ours to send — camera slots
     // belong to the camera's own retry loop.
-    if (cameraOpen) jobs = jobs.filter(isDamageJob);
+    if (cameraOpen && !includeCamera) jobs = jobs.filter(isDamageJob);
     if (!jobs.length) return;
     // Show the "Sending N photos…" pill for the whole flush, including the
     // launch-time pass where nothing has notified listeners yet.
@@ -321,7 +559,7 @@ export async function flushQueue() {
     for (const job of jobs) {
       // The camera may have opened mid-flush — stop touching its slots, but
       // damage close-ups are still safe to send.
-      if (cameraOpen && !isDamageJob(job)) continue;
+      if (cameraOpen && !includeCamera && !isDamageJob(job)) continue;
       try {
          
         await api.putQuotePhoto({
@@ -368,7 +606,12 @@ export async function flushQueue() {
       }
     }
   } finally {
-    flushing = false;
-    refreshCount();
+    await refreshCount();
+  }
+  })();
+  try {
+    await flushPromise;
+  } finally {
+    flushPromise = null;
   }
 }

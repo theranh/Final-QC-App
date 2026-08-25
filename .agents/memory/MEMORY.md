@@ -9,7 +9,7 @@
 - [Live camera orientation](ios-gravity-rotation.md) — never infer pixel rotation from gravity; Apple live-camera backing frames use explicit per-profile confirmation before crop/zoom.
 - [Hours-only display](hours-only-display.md) — quote UI shows hours only; usd stays in saved data for tracker sync; awaiting list dedupes per VIN with IN PROGRESS badge.
 - [Migrated re-checks](migrated-rechecks.md) — imported open inspections lacked openItems; admin repair button rebuilds them; 401s in a stale PWA now force the sign-in screen via auth:expired event.
-- [Photo upload queue](photo-upload-queue.md) — queue records keyed per capture, not per slot, or a slow upload's cleanup deletes a retake; 401 is transient, only 413/409/403 drop.
+- [Photo upload queue](photo-upload-queue.md) — per-capture queue keys prevent retake loss; durable receipts must reconcile against the server manifest before intake completion.
 - [Photo delete durability](photo-delete-durability.md) — offline deletes persist in IDB pendingDeletes and retry via flushQueue; EXIF parser lives only in photoExif.ts; corrections dedupe via unique index, not SELECT-then-INSERT.
 - [Phase 1A pricing capture](phase1a-pricing-capture.md) — commit-blocking snapshots at PIN commit; per-line math must use the full billing pipeline; observation only until user approves 1B.
 - [Reliability hardening](reliability-hardening.md) — guards live INSIDE transactions; ratesMeta versioning; delete tombstones (410); durable sheet-export queue with SKIP LOCKED claims; xact-lock migrations.

@@ -3,9 +3,32 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import 'fake-indexeddb/auto';
 
-vi.mock('./api', () => ({ api: { putQuotePhoto: vi.fn(), deleteQuotePhoto: vi.fn() } }));
+vi.mock('./api', () => ({
+  api: {
+    putQuotePhoto: vi.fn(),
+    deleteQuotePhoto: vi.fn(),
+    quotePhotos: vi.fn(),
+    intakePhotos: vi.fn(),
+  },
+}));
 import { api } from './api';
-import { clearQueueFailure, persistJob, removeJob, removeJobsForPhoto, pendingJobs, newJobKey, flushQueue, subscribePending, subscribeQueueFailure, setCameraOpen, markPhotoDeleted } from './photoQueue';
+import {
+  captureReceipts,
+  clearPhotoReceipts,
+  clearQueueFailure,
+  flushQueue,
+  markPhotoDeleted,
+  newJobKey,
+  pendingJobs,
+  persistJob,
+  reconcileIntakePhotos,
+  reconcileQueuedPhotos,
+  removeJob,
+  removeJobsForPhoto,
+  setCameraOpen,
+  subscribePending,
+  subscribeQueueFailure,
+} from './photoQueue';
 
 let seq = 0;
 const job = (id, quoteId = 'Q1', dataUrl = 'data:image/jpeg;base64,AAA') =>
@@ -15,6 +38,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function clearAll() {
   for (const j of await pendingJobs()) await removeJobsForPhoto(j.id, '__none__');
+  const quoteIds = [...new Set((await captureReceipts()).map((receipt) => receipt.quoteId))];
+  for (const quoteId of quoteIds) await clearPhotoReceipts(quoteId);
 }
 
 describe('photoQueue', () => {
@@ -22,6 +47,8 @@ describe('photoQueue', () => {
     vi.clearAllMocks();
     setCameraOpen(false);
     clearQueueFailure();
+    api.quotePhotos.mockResolvedValue({ quoteId: 'Q1', photos: [] });
+    api.intakePhotos.mockResolvedValue({ intakeId: 'I1', quoteId: 'Q1', photos: [] });
     await clearAll();
   });
 
@@ -100,6 +127,69 @@ describe('photoQueue', () => {
     api.putQuotePhoto.mockRejectedValueOnce(httpErr(401));
     await flushQueue();
     expect((await pendingJobs()).map((j) => j.id)).toEqual(['net']); // survives sign-out
+  });
+
+  it('uses the server manifest to recover an upload whose response was aborted', async () => {
+    const captureTs = 1_800_000_000_123;
+    const captured = { ...job('Q1_ext_front'), captureTs };
+    await persistJob(captured);
+    api.putQuotePhoto.mockRejectedValueOnce(new Error('request aborted'));
+    api.intakePhotos.mockResolvedValue({
+      intakeId: 'I1',
+      quoteId: 'Q1',
+      photos: [{ id: captured.id, slot: captured.slotKey, role: 'walk', ts: captureTs }],
+    });
+
+    const report = await reconcileIntakePhotos({ intakeId: 'I1', quoteId: 'Q1' });
+
+    expect(report.complete).toBe(true);
+    expect(report.confirmedCount).toBe(1);
+    expect(await pendingJobs('Q1')).toEqual([]);
+    expect(await captureReceipts('Q1')).toEqual([
+      expect.objectContaining({ id: captured.id, confirmedAt: expect.any(Number) }),
+    ]);
+  });
+
+  it('keeps an offline capture unresolved by angle until a retry reaches the manifest', async () => {
+    const captureTs = 1_800_000_000_456;
+    const captured = { ...job('Q1_ext_front'), captureTs };
+    await persistJob(captured);
+    api.putQuotePhoto.mockRejectedValue(new Error('offline'));
+
+    const offline = await reconcileIntakePhotos({ intakeId: 'I1', quoteId: 'Q1' });
+    expect(offline.complete).toBe(false);
+    expect(offline.unresolved).toEqual([
+      expect.objectContaining({ id: captured.id, label: 'Front', pending: true }),
+    ]);
+
+    api.putQuotePhoto.mockResolvedValue({});
+    api.intakePhotos.mockResolvedValue({
+      intakeId: 'I1',
+      quoteId: 'Q1',
+      photos: [{ id: captured.id, slot: captured.slotKey, role: 'walk', ts: captureTs }],
+    });
+    const online = await reconcileIntakePhotos({ intakeId: 'I1', quoteId: 'Q1' });
+    expect(online.complete).toBe(true);
+    expect(await pendingJobs('Q1')).toEqual([]);
+  });
+
+  it('restarts, flushes durable captures, and confirms them against the quote manifest', async () => {
+    const captureTs = 1_800_000_000_789;
+    const captured = { ...job('Q1_ext_front'), captureTs };
+    await persistJob(captured);
+    api.putQuotePhoto.mockResolvedValue({});
+    api.quotePhotos.mockResolvedValue({
+      quoteId: 'Q1',
+      photos: [{ id: captured.id, slot: captured.slotKey, role: 'walk', ts: captureTs }],
+    });
+
+    const reports = await reconcileQueuedPhotos();
+
+    expect(reports).toEqual([expect.objectContaining({ complete: true })]);
+    expect(await pendingJobs('Q1')).toEqual([]);
+    expect(await captureReceipts('Q1')).toEqual([
+      expect.objectContaining({ id: captured.id, confirmedAt: expect.any(Number) }),
+    ]);
   });
 
   it('drops jobs on permanent rejections (400/413/409/403)', async () => {

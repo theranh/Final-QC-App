@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { clearQueueFailure, flushQueue, subscribePending, subscribeQueueFailure } from '../lib/photoQueue';
+import {
+  clearQueueFailure,
+  photoQueueLabel,
+  reconcileQueuedPhotos,
+  subscribePendingDetails,
+  subscribePhotoReconciliation,
+  subscribeQueueFailure,
+} from '../lib/photoQueue';
 
 // Small floating pill shown while walk-around photos saved from an earlier
 // session (or a weak-signal moment) are still being sent in the background.
@@ -7,16 +14,31 @@ import { clearQueueFailure, flushQueue, subscribePending, subscribeQueueFailure 
 // and on a slow interval, any photos left over from a force-closed camera
 // session are pushed to the server automatically.
 export default function PhotoQueueIndicator() {
-  const [pending, setPending] = useState(0);
+  const [pending, setPending] = useState([]);
   const [failure, setFailure] = useState(null);
+  const [confirmed, setConfirmed] = useState(null);
 
-  useEffect(() => subscribePending(setPending), []);
+  useEffect(() => subscribePendingDetails(setPending), []);
   useEffect(() => subscribeQueueFailure(setFailure), []);
   useEffect(() => {
-    flushQueue(); // launch: send anything left over from a closed session
-    const t = setInterval(flushQueue, 15000);
-    window.addEventListener('online', flushQueue);
-    return () => { clearInterval(t); window.removeEventListener('online', flushQueue); };
+    let timer;
+    const unsubscribe = subscribePhotoReconciliation((result) => {
+      if (!result?.complete || !result.confirmedCount) return;
+      setConfirmed(result);
+      clearTimeout(timer);
+      timer = setTimeout(() => setConfirmed(null), 5000);
+    });
+    return () => {
+      clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
+  useEffect(() => {
+    const flushAndConfirm = () => { void reconcileQueuedPhotos(); };
+    flushAndConfirm(); // launch: send leftovers, then confirm them in the server manifest
+    const t = setInterval(flushAndConfirm, 15000);
+    window.addEventListener('online', flushAndConfirm);
+    return () => { clearInterval(t); window.removeEventListener('online', flushAndConfirm); };
   }, []);
 
   if (failure) {
@@ -27,10 +49,21 @@ export default function PhotoQueueIndicator() {
       </div>
     );
   }
-  if (!pending) return null;
+  if (!pending.length) {
+    if (!confirmed) return null;
+    return (
+      <div role="status" aria-live="polite" style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 'calc(72px + env(safe-area-inset-bottom))', zIndex: 150, background: 'rgba(35,92,53,.96)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '9px 14px', borderRadius: 18, boxShadow: '0 2px 10px rgba(0,0,0,.35)', pointerEvents: 'none' }}>
+        All queued photos are on the server ✓
+      </div>
+    );
+  }
   return (
-    <div role="status" aria-live="polite" style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 'calc(72px + env(safe-area-inset-bottom))', zIndex: 150, background: 'rgba(35,32,26,.92)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: .3, padding: '8px 14px', borderRadius: 18, boxShadow: '0 2px 10px rgba(0,0,0,.35)', pointerEvents: 'none' }}>
-      Safely queued · sending {pending} photo{pending === 1 ? '' : 's'}…
+    <div role="status" aria-live="polite" style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 'calc(72px + env(safe-area-inset-bottom))', zIndex: 150, width: 'min(360px, calc(100vw - 28px))', background: 'rgba(35,32,26,.94)', color: '#f5f3ee', fontSize: 12, fontWeight: 600, letterSpacing: .2, padding: '9px 14px', borderRadius: 14, boxShadow: '0 2px 10px rgba(0,0,0,.35)', pointerEvents: 'none' }}>
+      <div>Safely queued · sending {pending.length} photo{pending.length === 1 ? '' : 's'}…</div>
+      <div style={{ marginTop: 4, fontSize: 10.5, opacity: .88 }}>
+        {pending.slice(0, 4).map(photoQueueLabel).join(' · ')}
+        {pending.length > 4 ? ` · +${pending.length - 4} more` : ''}
+      </div>
     </div>
   );
 }

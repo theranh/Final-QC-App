@@ -3,6 +3,7 @@
 // src/lib/vin.test.js by verifying the actual on-screen behavior.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import 'fake-indexeddb/auto';
+import { useState } from 'react';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -20,6 +21,7 @@ const orderIntakePhotos = vi.fn(() => Promise.resolve({ photoIds: [] }));
 const commitIntake = vi.fn(() => Promise.resolve({}));
 const correctCommittedIntake = vi.fn(() => Promise.resolve({}));
 const putQuotePhoto = vi.fn(() => Promise.resolve({}));
+const deleteQuotePhoto = vi.fn(() => Promise.resolve({}));
 const rotateJpegDataUrl = vi.fn(() => Promise.resolve('data:image/jpeg;base64,ROTATED'));
 // Per-test data for the landing lists — the duplicate-VIN guard matches the
 // entered VIN against these rows.
@@ -40,6 +42,7 @@ vi.mock('../lib/api', () => ({
     commitIntake: (...args) => commitIntake(...args),
     correctCommittedIntake: (...args) => correctCommittedIntake(...args),
     putQuotePhoto: (...args) => putQuotePhoto(...args),
+    deleteQuotePhoto: (...args) => deleteQuotePhoto(...args),
   },
 }));
 
@@ -74,22 +77,42 @@ vi.mock('./VinScanner', async () => {
 });
 
 vi.mock('./QuoteScreen', () => ({ default: () => <div data-testid="mock-quote" /> }));
-vi.mock('./WalkAroundCamera', () => ({ default: ({ quoteId }) => <div data-testid="mock-walk" data-quote-id={quoteId} /> }));
-vi.mock('./PinDialog', () => ({
-  default: ({ children, onCommit, adminOnly }) => (
-    <div data-testid="mock-pin" data-admin-only={adminOnly ? 'true' : 'false'}>
-      {children}
-      <button onClick={() => onCommit({ signerId: 2, pin: '2222' })}>mock-pin-submit</button>
+vi.mock('./WalkAroundCamera', () => ({
+  default: ({ quoteId, onClose }) => (
+    <div data-testid="mock-walk" data-quote-id={quoteId}>
+      <button onClick={onClose}>mock-close-camera</button>
     </div>
   ),
+}));
+vi.mock('./PinDialog', () => ({
+  default: function MockPinDialog({ children, onCommit, adminOnly }) {
+    const [error, setError] = useState('');
+    return (
+      <div data-testid="mock-pin" data-admin-only={adminOnly ? 'true' : 'false'}>
+        {children}
+        {error && <div role="alert">{error}</div>}
+        <button onClick={() => {
+          Promise.resolve(onCommit({ signerId: 2, pin: '2222' }))
+            .catch((err) => setError(err?.message || 'Could not commit'));
+        }}>mock-pin-submit</button>
+      </div>
+    );
+  },
   SignatureBadge: () => <span />,
 }));
 
 import IntakeScreen from './IntakeScreen';
 import { decodeVinInfo } from '../lib/vin';
-import { pendingJobs, removeJobsForPhoto } from '../lib/photoQueue';
+import {
+  captureReceipts,
+  clearPhotoReceipts,
+  pendingJobs,
+  persistJob,
+  removeJobsForPhoto,
+  setCameraOpen,
+} from '../lib/photoQueue';
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
   putIntake.mockClear();
   linkIntakeQuote.mockReset();
@@ -110,12 +133,18 @@ beforeEach(() => {
   correctCommittedIntake.mockResolvedValue({});
   putQuotePhoto.mockReset();
   putQuotePhoto.mockResolvedValue({});
+  deleteQuotePhoto.mockReset();
+  deleteQuotePhoto.mockResolvedValue({});
   rotateJpegDataUrl.mockReset();
   rotateJpegDataUrl.mockResolvedValue('data:image/jpeg;base64,ROTATED');
   decodeVinInfo.mockReset();
   decodeVinInfo.mockResolvedValue(null);
   serverIntakes = [];
   serverQuotes = [];
+  setCameraOpen(false);
+  for (const queued of await pendingJobs()) await removeJobsForPhoto(queued.id, '__none__');
+  const quoteIds = [...new Set((await captureReceipts()).map((receipt) => receipt.quoteId))];
+  for (const quoteId of quoteIds) await clearPhotoReceipts(quoteId);
 });
 afterEach(cleanup);
 
@@ -349,6 +378,119 @@ describe('IntakeScreen scan wiring', () => {
     fireEvent.click(screen.getByText('emit-cancel'));
     expect(screen.queryByTestId('mock-scanner')).not.toBeInTheDocument();
     expect(screen.queryByText('TRUCK')).not.toBeInTheDocument();
+  });
+});
+
+describe('IntakeScreen photo reconciliation', () => {
+  const intakeRow = {
+    found: true,
+    id: 'in-photo-check',
+    vin: VALID_VIN,
+    stock: 'PHOTO-CHECK',
+    vehicle: '2024 Ford F-150',
+    miles: '100',
+    estimator: 'Estimator',
+    quoteId: 'q-photo-check',
+    data: { mddTags: true },
+    completedAt: null,
+    committedBy: null,
+    overriddenBy: null,
+    updatedAt: 100,
+  };
+  const localCapture = {
+    key: 'q-photo-check_ext_front:local',
+    id: 'q-photo-check_ext_front',
+    quoteId: 'q-photo-check',
+    slotKey: 'ext_front',
+    role: 'walk',
+    dataUrl: 'data:image/jpeg;base64,AAA',
+    captureTs: 1_800_000_000_100,
+  };
+
+  it('retries on camera close and clearly lists an angle still missing from the server', async () => {
+    getIntake.mockResolvedValue(intakeRow);
+    intakePhotos.mockResolvedValue({ intakeId: intakeRow.id, quoteId: intakeRow.quoteId, photos: [] });
+    putQuotePhoto.mockRejectedValue(new Error('offline'));
+    await persistJob(localCapture);
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /take walk-around photos/i }));
+    fireEvent.click(await screen.findByText('mock-close-camera'));
+
+    expect(await screen.findByText('PHOTOS STILL SENDING OR MISSING')).toBeInTheDocument();
+    expect(screen.getByText(/Front · queued for retry/)).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-walk')).not.toBeInTheDocument();
+  });
+
+  it('blocks PIN completion while a capture is unsent, then commits after retry and manifest confirmation', async () => {
+    getIntake.mockResolvedValue(intakeRow);
+    intakePhotos.mockResolvedValue({ intakeId: intakeRow.id, quoteId: intakeRow.quoteId, photos: [] });
+    putQuotePhoto.mockRejectedValue(new Error('offline'));
+    await persistJob(localCapture);
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'SAVE' }));
+    fireEvent.click(screen.getByRole('button', { name: /continue to pin/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'mock-pin-submit' }));
+
+    expect(await screen.findByText(/Photos are still sending or missing from the server: Front/i)).toBeInTheDocument();
+    expect(commitIntake).not.toHaveBeenCalled();
+
+    putQuotePhoto.mockResolvedValue({});
+    intakePhotos.mockResolvedValue({
+      intakeId: intakeRow.id,
+      quoteId: intakeRow.quoteId,
+      photos: [{
+        id: localCapture.id,
+        slot: localCapture.slotKey,
+        role: localCapture.role,
+        ts: localCapture.captureTs,
+      }],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mock-pin-submit' }));
+
+    await waitFor(() => expect(commitIntake).toHaveBeenCalledWith(expect.objectContaining({
+      id: intakeRow.id,
+      photoManifest: [{ id: localCapture.id, captureTs: localCapture.captureTs }],
+    })));
+    expect(await captureReceipts(localCapture.quoteId)).toEqual([]);
+  });
+
+  it('allows completion after the inspector intentionally deletes a previously captured photo online', async () => {
+    getIntake.mockResolvedValue(intakeRow);
+    let deleted = false;
+    intakePhotos.mockImplementation(() => Promise.resolve({
+      intakeId: intakeRow.id,
+      quoteId: intakeRow.quoteId,
+      photos: deleted ? [] : [{
+        id: localCapture.id,
+        slot: localCapture.slotKey,
+        role: localCapture.role,
+        ts: localCapture.captureTs,
+      }],
+    }));
+    deleteQuotePhoto.mockImplementation(() => {
+      deleted = true;
+      return Promise.resolve({});
+    });
+    await persistJob(localCapture);
+    await removeJobsForPhoto(localCapture.id, '__none__'); // upload already succeeded; receipt remains
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /open ext_front 1/i }));
+    fireEvent.click(screen.getByRole('button', { name: /delete photo/i }));
+    await waitFor(() => expect(deleteQuotePhoto).toHaveBeenCalledWith({ id: localCapture.id }));
+    expect(await captureReceipts(localCapture.quoteId)).toEqual([]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'SAVE' }));
+    fireEvent.click(screen.getByRole('button', { name: /continue to pin/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'mock-pin-submit' }));
+
+    await waitFor(() => expect(commitIntake).toHaveBeenCalledWith(expect.objectContaining({
+      id: intakeRow.id,
+      photoManifest: [],
+    })));
   });
 });
 

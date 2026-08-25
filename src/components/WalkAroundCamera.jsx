@@ -28,10 +28,11 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
   // are retried automatically (every few seconds + when the network returns),
   // so a weak-signal moment in the shop can't quietly lose pictures.
   const [pendingCount, setPendingCount] = useState(0);
+  const [closeBusy, setCloseBusy] = useState(false);
   const queueRef = useRef([]); // newest failed job per photo id
   const retryBusyRef = useRef(false);
-  const closeWarnRef = useRef(0);
   const latestCaptureRef = useRef(new Map()); // photo id -> newest capture key
+  const capturedRef = useRef(new Map()); // all captures this camera session, including already-uploaded ones
   const uploadChainsRef = useRef(new Map()); // photo id -> serialized upload promise
   const captureClockRef = useRef(0);
   const nextCaptureTs = () => {
@@ -56,6 +57,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
         if (!live) return;
         for (const job of jobs) {
           latestCaptureRef.current.set(job.id, job.key);
+          capturedRef.current.set(job.id, job);
           captureClockRef.current = Math.max(
             captureClockRef.current,
             Number(job.captureTs || job.addedAt || 0),
@@ -385,6 +387,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const key = newJobKey(id);
     const job = { key, id, quoteId, slotKey, role: 'walk', dataUrl, captureTs };
     latestCaptureRef.current.set(id, key);
+    capturedRef.current.set(id, job);
     await persistJob(job);
     setPhotos((p) => putSlotPhoto(p, slotKey, { id, thumb, dataUrl }));
     void scheduleUpload(job);
@@ -417,6 +420,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     const captureTs = nextCaptureTs();
     const job = { key, id, quoteId, slotKey, role: 'walk', dataUrl, captureTs, prev };
     latestCaptureRef.current.set(id, key);
+    capturedRef.current.set(id, job);
     await persistJob(job);
     // This shot supersedes any earlier queued capture of the same slot —
     // purge them (disk + memory) so a stale retry can't overwrite it.
@@ -463,14 +467,23 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
     return false;
   };
 
-  // Leaving with unsent shots would lose them — hold the door once.
-  const requestClose = () => {
-    if (queueRef.current.length && Date.now() - closeWarnRef.current > 4000) {
-      closeWarnRef.current = Date.now();
-      showToast?.(`Still sending ${queueRef.current.length} photo${queueRef.current.length === 1 ? '' : 's'} — give it a few seconds, or tap ✕ again to leave anyway.`);
-      return;
+  // Closing is an explicit reconciliation point. The intake owns the canonical
+  // manifest lookup; keep this screen mounted while it retries/checks so a
+  // second tap cannot bypass the check.
+  const requestClose = async () => {
+    if (closeBusy) return;
+    setCloseBusy(true);
+    try {
+      await onClose?.({ quoteId, captured: [...capturedRef.current.values()].map((job) => ({
+        id: job.id,
+        quoteId: job.quoteId,
+        slotKey: job.slotKey,
+        role: job.role,
+        captureTs: job.captureTs,
+      })) });
+    } finally {
+      setCloseBusy(false);
     }
-    onClose();
   };
   // Most browsers expose the same upright pixels shown in the <video>. Some
   // iPhone WebKit camera profiles expose a quarter-turned backing frame to
@@ -757,7 +770,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
       {(!landscape || mode === 'review') && <div style={{ padding: 'calc(10px + env(safe-area-inset-top)) 14px 10px', display: 'flex', alignItems: 'center', gap: 12, background: '#000', flex: 'none' }}>
-        <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>×</button>
+        <button aria-label="Close camera" disabled={closeBusy} onClick={requestClose} style={roundBtn}>{closeBusy ? '…' : '×'}</button>
         <div style={{ flex: 1, textAlign: 'center' }}><div className="card-title" style={{ color: '#d9d2c4' }}>CAMERA</div><div style={{ fontSize: 11, color: '#aaa092' }}>{mode === 'extra' ? `${progress.captured + extraShots.length} photos${pendingCount ? ` · sending ${pendingCount}…` : ''}` : mode === 'guided' ? `${progress.captured} / ${WALK_SLOTS.length} captured${pendingCount ? ` · sending ${pendingCount}…` : ''}` : pendingCount ? `sending ${pendingCount}…` : ''}</div></div>
         {mode === 'guided' ? <button style={chromeBtn} onClick={() => setMode('review')}>Review</button> : <span style={{ width: 40 }} />}
       </div>}
@@ -774,7 +787,7 @@ export default function WalkAroundCamera({ quoteId, committed, addOnly = false, 
         <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'row', background: '#000', paddingLeft: 'env(safe-area-inset-left)' }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{frame}</div>
           <div style={{ flex: 'none', width: 118, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: 'calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) 8px 4px' }}>
-            <button aria-label="Close camera" onClick={requestClose} style={roundBtn}>✕</button>
+            <button aria-label="Close camera" disabled={closeBusy} onClick={requestClose} style={roundBtn}>{closeBusy ? '…' : '✕'}</button>
             {zoomDial(true)}
             {shutterBtn}
             {(mode === 'damage' || mode === 'damage_wide') ? <button style={chromeBtn} onClick={skipOrCancel}>{mode === 'damage_wide' ? 'SKIP' : 'CANCEL'}</button> : mode === 'extra' ? extraThumb : galleryBtn}

@@ -8,12 +8,16 @@ import WalkAroundCamera from './WalkAroundCamera';
 import { vinValid, decodeVinInfo, scannedVinDecision } from '../lib/vin';
 import {
   attemptServerDelete,
+  clearPhotoReceipts,
   newJobKey,
   pendingJobs,
   persistJob,
+  photoQueueLabel,
   queueServerDelete,
+  reconcileIntakePhotos,
   removeJob,
   removeJobsForPhoto,
+  removePhotoReceipt,
   subscribePending,
   subscribePersistence,
 } from '../lib/photoQueue';
@@ -694,18 +698,6 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const notesCardRef = useRef(null);
   const quoteCardRef = useRef(null);
 
-  const doCommit = ({ signerId, pin, forEmployeeId }) =>
-    api.commitIntake({ id: intake.id, signerId, pin, forEmployeeId, ratesVersion: ratesVersionRef.current }).then((r) => {
-      const cur = intakeRef.current;
-      if (!cur) return;
-      const next = { ...cur, committedBy: r.committedBy, overriddenBy: r.overriddenBy || null, completedAt: r.completedAt || Date.now() };
-      intakeRef.current = next;
-      saveToCache(next);
-      setIntake(next);
-      setPinOpen(false);
-      showToast && showToast('Intake saved ✓');
-    });
-
   const openIdentityEdit = () => {
     const cur = intakeRef.current;
     if (!cur?.committedBy) return;
@@ -799,8 +791,80 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
   const [persistenceOk, setPersistenceOk] = useState(null);
   useEffect(() => subscribePersistence(setPersistenceOk), []);
   const [photoLoadError, setPhotoLoadError] = useState(false);
+  const [photoReconciliation, setPhotoReconciliation] = useState(null);
+  const sessionCapturedRef = useRef(new Map());
+  const forgetCapturedPhoto = useCallback(async (photoId) => {
+    sessionCapturedRef.current.delete(photoId);
+    await removePhotoReceipt(photoId);
+  }, []);
   const [photoLoadAttempt, setPhotoLoadAttempt] = useState(0); // bumped by RETRY
   const photoRequestRef = useRef(0);
+  const reconcileCurrentPhotos = useCallback(async () => {
+    const current = intakeRef.current;
+    if (!current?.quoteId) {
+      const empty = { complete: true, captured: [], pending: [], unresolved: [], photos: [] };
+      setPhotoReconciliation(empty);
+      return empty;
+    }
+    const report = await reconcileIntakePhotos({
+      intakeId: current.id,
+      quoteId: current.quoteId,
+      captured: [...sessionCapturedRef.current.values()],
+    });
+    if (intakeRef.current?.id !== current.id) return report;
+    setPhotoReconciliation(report);
+    if (!report.connectionError && !report.ownershipChanged) {
+      setIntakePhotos(report.photos || []);
+      setPhotoLoadError(false);
+    }
+    return report;
+  }, []);
+  const doCommit = async ({ signerId, pin, forEmployeeId }) => {
+    const current = intakeRef.current;
+    if (!current) throw new Error('Intake is no longer open');
+    const report = await reconcileCurrentPhotos();
+    if (!report.complete) {
+      const labels = report.unresolved.map((photo) => photo.label || photoQueueLabel(photo));
+      const detail = labels.length ? `: ${labels.slice(0, 4).join(', ')}${labels.length > 4 ? `, +${labels.length - 4} more` : ''}` : '';
+      showToast?.('Photos are still missing from the server. Keep this intake open and retry.');
+      throw new Error(`Photos are still sending or missing from the server${detail}`);
+    }
+    const photoManifest = report.captured.map((photo) => ({
+      id: photo.id,
+      ...(Number.isSafeInteger(photo.captureTs) ? { captureTs: photo.captureTs } : {}),
+    }));
+    const r = await api.commitIntake({
+      id: current.id,
+      signerId,
+      pin,
+      forEmployeeId,
+      ratesVersion: ratesVersionRef.current,
+      photoManifest,
+    });
+    const cur = intakeRef.current;
+    if (!cur) return;
+    const next = { ...cur, committedBy: r.committedBy, overriddenBy: r.overriddenBy || null, completedAt: r.completedAt || Date.now() };
+    intakeRef.current = next;
+    saveToCache(next);
+    setIntake(next);
+    setPinOpen(false);
+    setPhotoReconciliation(null);
+    sessionCapturedRef.current.clear();
+    await clearPhotoReceipts(current.quoteId);
+    showToast?.('Intake saved ✓');
+  };
+  const closeWalkCamera = async ({ captured = [] } = {}) => {
+    for (const photo of captured) sessionCapturedRef.current.set(photo.id, photo);
+    const report = await reconcileCurrentPhotos();
+    setWalkOpen(false);
+    setWalkQuoteId(null);
+    setWalkMode('guided');
+    if (report.complete && report.captured.length) {
+      showToast?.('All captured photos are on the server ✓');
+    } else if (!report.complete) {
+      showToast?.('Some photos are still queued. They are listed below and will keep retrying.');
+    }
+  };
   const previewPhotoMove = useCallback((draggedId, targetId) => {
     setIntakePhotos((current) => {
       const dragged = current.find((p) => p.id === draggedId);
@@ -1238,6 +1302,30 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                   ⚠ This browser can’t save photos for retry (private mode or blocked storage). Keep the app open until every photo finishes sending.
                 </div>
               )}
+              {photoReconciliation && !photoReconciliation.complete && (
+                <div role="alert" style={{ marginTop: 8, padding: '9px 10px', borderRadius: 8, background: '#fdf3e0', border: '1px solid var(--amber)', fontSize: 11, color: '#6f4d09' }}>
+                  <div style={{ fontWeight: 800 }}>
+                    {photoReconciliation.connectionError
+                      ? 'COULD NOT CONFIRM PHOTOS WITH THE SERVER'
+                      : 'PHOTOS STILL SENDING OR MISSING'}
+                  </div>
+                  <div style={{ marginTop: 3, lineHeight: 1.4 }}>
+                    Completion is blocked until every captured photo appears in the server gallery.
+                  </div>
+                  {photoReconciliation.unresolved.length > 0 && (
+                    <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                      {photoReconciliation.unresolved.map((photo) => (
+                        <li key={photo.id}>
+                          {photo.label || photoQueueLabel(photo)} · {photo.pending ? 'queued for retry' : 'not found on server'}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button className="btn btn-outline-brown" style={{ height: 40, marginTop: 8 }} onClick={() => { void reconcileCurrentPhotos(); }}>
+                    RETRY &amp; CHECK SERVER
+                  </button>
+                </div>
+              )}
               {photoLoadError && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '7px 10px', borderRadius: 8, background: '#fdecea', border: '1px solid var(--red)', fontSize: 11, fontWeight: 700, color: 'var(--red)' }}>
                   <span style={{ flex: 1 }}>Photos didn’t load — check your connection.</span>
@@ -1468,7 +1556,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
         </PinDialog>
       )}
       {walkOpen && (
-        <WalkAroundCamera quoteId={walkQuoteId || intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={() => { setWalkOpen(false); setWalkQuoteId(null); setWalkMode('guided'); }} showToast={showToast} />
+        <WalkAroundCamera quoteId={walkQuoteId || intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={closeWalkCamera} showToast={showToast} />
       )}
       {lightbox && (
         <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
@@ -1581,6 +1669,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                 if (!window.confirm('Delete this photo? This can’t be undone.')) return;
                 try {
                   await api.deleteQuotePhoto({ id: lightbox.id });
+                  await forgetCapturedPhoto(lightbox.id);
                   setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));
                   setLightbox(null);
                   showToast?.('Photo deleted');
@@ -1593,6 +1682,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                     showToast?.('This quote has been signed off — its photos are locked.');
                   } else if (err?.status === 404) {
                     // Already gone on the server — reflect it locally.
+                    await forgetCapturedPhoto(lightbox.id);
                     setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));
                     setLightbox(null);
                     showToast?.('Photo deleted');
@@ -1600,6 +1690,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
                     // Transient (offline / 5xx / signed out): make the delete
                     // durable — it retries via the queue flush — and reflect
                     // the inspector's intent locally right away.
+                    sessionCapturedRef.current.delete(lightbox.id);
                     await queueServerDelete(lightbox.id);
                     attemptServerDelete(lightbox.id);
                     setIntakePhotos((prev) => prev.filter((p) => p.id !== lightbox.id));

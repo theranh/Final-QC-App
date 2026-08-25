@@ -28,6 +28,7 @@ const H = vi.hoisted(() => {
   const inspectionRows: any[] = [];
   const quoteRows: any[] = [];
   const photoRows: any[] = [];
+  const intakeRelinksOnLock = new Map<string, string | null>();
   const deletedQuoteRows: string[] = [];
   const sqlTrace: string[] = [];
   const audits: any[] = [];
@@ -153,6 +154,14 @@ const H = vi.hoisted(() => {
           }],
         };
       }
+      if (/SELECT id, ts/i.test(text) && /quote_id/i.test(text) && /id IN/i.test(text)) {
+        const [quoteId, ...ids] = params;
+        return {
+          rows: photoRows
+            .filter((photo) => photo.quoteId === quoteId && ids.includes(photo.id))
+            .map((photo) => ({ id: photo.id, ts: photo.ts })),
+        };
+      }
       if (/UPDATE intakes/i.test(text) && /quote_id IS NULL/i.test(text)) {
         const quoteId = params[0];
         const intakeId = params[1];
@@ -217,6 +226,14 @@ const H = vi.hoisted(() => {
         };
       }
       if (/for update/i.test(text)) {
+        if (intakeRelinksOnLock.has(params[0])) {
+          const changing = intakeRows.find((r) => r.id === params[0]);
+          if (changing) {
+            changing.quoteId = intakeRelinksOnLock.get(params[0]);
+            changing.quote_id = intakeRelinksOnLock.get(params[0]);
+          }
+          intakeRelinksOnLock.delete(params[0]);
+        }
         const intake = intakeRows.find((r) => r.id === params[0]);
         if (intake) {
           return {
@@ -319,10 +336,10 @@ const H = vi.hoisted(() => {
       },
     }),
   };
-  return { emps, intakeRows, inspectionRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows, fakeDb };
+  return { emps, intakeRows, inspectionRows, quoteRows, photoRows, intakeRelinksOnLock, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows, fakeDb };
 });
 
-const { emps, intakeRows, inspectionRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows } = H;
+const { emps, intakeRows, inspectionRows, quoteRows, photoRows, intakeRelinksOnLock, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows } = H;
 
 describe("PIN hashing", () => {
   it("round-trips a correct PIN and rejects a wrong one", async () => {
@@ -435,6 +452,110 @@ describe("commit endpoints", () => {
     expect(saved.committedBy).toBe("Worker");
     expect(saved.completedAt).toBeInstanceOf(Date);
     expect(r.body.completedAt).toBe(saved.completedAt.getTime());
+  });
+
+  it("refuses intake completion when a locally captured photo is absent from the locked server manifest", async () => {
+    intakeRows.push({
+      id: "in-photo-missing",
+      vin: "1FTFW1E81NKD72361",
+      stock: "S-MISSING",
+      quoteId: "q-photo-missing",
+      data: {},
+      committedBy: null,
+      overriddenBy: null,
+    });
+    quoteRows.push({ id: "q-photo-missing", data: {}, committedBy: null, overriddenBy: null });
+
+    const r = await post("/api/quoter/commit-intake", {
+      id: "in-photo-missing",
+      signerId: 1,
+      pin: "1111",
+      photoManifest: [{ id: "q-photo-missing_ext_front", captureTs: 1_800_000_000_001 }],
+    });
+
+    expect(r.status).toBe(409);
+    expect(r.body.missingPhotoIds).toEqual(["q-photo-missing_ext_front"]);
+    expect(intakeRows.find((x) => x.id === "in-photo-missing").committedBy).toBeNull();
+  });
+
+  it("requires the photo-confirmation protocol for every linked intake", async () => {
+    intakeRows.push({
+      id: "in-photo-protocol",
+      vin: "1FTFW1E81NKD72363",
+      stock: "S-PROTOCOL",
+      quoteId: "q-photo-protocol",
+      data: {},
+      committedBy: null,
+      overriddenBy: null,
+    });
+    quoteRows.push({ id: "q-photo-protocol", data: {}, committedBy: null, overriddenBy: null });
+
+    const r = await post("/api/quoter/commit-intake", {
+      id: "in-photo-protocol",
+      signerId: 1,
+      pin: "1111",
+    });
+
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/photo confirmation is required/i);
+    expect(intakeRows.find((x) => x.id === "in-photo-protocol").committedBy).toBeNull();
+  });
+
+  it("aborts when gallery ownership changes before the intake row is locked", async () => {
+    intakeRows.push({
+      id: "in-photo-relinked",
+      vin: "1FTFW1E81NKD72364",
+      stock: "S-RELINKED",
+      quoteId: "q-photo-old",
+      data: {},
+      committedBy: null,
+      overriddenBy: null,
+    });
+    quoteRows.push(
+      { id: "q-photo-old", data: {}, committedBy: null, overriddenBy: null },
+      { id: "q-photo-new", data: {}, committedBy: null, overriddenBy: null },
+    );
+    intakeRelinksOnLock.set("in-photo-relinked", "q-photo-new");
+
+    const r = await post("/api/quoter/commit-intake", {
+      id: "in-photo-relinked",
+      signerId: 1,
+      pin: "1111",
+      photoManifest: [],
+    });
+
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/gallery ownership changed/i);
+    expect(intakeRows.find((x) => x.id === "in-photo-relinked").committedBy).toBeNull();
+  });
+
+  it("commits when every local capture receipt exists at the same or newer server timestamp", async () => {
+    intakeRows.push({
+      id: "in-photo-complete",
+      vin: "1FTFW1E81NKD72362",
+      stock: "S-COMPLETE",
+      quoteId: "q-photo-complete",
+      data: {},
+      committedBy: null,
+      overriddenBy: null,
+    });
+    quoteRows.push({ id: "q-photo-complete", data: {}, committedBy: null, overriddenBy: null });
+    photoRows.push({
+      id: "q-photo-complete_ext_front",
+      quoteId: "q-photo-complete",
+      role: "walk",
+      ts: 1_800_000_000_002,
+    });
+
+    const r = await post("/api/quoter/commit-intake", {
+      id: "in-photo-complete",
+      signerId: 1,
+      pin: "1111",
+      photoManifest: [{ id: "q-photo-complete_ext_front", captureTs: 1_800_000_000_001 }],
+    });
+
+    expect(r.status).toBe(200);
+    expect(intakeRows.find((x) => x.id === "in-photo-complete").committedBy).toBe("Worker");
   });
 
   it("refuses to re-commit an already committed intake (409, immutable)", async () => {
@@ -1017,7 +1138,12 @@ describe("commit snapshots (Phase 1A)", () => {
       overriddenBy: null,
     });
     intakeRows.push({ id: "insnap", vin: "LINKVIN", stock: "S9", quoteId: "qlinked", data: {}, committedBy: null, overriddenBy: null });
-    const r = await post("/api/quoter/commit-intake", { id: "insnap", signerId: 1, pin: "1111" });
+    const r = await post("/api/quoter/commit-intake", {
+      id: "insnap",
+      signerId: 1,
+      pin: "1111",
+      photoManifest: [],
+    });
     expect(r.status).toBe(200);
     const snap = snapRows.find((s) => s.quoteId === "qlinked");
     expect(snap).toBeTruthy();
