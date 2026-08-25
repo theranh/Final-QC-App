@@ -70,3 +70,6 @@ GOOGLE_SHEETS_SPREADSHEET_ID = "1_rosqSejIr6vT-LaupD20X24xDa-NpfSbGdX4DwfhMM"
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 180000
+
+[objectStorage]
+defaultBucketID = "replit-objstore-4479ab78-2517-472c-a9b6-5e8c773c7ca0"
