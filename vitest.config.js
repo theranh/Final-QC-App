@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@shared': path.resolve(import.meta.dirname, 'shared'),
+      'virtual:pwa-register': path.resolve(import.meta.dirname, 'src/test/pwaRegisterMock.js'),
     },
   },
   test: {

@@ -83,7 +83,17 @@ function SwipeDeleteRow({ children, onDelete, label }) {
   };
 
   return (
-    <div style={{ position: 'relative', overflow: 'hidden', borderRadius: 10 }}>
+    <div
+      data-testid="swipe-vehicle-shell"
+      style={{
+        position: 'relative',
+        overflow: 'hidden',
+        borderRadius: 10,
+        width: '100%',
+        minWidth: 0,
+        flex: '0 0 auto',
+      }}
+    >
       <button
         type="button"
         aria-label={`Delete ${label}`}
@@ -316,8 +326,14 @@ export default function VehiclesScreen({ dash, records = [], filter, onFilter, q
                 <button
                   type="button"
                   onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
-                  style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit' }}
+                  style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit', display: 'flex', gap: 11, alignItems: 'center' }}
                 >
+                  {v.cover ? (
+                    <img data-testid="completed-vehicle-cover" src={v.cover} alt="" style={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', flex: '0 0 auto', border: '1px solid var(--border)' }} />
+                  ) : (
+                    <div data-testid="completed-vehicle-cover-placeholder" style={{ width: 46, height: 46, borderRadius: 8, flex: '0 0 auto', background: 'var(--panel)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted2)', fontSize: 18 }}>🚚</div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                   <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {v.stock || 'NO STOCK #'} · {v.vehicle || 'Vehicle not recorded'}
@@ -339,6 +355,7 @@ export default function VehiclesScreen({ dash, records = [], filter, onFilter, q
                 <div style={{ display: 'flex', gap: 10, marginTop: 4, fontSize: 9.5, color: 'var(--muted)' }}>
                   <span>{v.itemCount || 0} QC issue{v.itemCount === 1 ? '' : 's'}</span>
                   <span>{v.intake ? 'Tap for intake details + walk-around photos' : 'Digital intake unavailable · tap for full QC record'}</span>
+                  </div>
                   </div>
                 </button>
               </SwipeDeleteRow>

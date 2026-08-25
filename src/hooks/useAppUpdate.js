@@ -4,12 +4,9 @@ import { registerSW } from 'virtual:pwa-register';
 // How often an open app checks the server for a newer published version.
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
-// The service worker is registered with `autoUpdate`: a newly published
-// version installs and activates by itself, so every fresh page load gets
-// the latest app with no banner tap required. For pages that are already
-// open when the new version activates, we reload automatically — unless a
-// form/dialog is mid-edit, in which case we fall back to showing the
-// refresh banner so no in-progress work is interrupted.
+// Updates wait behind the existing refresh banner. This is intentionally
+// independent of what screen has focus: even an apparently idle screen can
+// belong to a signed-in session with in-memory work elsewhere in the app.
 export default function useAppUpdate() {
   const [updateReady, setUpdateReady] = useState(false);
   const updateFnRef = useRef(null);
@@ -19,7 +16,6 @@ export default function useAppUpdate() {
     const updateSW = registerSW({
       immediate: true,
       onNeedRefresh() {
-        // autoUpdate normally handles this itself; kept as a fallback.
         setUpdateReady(true);
       },
       onRegisteredSW(swUrl, registration) {
@@ -34,10 +30,10 @@ export default function useAppUpdate() {
     });
     updateFnRef.current = updateSW;
 
-    // When the new service worker takes control of an already-open page,
-    // reload so the visible app matches the newest published version —
-    // but never yank the page out from under active typing or an open
-    // camera/dialog; show the banner instead in that case.
+    // Normally prompt-mode workers only take control after applyUpdate. Keep
+    // this listener for workers activated by another tab or an older
+    // auto-update registration. An existing signed-in page must never reload
+    // without its user choosing the refresh action.
     let hadController = Boolean(navigator.serviceWorker?.controller);
     const onControllerChange = () => {
       if (!hadController) {
@@ -45,15 +41,7 @@ export default function useAppUpdate() {
         hadController = true;
         return;
       }
-      const busy =
-        document.activeElement &&
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-      const dialogOpen = document.querySelector('dialog[open], [data-modal-open="true"], video');
-      if (busy || dialogOpen) {
-        setUpdateReady(true);
-      } else {
-        window.location.reload();
-      }
+      setUpdateReady(true);
     };
     navigator.serviceWorker?.addEventListener?.('controllerchange', onControllerChange);
 

@@ -23,3 +23,5 @@
 - [Production binary repairs](production-binary-repairs.md) — fully decode and format-check replacement bytes; exact version guards, audit, and recoverable originals are mandatory.
 - [Vehicle retirement](vehicle-retirement.md) — Vehicles “Delete” is admin-PIN retirement by exact ID; preserve history/galleries and hide retired rows from operational surfaces.
 - [Intake photo ordering](intake-photo-ordering.md) — gallery order is audited presentation metadata, editable after commit under the same quote lock as photo mutations.
+- [Vehicle thumbnails](vehicle-thumbnails.md) — Vehicles covers use the earliest surviving exact-gallery capture; display order and VIN fallbacks never choose the image.
+- [PWA updates](pwa-updates.md) — active sessions receive an update prompt and are never silently reloaded by a newly published service worker.

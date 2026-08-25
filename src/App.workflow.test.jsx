@@ -19,7 +19,8 @@ const H = vi.hoisted(() => {
     managerAnalytics: vi.fn(),
     backupStatus: vi.fn(),
   };
-  return { api, record };
+  const authRefresh = vi.fn();
+  return { api, record, authRefresh };
 });
 
 vi.mock('./lib/api', () => ({ api: H.api }));
@@ -27,7 +28,7 @@ vi.mock('./hooks/useAuth', () => ({
   useAuth: () => ({
     status: 'active',
     employee: { name: 'Alex Smith', title: 'Inspector', email: 'alex@truckranch.com', isAdmin: false },
-    refresh: vi.fn(),
+    refresh: H.authRefresh,
   }),
 }));
 vi.mock('./hooks/useAppUpdate', () => ({ default: () => ({ updateReady: false, applyUpdate: vi.fn() }) }));
@@ -45,8 +46,12 @@ vi.mock('./components/BottomNav', () => ({
   ),
 }));
 vi.mock('./components/DashScreen', () => ({
-  default: ({ onOpenVehicle }) => (
+  default: ({ dash, loadState, loadError, onRetry, onOpenVehicle }) => (
     <div data-testid="dash-screen">
+      <span>dash-state:{loadState}</span>
+      <span>dash-data:{dash ? dash.vehicles.length : 'none'}</span>
+      {loadError && <span>dash-error:{loadError}</span>}
+      <button onClick={onRetry}>retry-dashboard</button>
       <button onClick={() => onOpenVehicle(H.record.vin, H.record.id)}>open-dashboard-vehicle</button>
     </div>
   ),
@@ -90,7 +95,7 @@ vi.mock('./components/AuthScreens', () => ({
   LoadingScreen: () => <div>loading</div>,
   LoginScreen: () => <div>login</div>,
   AccessScreen: () => <div>access</div>,
-  ErrorScreen: () => <div>error</div>,
+  ErrorScreen: ({ onRetry, detail }) => <div>error:{detail}<button onClick={onRetry}>retry-bootstrap</button></div>,
 }));
 vi.mock('./components/UpdateBanner', () => ({ default: () => null }));
 vi.mock('./components/PhotoQueueIndicator', () => ({ default: () => null }));
@@ -121,7 +126,10 @@ beforeEach(() => {
   H.api.bootstrap.mockResolvedValue({ inspections: [H.record], nextQc: 1002 });
   H.api.dashboard.mockResolvedValue(dashboard);
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('App navigation state', () => {
   it('does not reopen a stale quote intent after leaving Intake', async () => {
@@ -146,6 +154,65 @@ describe('App navigation state', () => {
 
     expect(await screen.findByTestId('vehicles-screen')).toBeInTheDocument();
     expect(screen.queryByTestId('vehicle-card')).not.toBeInTheDocument();
+  });
+});
+
+describe('startup and dashboard recovery', () => {
+  it('uses bounded backoff while bootstrap catches a publish/resume race', async () => {
+    vi.useFakeTimers();
+    H.api.bootstrap
+      .mockRejectedValueOnce(new Error('starting'))
+      .mockRejectedValueOnce(new Error('still starting'))
+      .mockResolvedValue({ inspections: [H.record], nextQc: 1002 });
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+    expect(H.api.bootstrap).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('dash-screen')).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('resets the startup error screen when the user retries', async () => {
+    vi.useFakeTimers();
+    H.api.bootstrap.mockRejectedValue(new Error('offline'));
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    expect(screen.getByText(/error:offline/)).toBeInTheDocument();
+
+    H.api.bootstrap.mockResolvedValue({ inspections: [H.record], nextQc: 1002 });
+    fireEvent.click(screen.getByText('retry-bootstrap'));
+    expect(screen.getByText('loading')).toBeInTheDocument();
+    await act(async () => {});
+    expect(screen.getByTestId('dash-screen')).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('hands a bootstrap 401 directly back to auth without retrying', async () => {
+    H.api.bootstrap.mockRejectedValue(Object.assign(new Error('signed out'), { status: 401 }));
+    render(<App />);
+    await waitFor(() => expect(H.authRefresh).toHaveBeenCalledTimes(1));
+    expect(H.api.bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports dashboard failure without discarding its last good payload', async () => {
+    vi.useFakeTimers();
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('dash-data:1')).toBeInTheDocument();
+
+    H.api.dashboard.mockRejectedValue(new Error('dashboard offline'));
+    fireEvent.click(screen.getByText('retry-dashboard'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5250); });
+
+    expect(H.api.dashboard).toHaveBeenCalledTimes(5);
+    expect(screen.getByText('dash-data:1')).toBeInTheDocument();
+    expect(screen.getByText('dash-state:error')).toBeInTheDocument();
+    expect(screen.getByText('dash-error:dashboard offline')).toBeInTheDocument();
+    vi.useRealTimers();
   });
 });
 

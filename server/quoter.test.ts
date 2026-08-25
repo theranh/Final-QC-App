@@ -308,14 +308,52 @@ const H = vi.hoisted(() => {
       if (/INSERT INTO intakes/i.test(text)) {
         intakeUpsertSql.push(text);
         const id = params[0];
+        const dataIndex = params.findIndex((value: any) => {
+          if (typeof value !== "string" || !value.startsWith("{")) return false;
+          try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === "object" && parsed.steps && parsed.roReady;
+          } catch {
+            return false;
+          }
+        });
+        const incomingData = dataIndex >= 0 ? JSON.parse(params[dataIndex]) : {};
+        const incomingQuoteId = dataIndex >= 7 ? params[6] : null;
         const existing = intakeRows.find((r) => r.id === id);
         if (existing) {
-          // The route already 409s committed intakes before calling execute,
-          // so here we only model the last-write-wins upsert of open rows.
-          if (!existing.committedBy) Object.assign(existing, { id });
+          // Mirror the broad autosave fields closely enough to prove that its
+          // narrow, server-owned photoOrder survives the replacement document.
+          if (!existing.committedBy) {
+            Object.assign(existing, {
+              id,
+              vin: params[1],
+              stock: params[2],
+              vehicle: params[3],
+              miles: params[4],
+              estimator: params[5],
+              quote_id: existing.quote_id || incomingQuoteId,
+              data: {
+                ...incomingData,
+                photoOrder: Array.isArray(existing.data?.photoOrder)
+                  ? existing.data.photoOrder
+                  : [],
+              },
+            });
+          }
           return { rows: [] };
         }
-        intakeRows.push({ id, committedBy: null, overriddenBy: null });
+        intakeRows.push({
+          id,
+          vin: params[1],
+          stock: params[2],
+          vehicle: params[3],
+          miles: params[4],
+          estimator: params[5],
+          quote_id: incomingQuoteId,
+          data: incomingData,
+          committedBy: null,
+          overriddenBy: null,
+        });
         return { rows: [] };
       }
       return { rows: [] };
@@ -674,6 +712,28 @@ describe("photo mutations blocked once owning quote committed", () => {
     expect(intakeRows[0].data).toEqual({});
   });
 
+  it("requires every submitted photo id to belong to the intake's exact quote, even for the same VIN", async () => {
+    intakeRows.push(
+      { id: "in-exact-owner", vin: "SAMEVIN", quote_id: "q-exact-owner", data: { photoOrder: ["mine-a", "mine-b"] }, committedBy: null },
+      { id: "in-same-vin-other", vin: "SAMEVIN", quote_id: "q-same-vin-other", data: {}, committedBy: null },
+    );
+    photoRows.push(
+      { id: "mine-a", quoteId: "q-exact-owner", ts: 1 },
+      { id: "mine-b", quoteId: "q-exact-owner", ts: 2 },
+      { id: "same-vin-but-theirs", quoteId: "q-same-vin-other", ts: 3 },
+    );
+
+    const saved = await req("PUT", "/api/quoter/intakes/in-exact-owner/photo-order", {
+      photoIds: ["same-vin-but-theirs", "mine-b", "mine-a"],
+    });
+
+    expect(saved.status).toBe(409);
+    expect(saved.body.error).toMatch(/another quote/i);
+    expect(intakeRows.find((row) => row.id === "in-exact-owner")?.data.photoOrder)
+      .toEqual(["mine-a", "mine-b"]);
+    expect(auditRows).toEqual([]);
+  });
+
   it("warns about an older intake-owned gallery without returning those photos", async () => {
     intakeRows.push(
       {
@@ -852,13 +912,40 @@ describe("intake created_at (arrival timestamp) immutability", () => {
 
   it("preserves server-owned photoOrder during a broad intake autosave", async () => {
     H.intakeUpsertSql.length = 0;
+    intakeRows.push({
+      id: "ordered-autosave",
+      vin: "1FTFW1E55MFA00003",
+      stock: "BEFORE",
+      quote_id: "q-canonical",
+      data: {
+        notes: "before",
+        photoOrder: ["photo-b", "photo-a"],
+        roReady: Array(9).fill(true),
+      },
+      committedBy: null,
+    });
     const r = await req("PUT", "/api/quoter/intakes", {
       id: "ordered-autosave",
       vin: "1FTFW1E55MFA00003",
-      data: { notes: "ordinary edit" },
+      stock: "AFTER",
+      quoteId: null,
+      data: {
+        notes: "ordinary edit",
+        photoOrder: [],
+        roReady: Array(9).fill(false),
+      },
       ts: Date.now(),
     });
     expect(r.status).toBe(200);
+    expect(intakeRows.find((row) => row.id === "ordered-autosave")).toMatchObject({
+      stock: "AFTER",
+      quote_id: "q-canonical",
+      data: {
+        notes: "ordinary edit",
+        photoOrder: ["photo-b", "photo-a"],
+        roReady: Array(9).fill(false),
+      },
+    });
     const updateClause = H.intakeUpsertSql[0].split(/DO UPDATE SET/i)[1] ?? "";
     expect(updateClause).toMatch(/COALESCE\s*\(\s*intakes\.data\s*->\s*'photoOrder'\s*,\s*'\[\]'/i);
   });

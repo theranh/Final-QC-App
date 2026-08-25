@@ -13,7 +13,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Keep an already-open inspection on the code it started with. A new
+      // worker waits until the signed-in user accepts the in-app refresh
+      // banner; fresh visits still receive the latest active worker.
+      registerType: 'prompt',
       includeAssets: ['favicon.svg', 'icons/*.png'],
       manifest: {
         name: 'Truck Ranch — Intake & QC',

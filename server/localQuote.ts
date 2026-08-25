@@ -232,13 +232,12 @@ export async function fetchCompletedIntakes(): Promise<CompletedIntake[]> {
     .filter((row) => row.vin.length >= 6);
 }
 
-// ---------- quote covers for the In-Take Quotes bucket ----------
+// ---------- exact-gallery covers for Vehicles cards ----------
 
 export type QuoteCover = { cover: string | null; hrs: number | null; usd: number | null; lineCount: number };
 
-/** For each quote id, use Front · driver corner as the vehicle-list cover.
- *  The remaining guided angles are fallback-only when that shot is missing.
- *  Damage close-ups and extras never qualify. One metadata-only query. */
+/** Legacy quote-list cover selection. The Quoter landing page prefers its
+ * guided walk-around angles; Vehicles dashboard cards do not use this helper. */
 export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, { id: string; rank: number }>> {
   const bestWalk = new Map<string, { id: string; rank: number }>();
   const unique = [...new Set(quoteIds.filter(Boolean))];
@@ -257,54 +256,64 @@ export async function bestWalkPhotoIds(quoteIds: string[]): Promise<Map<string, 
   return bestWalk;
 }
 
-/** Latest quote per VIN → its preferred front-driver-corner intake thumbnail
- *  plus hrs/usd/lineCount. Stored quote/damage covers are fallback-only. Used
- *  to enrich the awaiting-QC cards. Read-only. */
-export async function fetchQuoteCovers(entries: Array<{ vin: string; quoteId?: string | null }>): Promise<Map<string, QuoteCover>> {
-  const out = new Map<string, QuoteCover>();
-  // Intake-linked quote ids: the photos live under the intake's own quote id,
-  // which may have no quotes row at all (photos-only truck). Those ids must
-  // be part of the walk-photo lookup or such trucks get no cover thumbnail.
-  const intakeQuoteByVin = new Map<string, string>();
-  for (const e of entries) {
-    const vin = String(e.vin || "").trim().toUpperCase();
-    if (vin.length >= 6 && e.quoteId) intakeQuoteByVin.set(vin, String(e.quoteId));
-  }
-  const unique = [...new Set(entries.map((e) => String(e.vin || "").trim().toUpperCase()).filter((v) => v.length >= 6))];
-  if (!unique.length) return out;
-  const res = await db.execute(sql`
-    SELECT DISTINCT ON (UPPER(data->>'vin')) UPPER(data->>'vin') AS vin, id, data
-    FROM quotes
-    WHERE UPPER(data->>'vin') = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
-    ORDER BY UPPER(data->>'vin'), (data->>'ts')::bigint DESC
+/** The canonical Vehicles thumbnail is the first surviving database photo for
+ * the exact gallery: lowest photos.ts, then photos.id. Slot, role, and intake
+ * photoOrder intentionally have no effect. */
+export async function firstGalleryPhotoIds(quoteIds: string[]): Promise<Map<string, string>> {
+  const first = new Map<string, string>();
+  const unique = [...new Set(quoteIds.filter(Boolean))];
+  if (!unique.length) return first;
+  const result = await db.execute(sql`
+    SELECT id, quote_id, ts FROM photos
+    WHERE quote_id = ANY(${sql.raw(`ARRAY[${unique.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+    ORDER BY quote_id, ts ASC, id ASC
   `);
-  const rows = rowsOf(res);
-  // Use the DB row id (authoritative), not data->>'id' which can be absent.
-  // Include the intake-linked quote ids too — a truck's photos can sit under
-  // a quote id that never got a quotes row (walk-around done, no quote yet).
-  const quoteRowIds = rows.map((r) => String(r.id || "")).filter(Boolean);
-  const bestWalk = await bestWalkPhotoIds([...quoteRowIds, ...intakeQuoteByVin.values()]);
-  const rowByVin = new Map(rows.map((r) => [String(r.vin), r]));
-  for (const vin of unique) {
-    const r = rowByVin.get(vin) ?? { id: "", data: {} };
-    const q = (r.data as any) || {};
+  const rows = rowsOf(result).slice().sort((a, b) => {
+    const quoteCmp = String(a.quote_id).localeCompare(String(b.quote_id));
+    if (quoteCmp) return quoteCmp;
+    const tsA = Number(a.ts);
+    const tsB = Number(b.ts);
+    if (tsA !== tsB) return tsA - tsB;
+    const idA = String(a.id);
+    const idB = String(b.id);
+    return idA < idB ? -1 : idA > idB ? 1 : 0;
+  });
+  for (const photo of rows) {
+    const quoteId = String(photo.quote_id);
+    if (!first.has(quoteId)) first.set(quoteId, String(photo.id));
+  }
+  return first;
+}
+
+/** Exact intake/quote entries → canonical first-photo thumbnail and exact quote
+ * metrics. Results are keyed by intake id, never VIN. A missing gallery photo
+ * stays null: quote cover blobs and damage-line thumbs can belong to a different
+ * capture/order and are therefore not valid fallbacks for Vehicles. */
+export async function fetchQuoteCovers(entries: Array<{ intakeId: string; quoteId?: string | null }>): Promise<Map<string, QuoteCover>> {
+  const out = new Map<string, QuoteCover>();
+  const exact = new Map<string, string | null>();
+  for (const e of entries) {
+    const intakeId = String(e.intakeId || "").trim();
+    if (intakeId) exact.set(intakeId, e.quoteId ? String(e.quoteId) : null);
+  }
+  if (!exact.size) return out;
+  const quoteIds = [...new Set([...exact.values()].filter((id): id is string => !!id))];
+  const [quoteResult, firstPhotos] = await Promise.all([
+    quoteIds.length
+      ? db.execute(sql`
+          SELECT id, data FROM quotes
+          WHERE id = ANY(${sql.raw(`ARRAY[${quoteIds.map((v) => `'${v.replace(/'/g, "''")}'`).join(",")}]::text[]`)})
+        `)
+      : Promise.resolve({ rows: [] }),
+    firstGalleryPhotoIds(quoteIds),
+  ]);
+  const quoteById = new Map(rowsOf(quoteResult).map((row) => [String(row.id), (row.data as any) || {}]));
+  for (const [intakeId, quoteId] of exact) {
+    const q = quoteId ? quoteById.get(quoteId) || {} : {};
     const lineCount = Array.isArray(q.lines) ? q.lines.filter((l: any) => l && l.cls).length : 0;
-    const intakeQid = intakeQuoteByVin.get(vin);
-    // Prefer the intake's own quote id (that's where the walk-around photos
-    // were uploaded), then the latest quote row for the VIN.
-    const walkId = (intakeQid ? bestWalk.get(intakeQid)?.id : undefined)
-      ?? bestWalk.get(String(r.id || ""))?.id;
-    // Prefer the earliest walk-around shot; only a truck with NO walk photos
-    // at all falls back to the stored cover / first damage-line thumb.
-    const cover = walkId
-      ? `/api/quoter/photo?id=${encodeURIComponent(walkId)}`
-      : typeof q.cover === "string" && q.cover
-        ? q.cover
-        : Array.isArray(q.lines)
-        ? (q.lines.find((l: any) => l && typeof l.thumb === "string" && l.thumb)?.thumb ?? null)
-        : null;
-    out.set(vin, {
-      cover: cover || null,
+    const photoId = quoteId ? firstPhotos.get(quoteId) : undefined;
+    out.set(intakeId, {
+      cover: photoId ? `/api/quoter/photo?id=${encodeURIComponent(photoId)}` : null,
       hrs: q.totals?.hrs ?? null,
       usd: q.totals?.usd ?? null,
       lineCount,

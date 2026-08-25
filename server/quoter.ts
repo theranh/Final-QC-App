@@ -214,9 +214,9 @@ export function registerQuoterRoutes(app: Express) {
       ]);
       const settingsMap: Record<string, unknown> = {};
       for (const r of st.rows as any[]) settingsMap[r.key] = r.value;
-      // Card thumbnails: the earliest walk-around shot wins (front driver
-      // corner, else next in line); the stored damage-thumb cover is only a
-      // fallback for trucks with no walk photos at all.
+      // Legacy Quoter landing-card thumbnails prefer guided walk-around angles
+      // (front driver corner, then the next configured angle). Vehicles-tab
+      // cards use their separate chronological exact-gallery lookup.
       const walkCovers = await bestWalkPhotoIds((qs.rows as any[]).map((r) => String(r.id)));
       res.set("Cache-Control", "no-store");
       res.json({

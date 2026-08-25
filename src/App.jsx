@@ -36,6 +36,10 @@ import { LoadingScreen, LoginScreen, AccessScreen, ErrorScreen } from './compone
 import UpdateBanner from './components/UpdateBanner';
 import PhotoQueueIndicator from './components/PhotoQueueIndicator';
 
+const BOOTSTRAP_RETRY_DELAYS_MS = [1000, 2000, 4000];
+const DASHBOARD_RETRY_DELAYS_MS = [750, 1500, 3000];
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export default function App() {
   const auth = useAuth();
 
@@ -94,6 +98,8 @@ function AuthedApp({ me, onAuthRefresh }) {
   // Server-composed dashboard payload (QC + Body Quoter + tracker sheet).
   // All KPIs are computed server-side; screens only render this.
   const [dash, setDash] = useState(null);
+  const [dashState, setDashState] = useState('loading'); // loading | ready | error
+  const [dashError, setDashError] = useState(null);
   const [vehFilter, setVehFilter] = useState('awaitingFinalQc');
   const [vehQ, setVehQ] = useState('');
   const [vehSel, setVehSel] = useState(null); // { vin, qcNumber }
@@ -138,13 +144,10 @@ function AuthedApp({ me, onAuthRefresh }) {
     const gen = ++loadGenRef.current;
     const live = () => gen === loadGenRef.current;
     setLoadState('loading');
-    // Server runs on an always-on Reserved VM — no cold start to wait out.
-    // One quick retry absorbs a momentary network blip; a second failure is
-    // a real outage and surfaces the error screen right away. 401 means the
-    // session expired — hand control back to the auth flow (sign-in screen).
-    const MAX_ATTEMPTS = 2;
-    const RETRY_DELAY_MS = 1000;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    setLoadError(null);
+    // A publish/resume can briefly make the app shell available before its API.
+    // Retry with bounded backoff, but keep 401 as an immediate auth handoff.
+    for (let attempt = 0; attempt <= BOOTSTRAP_RETRY_DELAYS_MS.length; attempt++) {
       try {
         const data = await api.bootstrap();
         if (!live()) return;
@@ -159,12 +162,12 @@ function AuthedApp({ me, onAuthRefresh }) {
           onAuthRefresh?.(); // session expired → back to sign-in, not "server unreachable"
           return;
         }
-        if (attempt === MAX_ATTEMPTS - 1) {
+        if (attempt === BOOTSTRAP_RETRY_DELAYS_MS.length) {
           setLoadError(err && err.message ? String(err.message) : 'Unknown error');
           setLoadState('error');
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        await wait(BOOTSTRAP_RETRY_DELAYS_MS[attempt]);
         if (!live()) return;
       }
     }
@@ -219,15 +222,32 @@ function AuthedApp({ me, onAuthRefresh }) {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     if (dashInFlightRef.current) return;
     dashInFlightRef.current = true;
+    setDashState((state) => (state === 'ready' ? state : 'loading'));
+    setDashError(null);
     try {
-      const d = await api.dashboard();
-      setDash(d);
-    } catch {
-      // Silent — the dashboard shows the last payload until the next tick.
+      for (let attempt = 0; attempt <= DASHBOARD_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          const d = await api.dashboard();
+          setDash(d);
+          setDashState('ready');
+          return;
+        } catch (err) {
+          if (err?.status === 401) {
+            onAuthRefresh?.();
+            return;
+          }
+          if (attempt === DASHBOARD_RETRY_DELAYS_MS.length) {
+            setDashError(err?.message || 'Dashboard data could not be loaded.');
+            setDashState('error');
+            return;
+          }
+          await wait(DASHBOARD_RETRY_DELAYS_MS[attempt]);
+        }
+      }
     } finally {
       dashInFlightRef.current = false;
     }
-  }, []);
+  }, [onAuthRefresh]);
   useEffect(() => {
     refreshDash();
     const id = setInterval(refreshDash, 60000);
@@ -854,6 +874,9 @@ function AuthedApp({ me, onAuthRefresh }) {
     content = (
       <DashScreen
         dash={dash}
+        loadState={dashState}
+        loadError={dashError}
+        onRetry={refreshDash}
         onOpenStatus={(k) => { setVehFilter(k); setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(null); setTab('vehicles'); }}
         onOpenVehicle={openVehicle}
       />
@@ -988,6 +1011,19 @@ function AuthedApp({ me, onAuthRefresh }) {
           </div>
         )}
         <Header tab={tab} workflow={workflow} onSettings={inFlow ? null : () => onNavChange('settings')} />
+        {!inFlow && tab === 'vehicles' && dashState === 'error' && (
+          <div
+            role="alert"
+            style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '8px 12px 0', padding: '9px 11px', borderRadius: 8, background: '#FFF4E5', border: '1px solid #F0C36D', color: 'var(--ink)', fontSize: 10.5 }}
+          >
+            <span style={{ flex: 1 }}>
+              Dashboard data could not be refreshed. {dash ? 'Showing the last update.' : 'Vehicle data is not available yet.'}
+            </span>
+            <button className="btn btn-outline" style={{ minHeight: 32, padding: '5px 10px', fontSize: 10 }} onClick={refreshDash}>
+              Try again
+            </button>
+          </div>
+        )}
         {content}
         {!inFlow && <BottomNav tab={tab} onChange={onNavChange} openRecheckCount={openRecs.length} />}
         <Toast message={toastMsg} />

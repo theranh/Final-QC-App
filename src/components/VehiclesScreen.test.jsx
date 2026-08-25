@@ -83,6 +83,7 @@ describe('VehiclesScreen completed vehicle navigation', () => {
       quote: { hrs: 3.5, usd: 525, lineCount: 2 },
       tracker: null,
       createdTs: 100,
+      cover: '/api/quoter/photo?id=completed-first-photo',
     };
 
     render(
@@ -107,6 +108,10 @@ describe('VehiclesScreen completed vehicle navigation', () => {
     expect(screen.getByText(/Inspector: Alex Smith/i)).toBeInTheDocument();
     expect(screen.getByText(/Estimator: Jamie Lee/i)).toBeInTheDocument();
     expect(screen.getByText(/3.5 hrs.*\$525.*2 lines/i)).toBeInTheDocument();
+    const cover = screen.getByTestId('completed-vehicle-cover');
+    expect(cover).toHaveAttribute('src', '/api/quoter/photo?id=completed-first-photo');
+    expect(cover.style.width).toBe('46px');
+    expect(cover.style.height).toBe('46px');
   });
 
   it('preserves tap navigation when no swipe occurs', () => {
@@ -133,6 +138,35 @@ describe('VehiclesScreen completed vehicle navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Awaiting truck' }));
     expect(onOpenIntake).toHaveBeenCalledWith(intake);
+  });
+
+  it('keeps every swipe shell full-width and non-shrinking in the mobile list', () => {
+    render(
+      <VehiclesScreen
+        dash={{
+          vehicles: [],
+          awaiting: [
+            { intakeId: 'in-1', vin: 'VIN00000000000001', stock: 'A-1', vehicle: 'First truck', completedAt: 20 },
+            { intakeId: 'in-2', vin: 'VIN00000000000002', stock: 'A-2', vehicle: 'Second truck', completedAt: 10 },
+          ],
+        }}
+        filter="awaitingFinalQc"
+        onFilter={() => {}}
+        q=""
+        onQ={() => {}}
+        onOpenIntake={() => {}}
+        onOpenRecord={() => {}}
+        onOpenQuote={() => {}}
+      />,
+    );
+
+    const shells = screen.getAllByTestId('swipe-vehicle-shell');
+    expect(shells).toHaveLength(2);
+    for (const shell of shells) {
+      expect(shell.style.width).toBe('100%');
+      expect(shell.style.minWidth).toBe('0px');
+      expect(shell.style.flex).toBe('0 0 auto');
+    }
   });
 
   it('swipes an awaiting row, requires the admin PIN dialog, and retires by exact intake id', async () => {

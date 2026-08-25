@@ -90,11 +90,23 @@ function PairedBars({ days }) {
   );
 }
 
-export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
+export default function DashScreen({ dash, loadState = 'loading', loadError, onRetry, onOpenStatus, onOpenVehicle }) {
   if (!dash) {
     return (
       <div className="screen">
-        <div className="screen-body"><div className="empty-note">Loading dashboard…</div></div>
+        <div className="screen-body">
+          {loadState === 'error' ? (
+            <div className="empty-note" role="alert">
+              <strong>Dashboard data could not be loaded.</strong>
+              {loadError || 'Check your connection and try again.'}
+              <button className="btn btn-outline" style={{ margin: '12px auto 0', minHeight: 38, padding: '7px 14px' }} onClick={onRetry}>
+                Try again
+              </button>
+            </div>
+          ) : (
+            <div className="empty-note">Loading dashboard…</div>
+          )}
+        </div>
       </div>
     );
   }
@@ -147,6 +159,14 @@ export default function DashScreen({ dash, onOpenStatus, onOpenVehicle }) {
         </div>
       </div>
       <div className="screen-body" style={{ gap: 9 }}>
+        {loadState === 'error' && (
+          <div className="empty-note" role="alert" style={{ padding: '10px 12px', fontStyle: 'normal' }}>
+            <strong>Dashboard refresh failed — showing the last update.</strong>
+            <button className="btn btn-outline" style={{ margin: '8px auto 0', minHeight: 34, padding: '5px 12px' }} onClick={onRetry}>
+              Try again
+            </button>
+          </div>
+        )}
         {/* 1 — KPI grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
           <Tile label="INSPECTIONS ON RECORD" value={kpi.inspections} accent="var(--brown)" sub="selected range" />

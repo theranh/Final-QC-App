@@ -25,6 +25,7 @@ type EmpRow = {
 const H = vi.hoisted(() => {
   const emps: EmpRow[] = [];
   const intakeRows: any[] = [];
+  const inspectionRows: any[] = [];
   const quoteRows: any[] = [];
   const photoRows: any[] = [];
   const deletedQuoteRows: string[] = [];
@@ -161,11 +162,39 @@ const H = vi.hoisted(() => {
         row.quote_id = quoteId;
         return { rows: [{ quote_id: quoteId }] };
       }
-      if (/UPDATE intakes/i.test(text) && /retired_at/i.test(text)) {
+      if (/UPDATE inspections/i.test(text) && /archived IS NOT TRUE/i.test(text)) {
+        const inspectionId = params[0];
+        const row = inspectionRows.find((inspection) => inspection.qcNumber === inspectionId);
+        if (!row || row.archived) return { rows: [] };
+        row.archived = true;
+        row.updatedAt = new Date();
+        return {
+          rows: [{
+            record_id: row.qcNumber,
+            vin: row.vin,
+            stock: row.stock,
+          }],
+        };
+      }
+      if (/FROM inspections/i.test(text) && /archived IS TRUE/i.test(text)) {
+        const inspectionId = params[0];
+        const row = inspectionRows.find(
+          (inspection) => inspection.qcNumber === inspectionId && inspection.archived,
+        );
+        return {
+          rows: row ? [{
+            record_id: row.qcNumber,
+            vin: row.vin,
+            stock: row.stock,
+          }] : [],
+        };
+      }
+      if (/UPDATE intakes/i.test(text) && /retired_at IS NULL/i.test(text)) {
         const intakeId = params[0];
         const row = intakeRows.find((intake) => intake.id === intakeId);
-        if (!row) return { rows: [] };
-        row.retiredAt = row.retiredAt || new Date();
+        if (!row || row.retiredAt) return { rows: [] };
+        row.retiredAt = new Date();
+        row.updatedAt = new Date();
         return {
           rows: [{
             record_id: row.id,
@@ -173,6 +202,18 @@ const H = vi.hoisted(() => {
             stock: row.stock,
             quote_id: row.quoteId || row.quote_id || null,
           }],
+        };
+      }
+      if (/FROM intakes/i.test(text) && /retired_at IS NOT NULL/i.test(text)) {
+        const intakeId = params[0];
+        const row = intakeRows.find((intake) => intake.id === intakeId && intake.retiredAt);
+        return {
+          rows: row ? [{
+            record_id: row.id,
+            vin: row.vin,
+            stock: row.stock,
+            quote_id: row.quoteId || row.quote_id || null,
+          }] : [],
         };
       }
       if (/for update/i.test(text)) {
@@ -278,10 +319,10 @@ const H = vi.hoisted(() => {
       },
     }),
   };
-  return { emps, intakeRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows, fakeDb };
+  return { emps, intakeRows, inspectionRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows, fakeDb };
 });
 
-const { emps, intakeRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows } = H;
+const { emps, intakeRows, inspectionRows, quoteRows, photoRows, deletedQuoteRows, sqlTrace, audits, snapRows, corrRows, settingsRows } = H;
 
 describe("PIN hashing", () => {
   it("round-trips a correct PIN and rejects a wrong one", async () => {
@@ -564,6 +605,117 @@ describe("commit endpoints", () => {
     });
     expect(r.status).toBe(403);
     expect(intakeRows.find((x) => x.id === "retire-denied").retiredAt).toBeUndefined();
+  });
+
+  it("returns 404 for an unknown exact vehicle id without writing an audit", async () => {
+    const beforeAudits = audits.length;
+    const r = await post("/api/vehicles/retire", {
+      kind: "intake",
+      recordId: "intake-id-that-does-not-exist",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(r.status).toBe(404);
+    expect(r.body.error).toMatch(/not found/i);
+    expect(audits).toHaveLength(beforeAudits);
+  });
+
+  it("keeps the original retirement timestamp when the same exact intake is retired again", async () => {
+    intakeRows.push({
+      id: "retire-repeat",
+      vin: "REPEATVIN1234567",
+      stock: "REPEAT",
+      quoteId: "repeat-gallery",
+      data: {},
+      committedBy: "Worker",
+    });
+
+    const beforeAudits = audits.length;
+    const first = await post("/api/vehicles/retire", {
+      kind: "intake",
+      recordId: "retire-repeat",
+      signerId: 2,
+      pin: "2222",
+    });
+    const firstRow = intakeRows.find((x) => x.id === "retire-repeat");
+    const firstRetiredAt = firstRow.retiredAt;
+    const firstUpdatedAt = firstRow.updatedAt;
+    const second = await post("/api/vehicles/retire", {
+      kind: "intake",
+      recordId: "retire-repeat",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.body.alreadyRetired).toBe(false);
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({
+      ok: true,
+      kind: "intake",
+      recordId: "retire-repeat",
+      alreadyRetired: true,
+    });
+    expect(intakeRows.find((x) => x.id === "retire-repeat").retiredAt).toBe(firstRetiredAt);
+    expect(intakeRows.find((x) => x.id === "retire-repeat").updatedAt).toBe(firstUpdatedAt);
+    expect(intakeRows.find((x) => x.id === "retire-repeat").quoteId).toBe("repeat-gallery");
+    expect(audits.slice(beforeAudits)).toEqual([
+      expect.objectContaining({
+        action: "vehicle_retired",
+        details: expect.objectContaining({
+          kind: "intake",
+          recordId: "retire-repeat",
+        }),
+      }),
+    ]);
+  });
+
+  it("retires only the exact same-VIN inspection once and does not re-audit a repeat", async () => {
+    inspectionRows.push(
+      { qcNumber: "QC-RETIRE-EXACT", vin: "INSPECTIONSHAREDVIN", stock: "RETIRE", archived: false },
+      { qcNumber: "QC-SAME-VIN-STAYS", vin: "INSPECTIONSHAREDVIN", stock: "KEEP", archived: false },
+    );
+    const beforeAudits = audits.length;
+
+    const first = await post("/api/vehicles/retire", {
+      kind: "inspection",
+      recordId: "QC-RETIRE-EXACT",
+      signerId: 2,
+      pin: "2222",
+    });
+    const firstUpdatedAt = inspectionRows.find((row) => row.qcNumber === "QC-RETIRE-EXACT").updatedAt;
+    const repeat = await post("/api/vehicles/retire", {
+      kind: "inspection",
+      recordId: "QC-RETIRE-EXACT",
+      signerId: 2,
+      pin: "2222",
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.body.alreadyRetired).toBe(false);
+    expect(repeat.status).toBe(200);
+    expect(repeat.body).toMatchObject({
+      kind: "inspection",
+      recordId: "QC-RETIRE-EXACT",
+      alreadyRetired: true,
+    });
+    expect(inspectionRows.find((row) => row.qcNumber === "QC-RETIRE-EXACT")).toMatchObject({
+      archived: true,
+      updatedAt: firstUpdatedAt,
+    });
+    const sameVinOther = inspectionRows.find((row) => row.qcNumber === "QC-SAME-VIN-STAYS");
+    expect(sameVinOther.archived).toBe(false);
+    expect(sameVinOther.updatedAt).toBeUndefined();
+    expect(audits.slice(beforeAudits)).toEqual([
+      expect.objectContaining({
+        action: "vehicle_retired",
+        details: expect.objectContaining({
+          kind: "inspection",
+          recordId: "QC-RETIRE-EXACT",
+        }),
+      }),
+    ]);
   });
 
   it("does not allow the protected correction route on an uncommitted intake", async () => {

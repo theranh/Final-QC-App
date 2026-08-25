@@ -546,6 +546,48 @@ describe('IntakeScreen cache and request ordering', () => {
     expect(screen.getByRole('button', { name: /open ext_rear 2/i })).toBeInTheDocument();
   });
 
+  it('keeps gallery ordering usable after the intake and quote are completed and locked', async () => {
+    const intake = {
+      ...serverRow(VALID_VIN, 'LOCKED-ORDER', 100),
+      id: 'in-locked-order',
+      quoteId: 'q-locked-order',
+      completedAt: 1700000000000,
+      committedBy: 'Signer',
+    };
+    getIntake.mockResolvedValue(intake);
+    serverQuotes = [{
+      id: 'q-locked-order',
+      vin: VALID_VIN,
+      stock: 'LOCKED-ORDER',
+      committedBy: 'Signer',
+      lines: [],
+      totals: {},
+    }];
+    intakePhotos.mockResolvedValue({
+      intakeId: intake.id,
+      quoteId: intake.quoteId,
+      photos: [
+        { id: 'locked-a', slot: 'ext_front', role: 'walk', ts: 1 },
+        { id: 'locked-b', slot: 'ext_rear', role: 'walk', ts: 2 },
+      ],
+    });
+
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+
+    expect(await screen.findByDisplayValue('LOCKED-ORDER')).toBeDisabled();
+    const moveEarlier = await screen.findByRole('button', { name: /move ext_rear earlier/i });
+    expect(moveEarlier).toBeEnabled();
+    fireEvent.click(moveEarlier);
+
+    await waitFor(() => expect(orderIntakePhotos).toHaveBeenCalledWith(
+      'in-locked-order',
+      ['locked-b', 'locked-a'],
+    ));
+    expect(screen.getByRole('button', { name: /open ext_rear 1/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /open ext_front 2/i })).toBeInTheDocument();
+    expect(putIntake).not.toHaveBeenCalled();
+  });
+
   it('uses strictly increasing timestamps for edits made in the same millisecond', async () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
     render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);

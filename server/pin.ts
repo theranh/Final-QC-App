@@ -253,22 +253,42 @@ export function registerPinRoutes(app: Express) {
       }
 
       let retired: any = null;
+      let alreadyRetired = false;
       await db.transaction(async (tx) => {
         const result = kind === "inspection"
           ? await tx.execute(sql`
               UPDATE inspections
               SET archived = true, updated_at = NOW()
-              WHERE qc_number = ${recordId}
+              WHERE qc_number = ${recordId} AND archived IS NOT TRUE
               RETURNING qc_number AS record_id, vin, stock
             `)
           : await tx.execute(sql`
               UPDATE intakes
-              SET retired_at = COALESCE(retired_at, NOW()), updated_at = NOW()
-              WHERE id = ${recordId}
+              SET retired_at = NOW(), updated_at = NOW()
+              WHERE id = ${recordId} AND retired_at IS NULL
               RETURNING id AS record_id, vin, stock, quote_id
             `);
         retired = result.rows?.[0] || null;
-        if (!retired) return;
+        if (!retired) {
+          // A conditional UPDATE that changed nothing is either an unknown
+          // exact id or an already-retired row. Read by that same exact stable
+          // id to distinguish the two without mutating timestamps or auditing
+          // a no-op repeat request.
+          const existing = kind === "inspection"
+            ? await tx.execute(sql`
+                SELECT qc_number AS record_id, vin, stock
+                FROM inspections
+                WHERE qc_number = ${recordId} AND archived IS TRUE
+              `)
+            : await tx.execute(sql`
+                SELECT id AS record_id, vin, stock, quote_id
+                FROM intakes
+                WHERE id = ${recordId} AND retired_at IS NOT NULL
+              `);
+          retired = existing.rows?.[0] || null;
+          if (retired) alreadyRetired = true;
+          return;
+        }
         await auditCommit(tx, "vehicle_retired", sig.signer, {
           kind,
           recordId: String(retired.record_id),
@@ -279,8 +299,8 @@ export function registerPinRoutes(app: Express) {
       });
       if (!retired) return res.status(404).json({ error: "Vehicle record not found" });
 
-      invalidateDashboardCache();
-      res.json({ ok: true, kind, recordId: String(retired.record_id) });
+      if (!alreadyRetired) invalidateDashboardCache();
+      res.json({ ok: true, kind, recordId: String(retired.record_id), alreadyRetired });
     }),
   );
 

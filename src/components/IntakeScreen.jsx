@@ -1619,7 +1619,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 }
 
 // Shared quote-list card (recent quotes on the landing + In-Take Quotes on the
-// Vehicles tab). Shows the first damage-line thumbnail when available.
+// Vehicles tab). The caller owns cover selection; Vehicles supplies the
+// canonical first surviving photo from the intake's exact gallery.
 export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
   const hrs = q.totals?.hrs ?? q.hrs ?? 0;
   const lineCount = Number.isFinite(q.lineCount)

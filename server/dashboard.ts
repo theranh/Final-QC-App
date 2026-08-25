@@ -387,12 +387,30 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
     const cur = intakeByVin.get(intake.vin);
     if (!cur || (cur.inProgress && !intake.inProgress)) intakeByVin.set(intake.vin, intake);
   }
+  // Awaiting Final QC = one exact intake per uninspected VIN. Cover lookup is
+  // shared with completed cards below, but every result remains keyed by the
+  // selected intake id and reads only that intake's exact quote gallery.
+  const inspectedVins = new Set(allRows.map((r) => r.vin));
+  const awaitingByVin = new Map<string, (typeof completedIntakes)[number]>();
+  for (const intake of completedIntakes) {
+    if (inspectedVins.has(intake.vin)) continue;
+    const cur = awaitingByVin.get(intake.vin);
+    if (!cur || (cur.inProgress && !intake.inProgress)) awaitingByVin.set(intake.vin, intake);
+  }
+  const awaitingBase = [...awaitingByVin.values()]
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+  const coverEntries = new Map<string, { intakeId: string; quoteId: string | null }>();
+  for (const intake of [...intakeByVin.values(), ...awaitingBase]) {
+    coverEntries.set(intake.intakeId, { intakeId: intake.intakeId, quoteId: intake.quoteId });
+  }
+  const intakeCovers = await fetchQuoteCovers([...coverEntries.values()]);
 
   // ----- vehicles -----
   const vehicles = rows.map((row) => {
     const tracker = trackerByVin.get(row.vin) || null;
     const quote = quotes.get(row.vin) || { found: false as const };
     const intake = intakeByVin.get(row.vin) || null;
+    const cover = intake ? intakeCovers.get(intake.intakeId)?.cover ?? null : null;
     const released = tracker?.closedRO != null;
     const statusKey = row.status === "open" ? "openRecheck" : released ? "released" : "frontlineReady";
     return {
@@ -415,6 +433,7 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
       quote: quote.found
         ? { hrs: quote.totals?.hrs ?? null, usd: quote.totals?.usd ?? null, lineCount: quote.lineCount ?? null }
         : null,
+      cover,
       tracker,
       intake: intake
         ? {
@@ -518,26 +537,10 @@ export async function buildPayload(from: string, to: string): Promise<unknown> {
   };
 
   // ----- awaiting Final QC: completed intake, no inspection yet -----
-  // A plain join now that intakes are local: every completed intake whose VIN
-  // has no inspection row (VINs already normalized trim/upper on both sides).
-  // Archived inspections still count as "inspected" here — otherwise an
-  // archived unit's completed intake would resurface as Awaiting Final QC.
-  const inspectedVins = new Set(allRows.map((r) => r.vin));
-  // One card per VIN: prefer a committed intake over an in-progress one; the
-  // source list is newest-activity-first, so the first match per VIN wins.
-  const byVin = new Map<string, (typeof completedIntakes)[number]>();
-  for (const i of completedIntakes) {
-    if (inspectedVins.has(i.vin)) continue;
-    const cur = byVin.get(i.vin);
-    if (!cur || (cur.inProgress && !i.inProgress)) byVin.set(i.vin, i);
-  }
-  const awaitingBase = [...byVin.values()]
-    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
-  // Enrich each In-Take Quotes card with its quote's cover thumb + figures so
-  // the Vehicles bucket mirrors the intake app's all-quotes list.
-  const awaitingCovers = await fetchQuoteCovers(awaitingBase.map((i) => ({ vin: i.vin, quoteId: i.quoteId })));
+  // Add exact quote metrics and canonical first-photo cover from the one shared
+  // intake-keyed lookup above.
   const awaiting = awaitingBase.map((i) => {
-    const c = awaitingCovers.get(i.vin);
+    const c = intakeCovers.get(i.intakeId);
     return {
       ...i,
       cover: c?.cover ?? null,

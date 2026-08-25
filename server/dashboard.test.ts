@@ -18,17 +18,19 @@ const VIN_C = "3GTU9DED7LG222222";
 // ---------- in-memory "intakes" table (Body Quoter data, now local) ----------
 // Three completed intakes, mirroring the old remote /api/intakes-completed stub.
 type IntakeRow = {
+  id: string;
   vin: string;
   stock: string;
   vehicle: string;
+  quoteId?: string | null;
   completedAt: number | null;
   updatedAt?: number | null;
   retiredAt?: number | null;
 };
 const intakeStore: IntakeRow[] = [
-  { vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
-  { vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
-  { vin: VIN_C, stock: "S-C", vehicle: "2022 Sierra", completedAt: 1 },
+  { id: "intake-a", vin: VIN_A, stock: "S-A", vehicle: "2024 F-150", completedAt: 3 },
+  { id: "intake-b", vin: VIN_B, stock: "S-B", vehicle: "2023 Silverado", completedAt: 2 },
+  { id: "intake-c", vin: VIN_C, stock: "S-C", vehicle: "2022 Sierra", completedAt: 1 },
 ];
 
 // ---------- in-memory "inspections" table ----------
@@ -104,6 +106,8 @@ let accuracyRows: { week: string; analyses: number; corrected: number }[] = [];
 // When true, the ai_analyses query throws (simulates table-not-yet-created on
 // first boot, before ensureAiAnalysesTable completes).
 let throwOnAiAnalyses = false;
+let quoteRows: any[] = [];
+let photoRows: any[] = [];
 
 function fakeExecute(q: any) {
   const { text, params } = sqlParts(q);
@@ -130,7 +134,15 @@ function fakeExecute(q: any) {
         .filter((i) => i.retiredAt == null)
         .slice()
         .sort((a, b) => (b.completedAt ?? b.updatedAt ?? 0) - (a.completedAt ?? a.updatedAt ?? 0))
-        .map((i) => ({ vin: i.vin, stock: i.stock, vehicle: i.vehicle, completed_ms: i.completedAt, updated_ms: i.updatedAt ?? null })),
+        .map((i) => ({
+          id: i.id,
+          vin: i.vin,
+          stock: i.stock,
+          vehicle: i.vehicle,
+          quote_id: i.quoteId ?? null,
+          completed_ms: i.completedAt,
+          updated_ms: i.updatedAt ?? null,
+        })),
     };
   }
   // This Week completed-intake strip. The fake timestamps are deliberately
@@ -152,8 +164,9 @@ function fakeExecute(q: any) {
   if (text.includes("generate_series") && text.includes("LEFT JOIN intakes")) {
     return { rows: [] };
   }
-  // Latest quote per VIN for the vehicle cards — no quotes in these tests.
-  if (text.includes("FROM quotes")) return { rows: [] };
+  if (text.includes("FROM photos")) return { rows: photoRows };
+  // Quote rows can serve both the VIN metrics query and exact-id cover metrics.
+  if (text.includes("FROM quotes")) return { rows: quoteRows };
   return { rows: [] }; // audit_log aggregates, SELECT 1, etc.
 }
 
@@ -400,6 +413,84 @@ describe("This Week intake retirement", () => {
       expect(payload.thisWeek.intakesCompleted).toBe(2);
     } finally {
       delete retired.retiredAt;
+    }
+  });
+});
+
+describe("Vehicles canonical cover payloads", () => {
+  it("adds the exact intake gallery's first photo to an awaiting payload", async () => {
+    const intake = {
+      id: "intake-awaiting-cover",
+      vin: "AWAITINGCOVER12345",
+      stock: "COVER-A",
+      vehicle: "Awaiting cover truck",
+      quoteId: "quote-awaiting-cover",
+      completedAt: 100,
+    };
+    intakeStore.push(intake);
+    quoteRows = [{ id: intake.quoteId, vin: intake.vin, data: { vin: intake.vin, totals: { hrs: 4 }, lines: [] } }];
+    photoRows = [
+      { id: "awaiting-later", quote_id: intake.quoteId, ts: 20 },
+      { id: "awaiting-first", quote_id: intake.quoteId, ts: 10 },
+    ];
+    try {
+      const payload = await getDashboard("2027-01-01", "2027-01-02");
+      const row = payload.awaiting.find((item: any) => item.intakeId === intake.id);
+      expect(row).toMatchObject({
+        cover: "/api/quoter/photo?id=awaiting-first",
+        hrs: 4,
+      });
+    } finally {
+      intakeStore.splice(intakeStore.indexOf(intake), 1);
+      quoteRows = [];
+      photoRows = [];
+    }
+  });
+
+  it("adds the selected completed intake's exact first photo to its vehicle payload", async () => {
+    const intake = {
+      id: "intake-completed-cover",
+      vin: "COMPLETEDCOVER123",
+      stock: "COVER-C",
+      vehicle: "Completed cover truck",
+      quoteId: "quote-completed-cover",
+      completedAt: 200,
+    };
+    const inspection: StoreRow = {
+      id: nextId++,
+      qcNumber: "FQ-COVER",
+      stock: intake.stock,
+      vehicle: intake.vehicle,
+      vin: intake.vin,
+      result: "pass",
+      status: "pass",
+      imported: false,
+      data: { ts: 200, inspector: "Cover Tester" },
+      createdById: "u1",
+      createdByEmail: "a@truckranch.com",
+      createdByName: "A",
+      updatedById: "u1",
+      updatedByEmail: "a@truckranch.com",
+      updatedByName: "A",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    intakeStore.push(intake);
+    store.push(inspection);
+    quoteRows = [{ id: intake.quoteId, vin: intake.vin, data: { vin: intake.vin, lines: [] } }];
+    photoRows = [{ id: "completed-first", quote_id: intake.quoteId, ts: 10 }];
+    try {
+      const payload = await getDashboard("2027-02-01", "2027-02-02");
+      const row = payload.vehicles.find((item: any) => item.qcNumber === inspection.qcNumber);
+      expect(row).toMatchObject({
+        cover: "/api/quoter/photo?id=completed-first",
+        intake: { id: intake.id, quoteId: intake.quoteId },
+      });
+    } finally {
+      intakeStore.splice(intakeStore.indexOf(intake), 1);
+      store.splice(store.indexOf(inspection), 1);
+      quoteRows = [];
+      photoRows = [];
     }
   });
 });

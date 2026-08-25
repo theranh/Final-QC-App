@@ -6,50 +6,88 @@ const { execute } = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock("./db", () => ({ db: { execute } }));
 vi.mock("./access", () => ({ requireEmployee: (_req: unknown, _res: unknown, next: () => void) => next() }));
 
-import { bestWalkPhotoIds, fetchQuoteCovers } from "./localQuote";
+import { fetchQuoteCovers, firstGalleryPhotoIds } from "./localQuote";
 
-describe("intake vehicle-card cover selection", () => {
+describe("canonical intake gallery cover selection", () => {
   beforeEach(() => {
     execute.mockReset();
   });
 
-  it("selects Front · driver corner regardless of database row order", async () => {
+  it("uses earliest photos.ts, then photos.id, regardless of slot, role, or row order", async () => {
     execute.mockResolvedValue({
       rows: [
-        { id: "rear", quote_id: "q1", slot: "ext_rear" },
-        { id: "damage", quote_id: "q1", slot: "dmg_door" },
-        { id: "driver-side", quote_id: "q1", slot: "ext_driver" },
-        { id: "front-driver-corner", quote_id: "q1", slot: "ext_fd_corner" },
+        { id: "later", quote_id: "q1", ts: 20, slot: "ext_fd_corner", role: "walk" },
+        { id: "same-ts-z", quote_id: "q1", ts: 10, slot: "ext_front", role: "walk" },
+        { id: "same-ts-a", quote_id: "q1", ts: 10, slot: "dmg_door", role: "damage" },
       ],
     });
 
-    await expect(bestWalkPhotoIds(["q1"])).resolves.toEqual(new Map([
-      ["q1", { id: "front-driver-corner", rank: 0 }],
+    await expect(firstGalleryPhotoIds(["q1"])).resolves.toEqual(new Map([
+      ["q1", "same-ts-a"],
     ]));
   });
 
-  it("uses the intake-linked Front · driver corner over quote covers and only falls back when absent", async () => {
+  it("promotes the next surviving row when the former first photo is deleted", async () => {
+    execute.mockResolvedValue({
+      rows: [
+        { id: "third", quote_id: "q1", ts: 30 },
+        { id: "second", quote_id: "q1", ts: 20 },
+      ],
+    });
+
+    expect((await firstGalleryPhotoIds(["q1"])).get("q1")).toBe("second");
+  });
+
+  it("keys exact intake/quote galleries independently even when their VIN is the same", async () => {
     execute
       .mockResolvedValueOnce({
-        rows: [{
-          vin: "1FTFW1E50MFA00001",
-          id: "quote-row",
-          data: { vin: "1FTFW1E50MFA00001", cover: "data:image/jpeg;base64,DAMAGE", lines: [] },
-        }],
+        rows: [
+          { id: "quote-a", data: { vin: "SAMEVIN", totals: { hrs: 1 }, lines: [] } },
+          { id: "quote-b", data: { vin: "SAMEVIN", totals: { hrs: 2 }, lines: [] } },
+        ],
       })
       .mockResolvedValueOnce({
         rows: [
-          { id: "latest-quote-front", quote_id: "quote-row", slot: "ext_front" },
-          { id: "intake-rear", quote_id: "intake-quote", slot: "ext_rear" },
-          { id: "intake-front-driver", quote_id: "intake-quote", slot: "ext_fd_corner" },
+          { id: "b-first", quote_id: "quote-b", ts: 1 },
+          { id: "a-first", quote_id: "quote-a", ts: 1 },
         ],
       });
 
     const covers = await fetchQuoteCovers([
-      { vin: "1FTFW1E50MFA00001", quoteId: "intake-quote" },
+      { intakeId: "intake-a", quoteId: "quote-a" },
+      { intakeId: "intake-b", quoteId: "quote-b" },
     ]);
 
-    expect(covers.get("1FTFW1E50MFA00001")?.cover)
-      .toBe("/api/quoter/photo?id=intake-front-driver");
+    expect(covers.get("intake-a")).toMatchObject({
+      cover: "/api/quoter/photo?id=a-first",
+      hrs: 1,
+    });
+    expect(covers.get("intake-b")).toMatchObject({
+      cover: "/api/quoter/photo?id=b-first",
+      hrs: 2,
+    });
+  });
+
+  it("ignores quote cover, damage thumb, and intake photoOrder when no canonical photo survives", async () => {
+    execute
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "quote-a",
+          data: {
+            cover: "data:image/jpeg;base64,WRONG",
+            lines: [{ cls: { panel: "door" }, thumb: "data:image/jpeg;base64,ALSO_WRONG" }],
+            photoOrder: ["missing-photo"],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const covers = await fetchQuoteCovers([{ intakeId: "intake-a", quoteId: "quote-a" }]);
+    expect(covers.get("intake-a")).toEqual({
+      cover: null,
+      hrs: null,
+      usd: null,
+      lineCount: 1,
+    });
   });
 });
