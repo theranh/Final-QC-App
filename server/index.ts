@@ -4,6 +4,7 @@ import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { registerAppRoutes } from "./routes";
 import { runMigrations } from "./migrations";
 import { startSheetExportWorker } from "./sheetExports";
+import { createStartupGate } from "./startupGate";
 
 const app = express();
 // Replit runs behind exactly one reverse proxy, so trust a single hop. This
@@ -28,21 +29,26 @@ function checkRequiredEnv() {
 }
 
 async function main() {
-  checkRequiredEnv();
+  const missing = checkRequiredEnv();
+  if (missing.length) {
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
 
   const server = http.createServer(app);
 
-  // Open the port IMMEDIATELY. The deployment readiness check only needs the
-  // port to accept connections; auth setup (OIDC discovery + DB-backed session
-  // store) can be slow, so it runs after listen(). Requests that arrive before
-  // setup finishes wait on this gate instead of finding a closed port.
-  let markReady!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    markReady = resolve;
+  // Open the port immediately and satisfy Replit's GET / VM probe with a
+  // temporary no-store startup page. A hard deadline prevents that page from
+  // concealing a dependency hang; API/assets remain gated until fully ready.
+  const startupGate = createStartupGate({
+    deadlineMs: 120_000,
+    onDeadline: () => {
+      console.error(
+        "FATAL STARTUP ERROR: migrations and route setup did not complete within 120 seconds.",
+      );
+      process.exit(1);
+    },
   });
-  app.use((_req, _res, next) => {
-    void ready.then(() => next());
-  });
+  app.use(startupGate.middleware);
 
   const port = Number(process.env.PORT) || 5000;
   server.listen(port, "0.0.0.0", () => {
@@ -57,7 +63,7 @@ async function main() {
   console.log("Startup: running migrations…");
   const migrated = await runMigrations();
   if (!migrated) {
-    console.error("STARTUP ERROR: serving with incomplete migrations — investigate immediately.");
+    throw new Error("Required database migrations did not complete");
   }
 
   console.log("Startup: configuring auth…");
@@ -108,7 +114,7 @@ self.addEventListener('activate', (e) => {
   }
 
   // Routes are all registered — release any requests that arrived early.
-  markReady();
+  startupGate.markReady();
   console.log("Startup: auth + routes ready");
 
   // Durable Google Sheets export queue: pick up any jobs left over from a
