@@ -387,7 +387,10 @@ export function registerAppRoutes(app: Express) {
           qcNumber,
           details: { result, status, failCount: body.failCount },
         });
-        return { row };
+        // The counter value is already authoritative inside this transaction.
+        // Return its next preview with the committed row so the response does
+        // not depend on a second database round-trip after the write landed.
+        return { row, nextQc: seq + 1 };
       });
 
       if ("error" in created) {
@@ -400,7 +403,7 @@ export function registerAppRoutes(app: Express) {
       // Durable queue: never blocks or fails the inspection; survives restarts.
       enqueueSheetExport(created.row);
       invalidateDashboardCache(); // the new inspection leaves "awaiting Final QC" immediately
-      res.status(201).json({ record: toClientRecord(created.row), nextQc: await nextQcPreview() });
+      res.status(201).json({ record: toClientRecord(created.row), nextQc: created.nextQc });
     } catch (err) {
       next(err);
     }

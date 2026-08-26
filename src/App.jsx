@@ -447,7 +447,6 @@ function AuthedApp({ me, onAuthRefresh }) {
     // never look successfully saved.
     const entry = { type: 'create', payload };
     savePendingCommit(entry);
-    setPendingCommit(entry);
     commitInFlightRef.current = true;
     setSaving(true);
     api
@@ -495,7 +494,10 @@ function AuthedApp({ me, onAuthRefresh }) {
           setViewRec(existingId);
           showToast(err.message);
           loadData();
-        } else showToast('NOT SAVED — ' + err.message + '. Your inspection is kept on this device; use RETRY below.');
+        } else {
+          setPendingCommit(entry);
+          showToast('NOT SAVED — ' + err.message + '. Your inspection is kept on this device; use RETRY below.');
+        }
       })
       .finally(() => {
         commitInFlightRef.current = false;
@@ -644,7 +646,6 @@ function AuthedApp({ me, onAuthRefresh }) {
     // clear only after confirmed server success.
     const entry = { type: 'recheck', qc: r.id, payload: rcPayload };
     savePendingCommit(entry);
-    setPendingCommit(entry);
     commitInFlightRef.current = true;
     setSaving(true);
     api
@@ -667,7 +668,10 @@ function AuthedApp({ me, onAuthRefresh }) {
           showToast('This inspection was already updated — reloading');
           loadData();
           closeRecheck();
-        } else showToast('NOT SAVED — ' + err.message + '. Your re-check is kept on this device; use RETRY below.');
+        } else {
+          setPendingCommit(entry);
+          showToast('NOT SAVED — ' + err.message + '. Your re-check is kept on this device; use RETRY below.');
+        }
       })
       .finally(() => {
         commitInFlightRef.current = false;
