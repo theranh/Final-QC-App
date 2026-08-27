@@ -31,6 +31,9 @@ import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerAccuracyReportRoute } from "./quoteSnapshot";
 import { registerTrackerRoutes } from "./tracker";
 import { readJpegExifOrientation } from "./photoExif";
+import { objectStorage } from "./objectStorage";
+import { inspectionReferenceFromEncoded, openStoredPhotoStream, readStoredPhotoBytes } from "./photoSource";
+import { isStoragePhotoReference, type PhotoSource } from "@shared/photoSource";
 
 // ---------- helpers ----------
 import { registerTrackerSyncAdminRoute } from "./trackerSyncAdmin";
@@ -83,14 +86,14 @@ const checklistItem = z.object({
   item: z.string().max(300),
   mark: z.enum(["p", "f", "n"]),
   note: z.string().max(2000).optional(),
-  photos: z.array(z.string().max(2_000_000)).max(12).optional(),
+  photos: z.array(z.union([z.string().max(2_000_000), z.object({ ref: z.string().min(1).max(1000).startsWith("inspections/"), mime: z.string().regex(/^image\/[a-z0-9.+-]+$/i), sha256: z.string().regex(/^[a-f0-9]{64}$/i) }).strict()])).max(12).optional(),
 });
 
 const createInspectionSchema = z.object({
   stock: z.string().trim().min(1).max(120),
   vehicle: z.string().trim().min(1).max(200),
   vin: z.string().trim().max(17),
-  vinPhoto: z.string().max(2_000_000).nullable().optional(),
+  vinPhoto: z.union([z.string().max(2_000_000), z.object({ ref: z.string().min(1).max(1000).startsWith("inspections/"), mime: z.string().regex(/^image\/[a-z0-9.+-]+$/i), sha256: z.string().regex(/^[a-f0-9]{64}$/i) }).strict()]).nullable().optional(),
   optOut: z.record(z.string(), z.boolean()).optional().default({}),
   items: z.record(z.string(), z.array(checklistItem)),
   checked: z.number().int().min(0).max(1000),
@@ -105,7 +108,7 @@ const recheckItem = z.object({
   repairedBy: z.string().max(300).optional().default(""),
   outcome: z.enum(["pass", "fail"]),
   note: z.string().max(2000).optional(),
-  photos: z.array(z.string().max(2_000_000)).max(12).optional(),
+  photos: z.array(z.union([z.string().max(2_000_000), z.object({ ref: z.string().min(1).max(1000).startsWith("inspections/"), mime: z.string().regex(/^image\/[a-z0-9.+-]+$/i), sha256: z.string().regex(/^[a-f0-9]{64}$/i) }).strict()])).max(12).optional(),
 });
 
 const recheckSchema = z.object({
@@ -213,6 +216,29 @@ const importSchema = z.object({
           status: z.enum(["pass", "open", "cleared"]),
         })
         .passthrough()
+        .superRefine((record, ctx) => {
+          const validatePhoto = (value: unknown, path: (string | number)[], nullable = false) => {
+            if ((nullable && value == null) || typeof value === "string" || isStoragePhotoReference(value)) return;
+            ctx.addIssue({
+              code: "custom",
+              path,
+              message: "Photos must be strings or strict private storage references",
+            });
+          };
+          const visit = (value: unknown, path: (string | number)[]) => {
+            if (Array.isArray(value)) return value.forEach((child, index) => visit(child, [...path, index]));
+            if (!value || typeof value !== "object") return;
+            for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+              if (key === "vinPhoto") validatePhoto(child, [...path, key], true);
+              else if (key === "photos" && Array.isArray(child)) {
+                child.forEach((photo, index) => validatePhoto(photo, [...path, key, index]));
+              } else if (key === "photos") {
+                ctx.addIssue({ code: "custom", path: [...path, key], message: "Photos must be an array" });
+              } else visit(child, [...path, key]);
+            }
+          };
+          visit(record, []);
+        })
     )
     .max(2000)
     .optional()
@@ -239,6 +265,35 @@ export function registerAppRoutes(app: Express) {
   registerTrackerRoutes(app);
   registerSheetExportRoutes(app);
   registerManagerAnalyticsRoute(app);
+
+  // Private gateway for references embedded in inspection JSON and for rows in
+  // the photo table. Clients never receive an object-storage URL.
+  app.get("/api/photos/:id", requireEmployee, async (req, res, next) => {
+    try {
+      const id = String(req.params.id || "");
+      const [row] = await db
+        .select({ mime: photos.mime, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, ts: photos.ts })
+        .from(photos)
+        .where(eq(photos.id, id));
+      const inspectionRef = row ? null : inspectionReferenceFromEncoded(id);
+      if (!row && !inspectionRef) return res.status(404).json({ error: "Not found" });
+      const mime = row?.mime || inspectionRef!.mime;
+      const etag = row
+        ? `W/"${row.ts}-${row.sha256 || (row.data?.length ?? 0)}"`
+        : `"${inspectionRef!.sha256}"`;
+      if (req.header("if-none-match") === etag) return res.status(304).end();
+      res.set("Content-Type", mime);
+      res.set("ETag", etag);
+      res.set("X-Content-Type-Options", "nosniff");
+      res.set("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
+      if (inspectionRef) return objectStorage.openReadStream(inspectionRef.ref).pipe(res);
+      const stream = openStoredPhotoStream(row!);
+      if (stream) return stream.pipe(res);
+      res.end(await readStoredPhotoBytes(row!));
+    } catch (err) {
+      next(err);
+    }
+  });
 
   app.get("/api/health", async (_req, res) => {
     try {
@@ -317,7 +372,7 @@ export function registerAppRoutes(app: Express) {
       const result = body.failCount > 0 ? "fail" : "pass";
       const now = Date.now();
 
-      const failItems: { cat: string; item: string; note: string; photos: string[] }[] = [];
+      const failItems: { cat: string; item: string; note: string; photos: PhotoSource[] }[] = [];
       for (const [cat, arr] of Object.entries(body.items)) {
         for (const it of arr) {
           if (it.mark === "f") failItems.push({ cat, item: it.item, note: it.note || "", photos: it.photos || [] });
@@ -566,7 +621,7 @@ export function registerAppRoutes(app: Express) {
       const trackerRows = await db.select().from(productionTracker);
       // Metadata only — never pull the bytea column for the whole table.
       const photoMetaRes = await db.execute(
-        sql`SELECT id, quote_id, slot, role, mime, ts, length(data) AS bytes FROM photos ORDER BY ts`
+        sql`SELECT id, quote_id, slot, role, mime, ts, object_key, sha256, length(data) AS bytes FROM photos ORDER BY ts`
       );
       const photosMeta = (photoMetaRes.rows as any[]).map((p) => ({
         id: String(p.id),
@@ -576,6 +631,8 @@ export function registerAppRoutes(app: Express) {
         mime: String(p.mime),
         ts: Number(p.ts),
         bytes: Number(p.bytes),
+          objectKey: p.object_key ?? null,
+          sha256: p.sha256 ?? null,
       }));
 
       const iso = (d: Date | null | undefined) => (d ? new Date(d).toISOString() : null);
@@ -656,10 +713,15 @@ export function registerAppRoutes(app: Express) {
       res.write(head.slice(0, -1) + ',"quoterPhotos":[');
       let first = true;
       for (const m of photosMeta) {
-        const one = await db.execute(sql`SELECT data FROM photos WHERE id = ${m.id}`);
+        const one = await db.execute(sql`SELECT data, object_key, sha256, mime FROM photos WHERE id = ${m.id}`);
         const row = (one.rows as any[])[0];
         if (!row) continue;
-        const buf = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
+        const buf = await readStoredPhotoBytes({
+          data: row.data,
+          objectKey: row.object_key,
+          sha256: row.sha256,
+          mime: row.mime,
+        });
         const chunk =
           (first ? "" : ",") +
           JSON.stringify({ id: m.id, quoteId: m.quoteId, slot: m.slot, role: m.role, mime: m.mime, ts: m.ts, b64: buf.toString("base64") });
@@ -1036,13 +1098,13 @@ export function registerAppRoutes(app: Express) {
           return res.status(400).json({ error: "quoteId is required" });
         }
         const rows = await db
-          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data })
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, mime: photos.mime })
           .from(photos)
           .where(eq(photos.quoteId, quoteId));
 
         const candidates: { id: string; slot: string | null; quoteId: string; orientation: number }[] = [];
         for (const row of rows) {
-          const buf = row.data as Buffer;
+          const buf = await readStoredPhotoBytes(row);
           const orientation = readJpegExifOrientation(buf);
           // orientation === null → no EXIF tag → image already stored upright (or isn't JPEG)
           // orientation === 1   → explicitly upright
@@ -1080,7 +1142,7 @@ export function registerAppRoutes(app: Express) {
         const offset = Math.max(0, Number(req.query.offset) || 0);
 
         const page = await db
-          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data })
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, mime: photos.mime })
           .from(photos)
           .orderBy(photos.id)
           .limit(SCAN_PAGE_SIZE)
@@ -1088,7 +1150,7 @@ export function registerAppRoutes(app: Express) {
 
         const candidates: { id: string; slot: string | null; quoteId: string; orientation: number }[] = [];
         for (const row of page) {
-          const buf = row.data as Buffer;
+          const buf = await readStoredPhotoBytes(row);
           const orientation = readJpegExifOrientation(buf);
           if (orientation !== null && orientation !== 1) {
             candidates.push({ id: row.id, slot: row.slot, quoteId: row.quoteId, orientation });

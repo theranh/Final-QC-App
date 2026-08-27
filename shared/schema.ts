@@ -143,6 +143,8 @@ export const photos = pgTable(
     role: text("role").notNull().default("unclassified"),
     mime: text("mime").notNull(),
     data: bytea("data").notNull(),
+    objectKey: text("object_key"),
+    sha256: text("sha256"),
     ts: bigint("ts", { mode: "number" }).notNull(),
   },
   (t) => [index("photos_quote_idx").on(t.quoteId)],
@@ -161,6 +163,8 @@ export const photoOrientationBackups = pgTable(
     direction: text("direction").notNull(),
     originalMime: text("original_mime").notNull(),
     originalData: bytea("original_data").notNull(),
+    objectKey: text("object_key"),
+    storageSha256: text("storage_sha256"),
     originalTs: bigint("original_ts", { mode: "number" }).notNull(),
     originalSha256: text("original_sha256").notNull(),
     repairedSha256: text("repaired_sha256").notNull(),
@@ -174,6 +178,15 @@ export const photoOrientationBackups = pgTable(
     index("photo_orientation_backups_photo_idx").on(t.photoId),
   ],
 );
+
+// Immutable original inspection JSON retained for a safe Object Storage
+// migration rollback. inspection_id is both unique and the table's primary key.
+export const inspectionsDataPremigration = pgTable("inspections_data_premigration", {
+  inspectionId: integer("inspection_id")
+    .primaryKey()
+    .references(() => inspections.id),
+  originalData: jsonb("original_data").notNull(),
+});
 
 export const intakes = pgTable(
   "intakes",

@@ -3,6 +3,7 @@ import { fmtDT } from '../lib/format';
 import PhotoRow from './PhotoRow';
 import SignaturePad from './SignaturePad';
 import VoiceNoteButton from './VoiceNoteButton';
+import { photoSourceUrl } from '../lib/photoSource';
 
 export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, notes, photosMap, repairs, onMark, onNote, onRepair, onTakePhoto, onRemovePhoto, sigRef, sigSigned, onSigChange, onClearSig, onClose, onCommit, onOpenLightbox }) {
   const rcInsp = users.find((u) => u.id === rcUid) || users[0];
@@ -83,7 +84,7 @@ export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, 
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8, background: '#F9F7F5', border: '1px solid var(--border2)', borderRadius: 8, padding: 8 }}>
               {(oi.photos || []).map((src, idx) => (
-                <div key={idx} className="photo-thumb" style={{ width: 46, height: 38, backgroundImage: `url('${src}')` }} onClick={() => onOpenLightbox(src)} />
+                <div key={idx} className="photo-thumb" style={{ width: 46, height: 38, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
               ))}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 10, color: 'var(--brown)', lineHeight: 1.4 }}>&ldquo;{oi.note || '—'}&rdquo;</div>

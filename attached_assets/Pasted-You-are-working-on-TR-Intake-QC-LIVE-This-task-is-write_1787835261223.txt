@@ -1,0 +1,70 @@
+You are working on TR Intake & QC-LIVE. This task is **write code only**. Do not execute the migration, do not run `db:push`, do not deploy, do not query or modify the production database, and do not modify the development data yet. When you are finished, report what you wrote and stop.
+
+## Context you can rely on
+
+- Verified 24-table `pg_dump` of production exists at `/home/runner/backups/prod-2026-08-25.dump`, sha256 `94a48c012667c6bbf12b748588685e190de52e607fd836af88b847349e5e7f5c`, also stored in App Storage at `backups/prod-2026-08-25.dump`.
+- Development database (`heliumdb`) is a restored clone of production.
+- App Storage bucket is attached: `.replit` → `[objectStorage] defaultBucketID = "replit-objstore-4479ab78-2517-472c-a9b6-5e8c773c7ca0"`.
+- Production volumes: `photos` 2,804 rows / 1,375 MB · `inspections` 188 rows / 54 MB (base64 data URLs inside `data` jsonb) · `photo_orientation_backups` 208 rows.
+
+## The rule that outranks everything else
+
+**No photo byte may change.** No re-encoding, recompression, resizing, rotation, or EXIF normalization. Every object written to storage must have the same sha256 as the bytes read out of Postgres, verified by reading it back. If one differs, that row is a failure — log it, skip it, keep going, and list all failures in the final summary.
+
+## Step 0 — enumerate consumers before you write anything
+
+Find and list every place in the codebase that reads photo bytes or inspection photo data URLs. At minimum check: `/api/export`, `/api/import`, the print report, `RecordDetail`, the walk-around gallery, the damage close-up view. Report the file and line for each. Do not change them yet in this step — but the read shim in step 2 must cover all of them.
+
+## Step 1 — schema migration (written, not run)
+
+Following the existing `server/migrations.ts` pattern (a reviewed, versioned migration — **never `db:push`**):
+
+- Add `object_key text` and `sha256 text` to `photos`.
+- Create side table `inspections_data_premigration` holding `inspection_id` and the original `data` jsonb, for the rollback window.
+- Whatever equivalent columns `photo_orientation_backups` needs to record its object key and sha256.
+
+## Step 2 — read shim (this ships and runs before the migration)
+
+A single accessor used by every consumer found in step 0 that accepts **both** shapes indefinitely:
+
+- a reference object `{ ref, mime, sha256 }` → stream from object storage
+- an inline base64 data URL or Postgres `bytea` → serve as today
+
+Records that predate the migration must keep rendering forever, with no feature flag and no cutover date.
+
+Add `GET /api/photos/:id` behind the existing `requireEmployee` middleware, streaming from object storage. Same auth as today. No signed URLs, no public bucket.
+
+## Step 3 — migration script (written, not run)
+
+One idempotent, resumable script. For each photo:
+
+1. Read bytes from Postgres.
+2. Compute sha256.
+3. `put()` to object storage at key `photos/{quoteId}/{photoId}`.
+4. `head()` the object.
+5. Compare **both** size and sha256.
+6. Only then write `object_key` and `sha256` to the row.
+
+Rules:
+
+- Inspection photos: replace each data URL **in place** with `{ ref, mime, sha256 }` at key `inspections/{qcNumber}/{index}`, preserving array order and every sibling field. Copy the original `data` jsonb into `inspections_data_premigration` first.
+- Orientation backups: key `orientation-backups/{id}`. These are the only copy of those original bytes — treat them as irreplaceable.
+- Skip photos whose `quote_id` appears in `deleted_quotes`; report them separately.
+- Re-runnable: any row with a verified `object_key` is skipped.
+- Never delete or modify `photos.data`. Postgres keeps the bytes through this entire migration.
+- Final summary: total, migrated, skipped, mismatched (with ids), elapsed time.
+
+## Step 4 — rollback script (written, not run)
+
+Restores `inspections.data` from `inspections_data_premigration` and clears `object_key`/`sha256`. Because Postgres bytea is untouched, photo reads then fall back automatically. It must be safe to run at any point mid-migration.
+
+## Step 5 — verification script (written, not run)
+
+Checks **all** rows, not a sample:
+- every photo with an `object_key` has a byte-identical object in storage (size + sha256)
+- count of rows with `object_key` equals expected total minus deleted-quote skips
+- zero mismatches
+
+## Deliverables
+
+Report back with: the consumer list from step 0, the file paths of everything you wrote, and anything you found that contradicts the assumptions above. Then stop. I will tell you when to rehearse against development.

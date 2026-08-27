@@ -320,6 +320,24 @@ export const MIGRATIONS: Migration[] = [
           WHERE retired_at IS NULL`,
     ],
   },
+  {
+    // Private Object Storage migration foundation. Binary source columns stay
+    // in place until a separately-invoked, verified data migration is complete.
+    // The inspection backup has exactly one immutable pre-migration document
+    // per inspection, making both interrupted runs and rollback deterministic.
+    id: "0014_object_storage_foundation",
+    statements: [
+      sql`ALTER TABLE photos ADD COLUMN IF NOT EXISTS object_key text`,
+      sql`ALTER TABLE photos ADD COLUMN IF NOT EXISTS sha256 text`,
+      sql`ALTER TABLE photo_orientation_backups ADD COLUMN IF NOT EXISTS object_key text`,
+      sql`ALTER TABLE photo_orientation_backups ADD COLUMN IF NOT EXISTS storage_sha256 text`,
+      sql`CREATE TABLE IF NOT EXISTS inspections_data_premigration (
+        inspection_id integer PRIMARY KEY
+          REFERENCES inspections(id),
+        original_data jsonb NOT NULL
+      )`,
+    ],
+  },
 ];
 
 /**

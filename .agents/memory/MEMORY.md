@@ -25,3 +25,4 @@
 - [Intake photo ordering](intake-photo-ordering.md) — gallery order is audited presentation metadata, editable after commit under the same quote lock as photo mutations.
 - [Vehicle thumbnails](vehicle-thumbnails.md) — Vehicles covers use the earliest surviving exact-gallery capture; display order and VIN fallbacks never choose the image.
 - [PWA updates](pwa-updates.md) — active sessions receive an update prompt and are never silently reloaded by a newly published service worker.
+- [Photo object verification](photo-object-verification.md) — App Storage SDK lacks metadata checksums; verify every photo write by full read-back size and SHA-256.

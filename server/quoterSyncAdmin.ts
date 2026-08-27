@@ -55,6 +55,7 @@ import {
   rotateStoredJpeg,
   type PhotoTurn,
 } from "./bc23115PhotoRepair";
+import { readStoredPhotoBytes } from "./photoSource";
 
 const { Pool } = pg;
 const PHOTO_BATCH = 25;
@@ -178,8 +179,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
         const limit = Math.min(Math.max(Number(req.body?.limit) || 10, 1), 10);
         const rows = (
           await destQuery(
-            `SELECT id, quote_id, slot, role, mime, ts,
-                    translate(encode(data, 'base64'), chr(10) || chr(13), '') AS data_base64
+            `SELECT id, quote_id, slot, role, mime, ts, object_key, sha256
              FROM photos
              WHERE quote_id = ANY($1::text[]) AND id > $2
              ORDER BY id
@@ -187,17 +187,33 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
             [quoteIds, cursor, limit],
           )
         ).rows;
-        return res.json({
-          phase,
-          photos: rows.map((row: any) => ({
+        const exported = [];
+        for (const row of rows) {
+          const source = await destQuery(
+            `SELECT data, object_key, sha256, mime FROM photos WHERE id = $1`,
+            [row.id],
+          );
+          if (source.rowCount !== 1) continue;
+          const stored = source.rows[0];
+          const bytes = await readStoredPhotoBytes({
+            data: stored.data,
+            objectKey: stored.object_key,
+            sha256: stored.sha256,
+            mime: stored.mime,
+          });
+          exported.push({
             id: row.id,
             quoteId: row.quote_id,
             slot: row.slot,
             role: row.role,
             mime: row.mime,
             ts: row.ts,
-            dataBase64: row.data_base64,
-          })),
+            dataBase64: bytes.toString("base64"),
+          });
+        }
+        return res.json({
+          phase,
+          photos: exported,
           nextCursor: rows.length ? rows[rows.length - 1].id : null,
           done: rows.length < limit,
         });
@@ -883,7 +899,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           const repairedTs = Math.max(Date.now(), photo.expectedTs + 1);
           const updated = await client.query(
             `UPDATE photos
-             SET data = $1, mime = 'image/jpeg', ts = $2
+             SET data = $1, mime = 'image/jpeg', object_key = NULL, sha256 = NULL, ts = $2
              WHERE id = $3
                AND quote_id = $4
                AND slot = $5
@@ -1006,7 +1022,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           }
 
           const current = await client.query(
-            `SELECT p.data, p.ts, p.mime,
+            `SELECT p.data, p.object_key, p.sha256, p.ts, p.mime,
                     EXISTS (
                       SELECT 1
                       FROM intakes i
@@ -1029,7 +1045,12 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
             });
           }
 
-          const originalBytes = Buffer.from(current.rows[0].data);
+          const originalBytes = await readStoredPhotoBytes({
+            data: current.rows[0].data,
+            objectKey: current.rows[0].object_key,
+            sha256: current.rows[0].sha256,
+            mime: current.rows[0].mime,
+          });
           let rotated: Awaited<ReturnType<typeof rotateStoredJpeg>>;
           try {
             rotated = await rotateStoredJpeg(originalBytes, direction as PhotoTurn);
@@ -1069,7 +1090,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           );
           const updated = await client.query(
             `UPDATE photos
-             SET data = $1, mime = 'image/jpeg', ts = $2
+             SET data = $1, mime = 'image/jpeg', object_key = NULL, sha256 = NULL, ts = $2
              WHERE id = $3
                AND quote_id = $4
                AND slot = $5
@@ -1169,7 +1190,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           }
 
           const current = await client.query(
-            `SELECT data, ts
+            `SELECT data, object_key, sha256, mime, ts
              FROM photos
              WHERE id = $1
                AND quote_id = $2
@@ -1184,8 +1205,14 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
               message: "Repaired photo changed after the repair; rollback refused",
             });
           }
+          const currentBytes = await readStoredPhotoBytes({
+            data: current.rows[0].data,
+            objectKey: current.rows[0].object_key,
+            sha256: current.rows[0].sha256,
+            mime: current.rows[0].mime,
+          });
           const currentSha256 = createHash("sha256")
-            .update(Buffer.from(current.rows[0].data))
+            .update(currentBytes)
             .digest("hex");
           if (currentSha256 !== backup.repaired_sha256) {
             await client.query("ROLLBACK");
@@ -1197,7 +1224,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           const rollbackTs = Math.max(Date.now(), Number(current.rows[0].ts) + 1);
           const restored = await client.query(
             `UPDATE photos
-             SET data = $1, mime = $2, ts = $3
+             SET data = $1, mime = $2, object_key = NULL, sha256 = NULL, ts = $3
              WHERE id = $4 AND ts = $5`,
             [
               backup.original_data,
