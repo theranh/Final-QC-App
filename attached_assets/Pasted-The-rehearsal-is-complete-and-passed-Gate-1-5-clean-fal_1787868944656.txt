@@ -1,0 +1,80 @@
+The rehearsal is complete and passed: Gate 1–5 clean, fallback fixed and committed at `7af7e9c`, deterministic key reuse confirmed with zero orphans. This is the production window.
+
+Work through the steps in order. **Stop immediately at any abort criterion** and tell me — do not attempt to fix and continue. Restoring is always the right move over improvising.
+
+## Abort criteria — any one of these, stop and report
+
+- Any sha256 or size mismatch.
+- Any photo that will not render.
+- The script erroring in a way the rehearsal did not produce.
+- The migration exceeding 60 minutes (double the rehearsal).
+- Row counts changing when they should not.
+
+## Step 1 — fresh production backup
+
+The 25 Aug dump is stale. Take a new one.
+
+I will paste the production connection string into the shell. Prompt me for it using `read -rs PROD_DB_URL` so it is never echoed or written to a file, and never print its value.
+
+Then:
+1. `pg_dump "$PROD_DB_URL" -Fc -f /home/runner/backups/prod-2026-08-27.dump`
+2. Report exit code, file size, and sha256.
+3. Copy it to App Storage at `backups/prod-2026-08-27.dump`, read it back, and confirm both size and sha256 match.
+4. Record production row counts for: `photos`, `inspections`, `intakes`, `quotes`, `quote_snapshots`, `photo_orientation_backups`, `audit_log`, `employees`, `production_tracker`. These are the expected totals for the rest of the window.
+
+**Confirm all of the above with me before continuing.**
+
+## Step 2 — deploy the code, before any data moves
+
+The code change and the data change are separated deliberately so each is independently verifiable. Deploying puts production into the exact state Gate 1 and Gate 2 proved safe: schema columns added, zero photos migrated, every read still served from PostgreSQL.
+
+1. Deploy the current committed `main`.
+2. The startup schema migration will fire automatically. Confirm afterward that `photos.object_key` / `photos.sha256` exist and are all NULL, `inspections_data_premigration` exists and is empty, and the orientation-backup columns exist and are NULL.
+3. **Re-run the Step 1 row counts. Every one must be identical.** Any change is an abort.
+
+## Step 3 — verify production works with the shim and no migrated bytes
+
+## Step 4 — take the app offline
+
+Stop the deployment. Simple and unambiguous — no maintenance page.
+
+## Step 5 — run the migration against production
+
+Run the migration with the database pointed at production, exactly as rehearsed. Guard it: confirm the target is the production database before starting, and abort if it resolves to `heliumdb`.
+
+Note wall-clock start and end. Capture the full summary.
+
+Expected, based on the rehearsal plus whatever production has grown since: all photos migrated, all orientation backups migrated, pre-migration backups written for every inspection, zero mismatches.
+
+**Note on pre-existing bucket contents:** the dev rehearsal wrote 3,276 byte-identical objects at these same keys. The migration verifies every object it writes against its actual PostgreSQL source bytes, so production data is authoritative. Do not skip a row because a key already exists.
+
+## Step 6 — verify every row
+
+Run the verifier. Report:
+- photos with `object_key` vs expected total, plus the deleted-quote skip list
+- all inspections have references or are confirmed to contain no photo fields; all have pre-migration backups
+- all orientation backups migrated
+- zero mismatches, every row, not a sample
+
+Then the orphan check that the rehearsal established: compare the full bucket inventory against production's key manifest and **report any object in the bucket not accounted for by a production row**. Do not delete anything — just report it.
+
+Spot-check 20 photos by hand across quotes, inspections and orientation backups.
+
+## Step 7 — back online
+
+Bring the deployment up. Then walk the app yourself:
+- open a record with fail photos
+- open a quote's walk-around gallery
+- open a damage close-up
+- print a report
+- run an export
+
+## Step 8 — report
+
+Elapsed time per step, the verifier numbers, the orphan list, and anything that differed from the rehearsal.
+
+**Do not empty `photos.data`. Do not run `VACUUM`. Do not drop `inspections_data_premigration`.** PostgreSQL keeps every byte for at least a week of real use. That is Part 4, on a separate day, and it is the only irreversible step in the whole plan.
+
+## If you have to restore
+
+`pg_restore` from `/home/runner/backups/prod-2026-08-27.dump`, plus the rollback script if inspection data URLs were already rewritten. Both practised in the rehearsal — rollback took 2.7 seconds.
