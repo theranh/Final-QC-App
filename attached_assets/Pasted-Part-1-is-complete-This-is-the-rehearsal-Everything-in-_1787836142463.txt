@@ -1,0 +1,75 @@
+Part 1 is complete. This is the rehearsal. Everything in this task runs against **development (`heliumdb`) only**. Do not query, modify, deploy to, or connect to production at any point. Confirm `PGDATABASE=heliumdb` before every destructive step and abort if it is anything else.
+
+Work through the gates in order. **Stop and report at any gate that does not come back clean** — do not continue to the next gate or try to fix and push on.
+
+## Gate 0 — commit Part 1 first
+
+`git add -A && git commit` the Part 1 work with a clear message, and push to `origin/main`. This is the rollback path for the code as opposed to the data; the rehearsal must not run against uncommitted work. Report the commit sha.
+
+## Gate 1 — startup schema migration, in isolation
+
+You noted the workflow is stopped because restarting it would execute the new startup schema migration. That coupling is the highest-risk thing you wrote, because on production it fires automatically on deploy. Prove it is safe on its own, before anything else.
+
+1. Record `SELECT COUNT(*)` for: `photos`, `inspections`, `intakes`, `quotes`, `quote_snapshots`, `photo_orientation_backups`, `audit_log`, `employees`, `production_tracker`.
+2. Start the app.
+3. Confirm the migration ran: `photos.object_key` and `photos.sha256` exist and are all NULL; `inspections_data_premigration` exists and is empty; the orientation-backup columns exist and are NULL.
+4. Re-run the counts. **Every one must be identical.** Any change is an abort.
+5. Restart the app a second time and confirm the migration is a no-op (idempotent on boot).
+
+Report the before/after counts side by side.
+
+## Gate 2 — read shim proven BEFORE any bytes move
+
+With the schema in place but zero photos migrated, every photo in the app must still render from Postgres exactly as before. This is the state production will be in between deploy and migration, so it has to be correct.
+
+Verify by exercising the real consumers you inventoried in Part 1:
+- open a record with VIN photos, failed-item photos and re-check photos (`RecordDetail`, `RecheckSheet`, `PhotoRow`)
+- a quote's walk-around gallery and a damage close-up (`IntakeScreen`, `QuoteScreen`, `/api/quoter/photo`)
+- `GET /api/photos/:id` for a known photo, and confirm it 401s without an employee session
+- `GET /api/export?photos=full`, then feed that file to `/api/import` and confirm it is accepted
+- the print report renders
+
+Report pass/fail per consumer.
+
+## Gate 3 — the migration run, timed
+
+1. Note the wall-clock start time.
+2. Run `npm run storage:migrate`.
+3. Note the end time and capture the full summary output.
+
+**Report the elapsed time prominently — that number sets tonight's production window.**
+
+Any sha256 or size mismatch is an immediate abort. Report the ids.
+
+## Gate 4 — verification, all rows
+
+Run `npm run storage:verify` and report:
+- photos: rows with `object_key` vs 2,804 expected, minus deleted-quote skips (report that skip list explicitly)
+- inspections: all 188 have references, array order and sibling fields preserved, originals present in `inspections_data_premigration`
+- orientation backups: all 208 migrated — these are the only copy of those bytes
+- zero mismatches, across every row, not a sample
+
+Then re-run the **entire Gate 2 consumer list** in the migrated state. Everything must still work.
+
+Also confirm fallback: deliberately break one row's `object_key` and confirm that photo still serves from Postgres rather than erroring.
+
+## Gate 5 — practise the rollback
+
+This is the only part you would be doing under pressure on production, so it gets a real run.
+
+1. Run `npm run storage:rollback`.
+2. Confirm `inspections.data` is byte-identical to the Gate 1 state, all `object_key`/`sha256` are NULL, and `photos.data` was never touched.
+3. Re-run the Gate 2 consumer list. Everything works, reading from Postgres.
+4. Run `npm run storage:migrate` again and confirm it completes cleanly a second time — including that the re-run reuses the same deterministic keys rather than orphaning objects.
+
+## Report back
+
+- Gate 0 commit sha
+- Gate 1 count table, before and after
+- Gate 2 and Gate 4 consumer results
+- **Gate 3 elapsed time**
+- Gate 4 numbers: 2,804 / 188 / 208, mismatches, deleted-quote skips
+- Gate 5 rollback result
+- Anything that behaved differently from the above
+
+Then stop. Do not deploy. Do not touch production. I will decide from your timing whether the production window happens tonight.
