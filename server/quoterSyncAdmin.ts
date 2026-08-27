@@ -196,6 +196,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           if (source.rowCount !== 1) continue;
           const stored = source.rows[0];
           const bytes = await readStoredPhotoBytes({
+            id: row.id,
             data: stored.data,
             objectKey: stored.object_key,
             sha256: stored.sha256,
@@ -1046,6 +1047,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
           }
 
           const originalBytes = await readStoredPhotoBytes({
+            id: photoId,
             data: current.rows[0].data,
             objectKey: current.rows[0].object_key,
             sha256: current.rows[0].sha256,
@@ -1206,6 +1208,7 @@ export function registerQuoterSyncAdminRoute(app: Express): void {
             });
           }
           const currentBytes = await readStoredPhotoBytes({
+            id: photoId,
             data: current.rows[0].data,
             objectKey: current.rows[0].object_key,
             sha256: current.rows[0].sha256,

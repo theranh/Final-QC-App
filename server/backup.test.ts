@@ -11,6 +11,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
+import { createHash } from "node:crypto";
 
 // ---------- in-memory stores (hoisted so vi.mock can see them) ----------
 
@@ -29,6 +30,8 @@ const H = vi.hoisted(() => {
     nextEmpId: 1,
     nextCorrId: 1,
     adminMode: true,
+    storageError: null as Error | null,
+    storageBytes: null as Buffer | null,
   };
   return state;
 });
@@ -79,15 +82,27 @@ function fakeExecute(q: any) {
         id: p.id,
         quote_id: p.quoteId,
         slot: p.slot ?? null,
+        role: p.role ?? "unclassified",
         mime: p.mime,
         ts: p.ts,
         bytes: p.data.length,
+        object_key: p.objectKey ?? null,
+        sha256: p.sha256 ?? null,
       })),
     };
   }
-  if (text.includes("SELECT data FROM photos")) {
+  if (text.includes("SELECT data") && text.includes("FROM photos")) {
     const hit = H.photos.find((p) => p.id === params[0]);
-    return { rows: hit ? [{ data: hit.data }] : [] };
+    return {
+      rows: hit
+        ? [{
+            data: hit.data,
+            object_key: hit.objectKey ?? null,
+            sha256: hit.sha256 ?? null,
+            mime: hit.mime,
+          }]
+        : [],
+    };
   }
   if (text.includes("pg_get_serial_sequence")) return { rows: [] };
   return { rows: [] };
@@ -108,6 +123,7 @@ function selectRows(table: any) {
   if (name === "intakes") return H.intakes.slice();
   if (name === "corrections") return H.corrections.slice();
   if (name === "production_tracker") return H.tracker.slice();
+  if (name === "photos") return H.photos.slice();
   return [];
 }
 
@@ -221,6 +237,20 @@ const fakeDb: any = {
 
 vi.mock("./db", () => ({ db: fakeDb }));
 
+vi.mock("./objectStorage", async () => {
+  const actual = await vi.importActual<typeof import("./objectStorage")>("./objectStorage");
+  return {
+    ...actual,
+    objectStorage: {
+      readBytes: async () => {
+        if (H.storageError) throw H.storageError;
+        if (H.storageBytes) return H.storageBytes;
+        throw new Error("No mocked Object Storage result");
+      },
+    },
+  };
+});
+
 const makeEmp = () => ({
   id: 1,
   userId: "u1",
@@ -301,6 +331,8 @@ beforeEach(() => {
   H.nextEmpId = 1;
   H.nextCorrId = 1;
   H.adminMode = true;
+  H.storageError = null;
+  H.storageBytes = null;
 });
 
 function seedInspection(qcNumber: string, vin: string, ts: number, imported = false) {
@@ -398,7 +430,17 @@ describe("GET /api/export", () => {
     expect(b.quoter.intakes[0]).toMatchObject({ id: "i1", vin: "VINQ0000000000001", quoteId: "q1" });
     expect(b.quoter.corrections[0]).toMatchObject({ id: 7, ts: 3000 });
     expect(b.quoter.productionTracker[0]).toMatchObject({ vin: "VINQ0000000000001", month: "Jul 2026", daysToClose: 4 });
-    expect(b.quoter.photos[0]).toEqual({ id: "p1", quoteId: "q1", slot: "front", role: "unclassified", mime: "image/jpeg", ts: 5000, bytes: 17 });
+    expect(b.quoter.photos[0]).toEqual({
+      id: "p1",
+      quoteId: "q1",
+      slot: "front",
+      role: "unclassified",
+      mime: "image/jpeg",
+      ts: 5000,
+      bytes: 17,
+      objectKey: null,
+      sha256: null,
+    });
     expect(b.quoterPhotos).toBeUndefined();
     expect(JSON.stringify(b)).not.toContain(Buffer.from("hello-photo-bytes").toString("base64"));
 
@@ -409,6 +451,44 @@ describe("GET /api/export", () => {
     expect(bf.quoterPhotos).toHaveLength(1);
     expect(bf.quoterPhotos[0]).toMatchObject({ id: "p1", quoteId: "q1", mime: "image/jpeg", ts: 5000 });
     expect(Buffer.from(bf.quoterPhotos[0].b64, "base64").toString()).toBe("hello-photo-bytes");
+  });
+
+  it("serves PostgreSQL bytes from both gateways and stays healthy when an object is missing", async () => {
+    const data = Buffer.from("postgres-fallback-bytes");
+    H.photos.push({
+      id: "p-missing",
+      quoteId: "q1",
+      slot: "front",
+      role: "walkaround",
+      mime: "image/jpeg",
+      ts: 5001,
+      data,
+      objectKey: "photos/q1/p-missing",
+      sha256: createHash("sha256").update(data).digest("hex"),
+    });
+    H.storageError = new Error("404: No such object");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const privateGateway = await realFetch(`${base}/api/photos/p-missing`);
+    expect(privateGateway.status).toBe(200);
+    expect(Buffer.from(await privateGateway.arrayBuffer())).toEqual(data);
+
+    H.storageError = new Error("ECONNRESET");
+    const quoterGateway = await realFetch(`${base}/api/quoter/photo?id=p-missing`);
+    expect(quoterGateway.status).toBe(200);
+    expect(Buffer.from(await quoterGateway.arrayBuffer())).toEqual(data);
+
+    const health = await realFetch(`${base}/api/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true });
+    expect(consoleError).toHaveBeenCalledWith(
+      "Object Storage photo read failed; falling back to PostgreSQL",
+      expect.objectContaining({
+        objectKey: "photos/q1/p-missing",
+        photoId: "p-missing",
+      }),
+    );
+    consoleError.mockRestore();
   });
 
   it("is admin-only", async () => {

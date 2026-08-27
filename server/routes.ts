@@ -8,6 +8,7 @@ import {
   employees,
   employeePreferences,
   inspections,
+  inspectionsDataPremigration,
   intakes,
   photos,
   productionTracker,
@@ -31,9 +32,9 @@ import { registerPinRoutes, hashPin, isValidPin } from "./pin";
 import { registerAccuracyReportRoute } from "./quoteSnapshot";
 import { registerTrackerRoutes } from "./tracker";
 import { readJpegExifOrientation } from "./photoExif";
-import { objectStorage } from "./objectStorage";
-import { inspectionReferenceFromEncoded, openStoredPhotoStream, readStoredPhotoBytes } from "./photoSource";
+import { inspectionReferenceFromEncoded, readPhotoSourceBytes, readStoredPhotoBytes } from "./photoSource";
 import { isStoragePhotoReference, type PhotoSource } from "@shared/photoSource";
+import { planInspectionAssets } from "./storageMigrationData";
 
 // ---------- helpers ----------
 import { registerTrackerSyncAdminRoute } from "./trackerSyncAdmin";
@@ -56,6 +57,36 @@ function toClientRecord(row: Inspection) {
     updatedBy: { id: row.updatedById, email: row.updatedByEmail, name: row.updatedByName },
     updatedAt: row.updatedAt.getTime(),
   };
+}
+
+async function readInspectionReferenceFallback(
+  reference: { ref: string; mime: string; sha256: string },
+  encodedId: string,
+): Promise<Buffer> {
+  return readPhotoSourceBytes(reference, undefined, {
+    photoId: encodedId,
+    fallback: async () => {
+      const match = /^inspections\/([^/]+)\/\d+$/.exec(reference.ref);
+      if (!match) throw new Error(`Invalid inspection object key ${reference.ref}`);
+      const [backup] = await db
+        .select({
+          qcNumber: inspections.qcNumber,
+          originalData: inspectionsDataPremigration.originalData,
+        })
+        .from(inspections)
+        .innerJoin(
+          inspectionsDataPremigration,
+          eq(inspectionsDataPremigration.inspectionId, inspections.id),
+        )
+        .where(eq(inspections.qcNumber, match[1]));
+      if (!backup) throw new Error(`No PostgreSQL inspection backup for ${reference.ref}`);
+      const asset = planInspectionAssets(backup.qcNumber, backup.originalData).assets.find(
+        (candidate) => candidate.key === reference.ref && candidate.sha256 === reference.sha256,
+      );
+      if (!asset) throw new Error(`Inspection backup does not contain ${reference.ref}`);
+      return asset.bytes;
+    },
+  });
 }
 
 async function nextQcPreview(): Promise<number> {
@@ -272,7 +303,7 @@ export function registerAppRoutes(app: Express) {
     try {
       const id = String(req.params.id || "");
       const [row] = await db
-        .select({ mime: photos.mime, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, ts: photos.ts })
+        .select({ id: photos.id, mime: photos.mime, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, ts: photos.ts })
         .from(photos)
         .where(eq(photos.id, id));
       const inspectionRef = row ? null : inspectionReferenceFromEncoded(id);
@@ -286,10 +317,10 @@ export function registerAppRoutes(app: Express) {
       res.set("ETag", etag);
       res.set("X-Content-Type-Options", "nosniff");
       res.set("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
-      if (inspectionRef) return objectStorage.openReadStream(inspectionRef.ref).pipe(res);
-      const stream = openStoredPhotoStream(row!);
-      if (stream) return stream.pipe(res);
-      res.end(await readStoredPhotoBytes(row!));
+      const bytes = inspectionRef
+        ? await readInspectionReferenceFallback(inspectionRef, id)
+        : await readStoredPhotoBytes(row!);
+      res.end(bytes);
     } catch (err) {
       next(err);
     }
@@ -717,6 +748,7 @@ export function registerAppRoutes(app: Express) {
         const row = (one.rows as any[])[0];
         if (!row) continue;
         const buf = await readStoredPhotoBytes({
+          id: m.id,
           data: row.data,
           objectKey: row.object_key,
           sha256: row.sha256,
@@ -1098,7 +1130,7 @@ export function registerAppRoutes(app: Express) {
           return res.status(400).json({ error: "quoteId is required" });
         }
         const rows = await db
-          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, mime: photos.mime })
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, mime: photos.mime })
           .from(photos)
           .where(eq(photos.quoteId, quoteId));
 
@@ -1142,7 +1174,7 @@ export function registerAppRoutes(app: Express) {
         const offset = Math.max(0, Number(req.query.offset) || 0);
 
         const page = await db
-          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, mime: photos.mime })
+          .select({ id: photos.id, slot: photos.slot, quoteId: photos.quoteId, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, mime: photos.mime })
           .from(photos)
           .orderBy(photos.id)
           .limit(SCAN_PAGE_SIZE)

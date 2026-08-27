@@ -25,33 +25,56 @@ export function sha256(bytes: Uint8Array): string {
  */
 export class AppObjectStorage {
   private readonly client: Client;
+  private readonly readTimeoutMs: number;
 
-  constructor(client: Client = new Client()) {
+  constructor(client: Client = new Client(), readTimeoutMs = 60_000) {
     this.client = client;
+    this.readTimeoutMs = readTimeoutMs;
   }
 
   openReadStream(key: string): Readable {
-    return this.client.downloadAsStream(key, { decompress: false });
+    const stream = this.client.downloadAsStream(key, { decompress: false });
+    // The SDK can emit asynchronously after returning the stream. Consumers
+    // still receive the error through iteration, while this listener ensures a
+    // stream can never terminate the process as an unhandled EventEmitter error.
+    stream.on("error", () => {});
+    return stream;
   }
 
   async readBytes(key: string): Promise<Buffer> {
-    const value = unwrap(
-      await this.client.downloadAsBytes(key, { decompress: false }),
-      "download",
-      key,
-    );
-    return value[0];
+    const stream = this.openReadStream(key);
+    return new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        stream.off("data", onData);
+        stream.off("end", onEnd);
+        stream.off("error", onError);
+        if (error) reject(error);
+        else resolve(Buffer.concat(chunks));
+      };
+      const onData = (chunk: Buffer | Uint8Array | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      };
+      const onEnd = () => finish();
+      const onError = (error: Error) => finish(error);
+      const timer = setTimeout(() => {
+        const error = new Error(`Object Storage download timed out for ${key}`);
+        stream.destroy(error);
+        finish(error);
+      }, this.readTimeoutMs);
+      stream.on("data", onData);
+      stream.once("end", onEnd);
+      stream.once("error", onError);
+    });
   }
 
   async digest(key: string): Promise<ObjectDigest> {
-    const hash = createHash("sha256");
-    let bytes = 0;
-    for await (const chunk of this.openReadStream(key)) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      bytes += buffer.length;
-      hash.update(buffer);
-    }
-    return { bytes, sha256: hash.digest("hex") };
+    const contents = await this.readBytes(key);
+    return { bytes: contents.length, sha256: sha256(contents) };
   }
 
   async verify(key: string, expected: ObjectDigest): Promise<ObjectDigest> {

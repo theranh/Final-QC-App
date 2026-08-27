@@ -9,7 +9,7 @@ import { validateRates } from "./ratesValidation";
 import { bestWalkPhotoIds, findIntakeGalleryConflict } from "./localQuote";
 import { inferPhotoRole, isPhotoRole, validPhotoRoleForSlot } from "@shared/photoRoles";
 import { readJpegExifOrientation } from "./photoExif";
-import { openStoredPhotoStream, readStoredPhotoBytes } from "./photoSource";
+import { readStoredPhotoBytes } from "./photoSource";
 
 // ---------------------------------------------------------------------------
 // Body Quoter API, ported from the old standalone server (attached_assets/
@@ -834,7 +834,7 @@ export function registerQuoterRoutes(app: Express) {
       const id = String(req.query.id || "");
       if (!id) return res.status(400).json({ error: "Missing id" });
       const [row] = await db
-        .select({ mime: photos.mime, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, ts: photos.ts })
+        .select({ id: photos.id, mime: photos.mime, data: photos.data, objectKey: photos.objectKey, sha256: photos.sha256, ts: photos.ts })
         .from(photos)
         .where(eq(photos.id, id));
       if (!row) return res.status(404).json({ error: "Not found" });
@@ -846,8 +846,6 @@ export function registerQuoterRoutes(app: Express) {
       // A photo id may be overwritten by the rotate action. Revalidate every
       // time so even stale clients cannot keep yesterday's bytes for a day.
       res.set("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
-      const stream = openStoredPhotoStream(row);
-      if (stream) return stream.pipe(res);
       res.end(await readStoredPhotoBytes(row));
     }),
   );
