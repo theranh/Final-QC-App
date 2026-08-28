@@ -2,7 +2,7 @@
 
 Employee-facing web application for vehicle **intake**, **body quoting**, and **Final QC inspection**, used by Truck Ranch VPC and store staff. Mobile-first PWA client, server-authenticated, backed by PostgreSQL.
 
-> **Status of this document:** rewritten 2026-08-25 to describe the application as it actually exists. Earlier versions of this file described an earlier, client-only architecture (no backend, `localStorage` persistence, Static deployment). That description is obsolete and following it would break the API or lose data. See `design/ARCHITECTURE_AUDIT.md` §12 R1.
+> **Status of this document:** rewritten 2026-08-25, updated 2026-08-28 for the Object Storage photo migration. Describes the application as it actually exists. Earlier versions of this file described an earlier, client-only architecture (no backend, `localStorage` persistence, Static deployment). That description is obsolete and following it would break the API or lose data. See `design/ARCHITECTURE_AUDIT.md` §12 R1.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Express 5 + TypeScript  (server/, run via tsx in dev, esbuild bundle in prod)
    ├── ~47 /api routes
    └── append-only audit log on every mutation
    ▼
-PostgreSQL (Drizzle ORM) · Anthropic (damage classification) · Google Sheets (production tracker)
+PostgreSQL (Drizzle ORM) · Replit Object Storage (photo bytes) · Anthropic (damage classification) · Google Sheets (production tracker)
 ```
 
 Not a static site. There is a long-running server process, a database, an identity provider, and background workers.
@@ -38,7 +38,14 @@ npx tsc --noEmit     # TypeScript check
 npm run build        # Vite client build + esbuild server bundle → dist/ and dist-server/
 npm run start        # production server, port 5000
 npm run db:push      # push Drizzle schema changes
+
+npm run storage:verify    # all-row check: every object key resolves, sizes and SHA-256 match
+npm run storage:migrate   # copy photo bytes to Object Storage (idempotent, deterministic keys)
+npm run storage:rollback  # clear object references, restore inspection JSON from backups
 ```
+
+The three `storage:*` scripts were used for the one-time migration. They are idempotent and safe to
+re-run, but under normal operation only `storage:verify` should ever be needed.
 
 Replit development workflow: **Start application** → `PORT=5000 npm run dev`.
 
@@ -56,6 +63,7 @@ All required unless noted. Provisioned by Replit in that environment.
 | `QUOTER_DATABASE_URL` | Optional. Legacy Quoter database, **read-only** migration/sync source. Never written to. |
 | Anthropic credentials | Optional. Damage classification; absent → the classify endpoint returns 503 and the UI falls back to manual classification. |
 | Google service credentials | Optional. Production-tracker sheet reads and the sheet-export queue. |
+| Object Storage | Provisioned by Replit. The default bucket is named in `.replit` under `[objectStorage] defaultBucketID`; the SDK resolves it with no explicit id. |
 | `PORT` | Optional in dev. Defaults to 5000. |
 
 Missing required variables are logged as explicit `STARTUP ERROR:` lines rather than failing silently.
@@ -85,6 +93,29 @@ Schema: `shared/schema.ts`. Highlights:
 - `production_tracker` (+ `_archive`) — closed months frozen exactly as typed in the sheet, never recomputed; every re-snapshot archives what it replaces.
 - `vehicle_activity_events` (append-only) and `vehicle_handoff_flags` — the per-vehicle timeline and handoff flags.
 - `deleted_quotes` — tombstones, so a queued offline photo upload can't resurrect a deliberately deleted quote.
+- `inspections_data_premigration` — immutable pre-migration copy of every inspection's `data` jsonb, written before photo references replaced inline data URLs. Do not modify or prune it; it is the rollback path.
+
+## Photo storage
+
+Photo bytes live in **Replit Object Storage**. PostgreSQL keeps the reference and the digest, and
+retains the original bytes as a fallback.
+
+- `photos.object_key` / `photos.sha256` and `photo_orientation_backups.object_key` /
+  `storage_sha256` hold the reference. Keys are deterministic
+  (`inspections/{qcNumber}/{index}`), so a re-run reuses the same object rather than orphaning one.
+- `photos.data` (bytea) is **still populated and must not be dropped.** It is the fallback source
+  and the rollback path. Retiring it is a separate, later decision.
+- Reads never pipe a storage stream to the response. `server/photoSource.ts` fully buffers the
+  object, checks length and SHA-256 (deriving the expected digest from the retained bytea when a
+  legacy row has no stored hash), and only then writes bytes to the client. Missing, truncated,
+  zero-byte, corrupt, network-failed or timed-out reads (60s) fall back to PostgreSQL and log the
+  failing `object_key` and photo id.
+- Inspection photo references fall back to `inspections_data_premigration`.
+- Every read path — `/api/photos/:id`, `/api/quoter/photo`, full export, sync export, EXIF and
+  orientation-repair readers — goes through that one accessor. Do not add a read that bypasses it.
+
+Applied to production 2026-08-28 by startup migration `0014_object_storage_foundation`:
+3,304 photos and 208 orientation backups, zero mismatches.
 
 The **in-progress inspection draft** stays in `localStorage` on purpose, so a refresh or crash mid-inspection loses nothing. Everything committed lives in the database.
 
@@ -117,7 +148,10 @@ Do **not** use a Static deployment target. There is a server process, and static
 4. Capture live camera frames as-is. File imports may need EXIF normalization; do not reintroduce universal gravity-based rotation.
 5. Keep inspection data, photos and credentials out of commits.
 6. `QUOTER_DATABASE_URL` is read-only. Never modify or delete the legacy Quoter database.
-7. GitHub `main` is the source of truth. Sync with fetch → `pull --ff-only` → validate → commit → push → **pull again to confirm heads agree**. Never force-push `main`.
+7. **Do not drop `photos.data`, and do not delete `inspections_data_premigration`.** Both are live
+   fallback and rollback paths for Object Storage. Do not add a photo read that bypasses
+   `server/photoSource.ts`.
+8. GitHub `main` is the source of truth. Sync with fetch → `pull --ff-only` → validate → commit → push → **pull again to confirm heads agree**. Never force-push `main`.
 
 ## Related documents
 
