@@ -115,7 +115,7 @@ export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, 
             {isF && (
               <>
                 <div style={{ display: 'flex', gap: 7, marginTop: 9, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <PhotoRow photos={phs} onAdd={() => onTakePhoto(key)} onRemove={(idx) => onRemovePhoto(key, idx)} />
+                  <PhotoRow photos={phs} onAdd={() => onTakePhoto(key)} onRemove={(idx) => onRemovePhoto(key, idx)} onOpen={onOpenLightbox} />
                   <input className="input" value={note} onChange={(e) => onNote(key, e)} placeholder="New fail note (required)…" style={{ flex: 1, minWidth: 140, height: 44, fontSize: 12 }} />
                   <VoiceNoteButton
                     currentNote={note}
