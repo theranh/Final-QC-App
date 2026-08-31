@@ -23,6 +23,7 @@ describe('Lightbox', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enlarge VIN label' }));
     const dialog = screen.getByRole('dialog', { name: 'Photo viewer' });
     expect(dialog).toBeInTheDocument();
+    expect(dialog.parentElement?.parentElement).toBe(document.body);
     fireEvent.mouseDown(screen.getByAltText('VIN label enlarged'));
     expect(dialog).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close photo viewer' }));

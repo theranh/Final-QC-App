@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 
 export default function Lightbox({ src, alt = 'Enlarged photo', onClose, children }) {
   const dialogRef = useRef(null);
@@ -41,13 +42,14 @@ export default function Lightbox({ src, alt = 'Enlarged photo', onClose, childre
   }, [src]);
 
   if (!src) return null;
-  return (
+  return createPortal(
     <div className="lightbox-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div ref={dialogRef} className="lightbox-dialog" role="dialog" aria-modal="true" aria-label="Photo viewer" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
         <button ref={closeRef} type="button" className="lightbox-close" aria-label="Close photo viewer" onClick={onClose}>✕</button>
         <img className="lightbox-img" src={src} alt={alt} />
         {children && <div className="lightbox-actions">{children}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

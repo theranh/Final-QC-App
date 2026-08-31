@@ -197,7 +197,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 12px 14px; font-size: 12px; font-weight: 600; z-index: 60; box-shadow: 0 8px 24px rgba(38, 34, 32, 0.3); text-align: center;
 }
 .lightbox-overlay {
-  position: fixed; inset: 0; background: rgba(20, 18, 16, 0.94); z-index: 1000; display: flex;
+  position: fixed; inset: 0; background: rgba(20, 18, 16, 0.94); z-index: 2147483647; display: flex;
   align-items: center; justify-content: center;
   padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
 }
