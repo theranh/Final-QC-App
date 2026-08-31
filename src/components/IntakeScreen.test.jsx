@@ -651,11 +651,14 @@ describe('IntakeScreen cache and request ordering', () => {
     render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
     const first = (await screen.findByRole('button', { name: /open ext_front 1/i })).closest('[data-photo-id]');
     const last = screen.getByRole('button', { name: /open xtra_1 3/i }).closest('[data-photo-id]');
+    first.setPointerCapture = vi.fn();
     const originalElementFromPoint = document.elementFromPoint;
     document.elementFromPoint = vi.fn(() => last);
 
     fireEvent.pointerDown(first, { pointerId: 7, clientX: 10, clientY: 10, button: 0 });
+    expect(first.setPointerCapture).not.toHaveBeenCalled();
     fireEvent.pointerMove(first, { pointerId: 7, clientX: 100, clientY: 100 });
+    expect(first.setPointerCapture).toHaveBeenCalledWith(7);
     fireEvent.pointerUp(first, { pointerId: 7, clientX: 100, clientY: 100 });
 
     await waitFor(() => expect(orderIntakePhotos).toHaveBeenCalledWith(
@@ -664,6 +667,28 @@ describe('IntakeScreen cache and request ordering', () => {
     ));
     if (originalElementFromPoint) document.elementFromPoint = originalElementFromPoint;
     else delete document.elementFromPoint;
+  });
+
+  it('keeps a desktop press on a gallery photo as an enlargement click instead of pointer capture', async () => {
+    const intake = { ...serverRow(VALID_VIN, 'OPEN', 100), id: 'in-open-ui', quoteId: 'q-open-ui' };
+    getIntake.mockResolvedValue(intake);
+    intakePhotos.mockResolvedValue({
+      intakeId: intake.id,
+      quoteId: intake.quoteId,
+      photos: [{ id: 'walk-open', slot: 'ext_front', role: 'walk', ts: 1 }],
+    });
+    render(<IntakeScreen showToast={() => {}} openVin={VALID_VIN} onOpenVinConsumed={() => {}} />);
+    const opener = await screen.findByRole('button', { name: /open ext_front 1/i });
+    const tile = opener.closest('[data-photo-id]');
+    tile.setPointerCapture = vi.fn();
+
+    fireEvent.pointerDown(opener, { pointerId: 8, clientX: 40, clientY: 40, button: 0 });
+    expect(tile.setPointerCapture).not.toHaveBeenCalled();
+    fireEvent.pointerUp(opener, { pointerId: 8, clientX: 40, clientY: 40, button: 0 });
+    fireEvent.click(opener);
+
+    expect(screen.getByRole('dialog', { name: 'Photo viewer' })).toBeInTheDocument();
+    expect(screen.getByAltText('Intake photo')).toHaveAttribute('src', '/api/quoter/photo?id=walk-open&v=1');
   });
 
   it('offers accessible reorder controls and restores the order when persistence fails', async () => {

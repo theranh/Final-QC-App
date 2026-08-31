@@ -102,13 +102,15 @@ function ReorderablePhotoGallery({ photos, borderColor, altFor, onOpen, onPrevie
               lastTarget: p.id,
               originalIds: photos.map((photo) => photo.id),
             };
-            e.currentTarget.setPointerCapture?.(e.pointerId);
           }}
           onPointerMove={(e) => {
             const drag = dragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 8) return;
-            drag.moved = true;
+            if (!drag.moved) {
+              drag.moved = true;
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+            }
             const target = document.elementFromPoint?.(e.clientX, e.clientY)?.closest?.('[data-photo-id]');
             const targetId = target?.getAttribute('data-photo-id');
             if (targetId && targetId !== drag.id && targetId !== drag.lastTarget) {

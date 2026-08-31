@@ -3,8 +3,8 @@ name: Photo viewer validation
 description: How to validate photo enlargement changes beyond isolated component tests.
 ---
 
-Photo enlargement work is not complete based only on DOM click tests. Confirm the published PWA serves the expected asset bundle and mount full-screen viewers at the document root rather than inside the clipped application frame.
+Photo enlargement work is not complete based only on direct DOM click tests. Confirm the published PWA serves the expected asset bundle and exercise the real pointer-down/move/up sequence on any photo that also supports drag-to-reorder.
 
-**Why:** Desktop users can remain on a stale service-worker-controlled bundle, while nested fixed overlays can behave differently from the isolated DOM test environment. Both cases look like a photo click doing nothing even when the callback test passes.
+**Why:** Desktop users can remain on a stale service-worker-controlled bundle. Separately, capturing the pointer on mouse-down for a reorder gesture retargets the eventual click away from the nested photo button, so the callback test passes while a real mouse click does nothing.
 
-**How to apply:** For photo-viewer changes, compare the live and local asset hashes after publishing, test the exact reopened-photo flow, and keep modal overlays in a document-level portal.
+**How to apply:** Compare live and local asset hashes after publishing. For reorderable galleries, delay pointer capture until movement crosses the drag threshold and test both a stationary click and a drag sequence.
