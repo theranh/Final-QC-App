@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { CATS, chipStyle } from '../lib/constants';
 import { api } from '../lib/api';
 import ActivityTimeline from './ActivityTimeline';
+import PhotoButton from './PhotoButton';
 
 // Vehicle card — every record for one VIN on one screen: the TR-INTAKE-V2
 // intake (photos, steps, RO-Ready check, quote) from this app's local intakes
@@ -115,13 +116,8 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
               {photos.length ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 5, marginTop: 8 }}>
                   {photos.map((p, i) => (
-                    <div key={i} style={{ position: 'relative' }}>
-                      <img
-                        src={p.url}
-                        alt={p.label || 'intake photo'}
-                        onClick={() => onOpenLightbox(p.url)}
-                        style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
-                      />
+                     <div key={i} style={{ position: 'relative' }}>
+                       <PhotoButton src={p.url} alt={p.label || `intake photo ${i + 1}`} onOpen={onOpenLightbox} style={{ width: '100%' }} imageStyle={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)' }} />
                       {p.label && (
                         <span style={{ position: 'absolute', bottom: 2, left: 2, right: 2, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,.55)', borderRadius: 4, padding: '1px 3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {p.label}
@@ -173,7 +169,7 @@ export default function VehicleCard({ vehicle, record, onBack, onOpenRecord, onO
                   {(f.photos || []).length > 0 && (
                     <div style={{ display: 'flex', gap: 5, marginTop: 5, flexWrap: 'wrap' }}>
                       {f.photos.map((p, j) => (
-                        <img key={j} src={p} alt="fail" onClick={() => onOpenLightbox(p)} style={{ width: 52, height: 52, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)', cursor: 'pointer' }} />
+                         <PhotoButton key={j} src={p} alt={`QC failure photo ${j + 1}`} onOpen={onOpenLightbox} imageStyle={{ width: 52, height: 52, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)' }} />
                       ))}
                     </div>
                   )}

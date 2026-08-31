@@ -25,6 +25,8 @@ import { createSaveTracker } from '../lib/saveTracker';
 import SaveStatusPill from './SaveStatusPill';
 import { photoRoleOf, photoUrl } from '../../shared/photoRoles';
 import { rotateJpegDataUrl } from '../lib/photo';
+import Lightbox from './Lightbox';
+import PhotoButton from './PhotoButton';
 
 // Intake tab — VIN-keyed intake with the 9-item RO-ready sign-off and PIN
 // commit. Completing the RO-ready checklist (9/9) is what gates completed_at,
@@ -1019,6 +1021,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
     ].filter(Boolean);
     const homeReady = missing.length === 0;
     return (
+      <>
       <div className="screen">
         <div className="screen-topbar"><div className="screen-title-row"><span className="screen-title">Intake</span><span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>TR-INTAKE-V2</span></div></div>
         <div className="screen-body">
@@ -1109,7 +1112,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
             <div className="empty-note">No saved quotes match.</div>
           ) : (
             recentFiltered.slice(0, homeSearch ? 20 : 6).map((q) => (
-              <RecentQuoteCard key={q.id} quote={q} onClick={() => openRecentQuote(q)} />
+              <RecentQuoteCard key={q.id} quote={q} onClick={() => openRecentQuote(q)} onOpenCover={(url) => setLightbox({ url, id: null })} />
             ))
           )}
 
@@ -1149,6 +1152,8 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
           />
         )}
       </div>
+      <Lightbox src={lightbox?.url} alt="Recent quote cover photo" onClose={() => setLightbox(null)} />
+      </>
     );
   }
 
@@ -1558,17 +1563,14 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
       {walkOpen && (
         <WalkAroundCamera quoteId={walkQuoteId || intake.quoteId} committed={!!quoteRowRef.current?.committedBy} addOnly={locked} initialMode={walkMode} onClose={closeWalkCamera} showToast={showToast} />
       )}
-      {lightbox && (
-        <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
-          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox.url}")` }} />
+      <Lightbox src={lightbox?.url} alt="Intake photo" onClose={() => setLightbox(null)}>
           {/* ROTATE is always available — straightening a sideways shot is
               allowed even after sign-off. DELETE stays locked once committed. */}
-          {lightbox.id && (
+          {lightbox?.id && (
             <button
               className="btn btn-outline-brown lightbox-action"
               disabled={rotatingPhotoId === lightbox.id}
-              onClick={async (e) => {
-                e.stopPropagation();
+                onClick={async () => {
                 if (rotationBusyRef.current) return;
                 rotationBusyRef.current = true;
                 setRotatingPhotoId(lightbox.id);
@@ -1661,11 +1663,10 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               {rotatingPhotoId === lightbox.id ? 'ROTATING…' : '↻ ROTATE'}
             </button>
           )}
-          {lightbox.id && !quoteRowRef.current?.committedBy && (
+          {lightbox?.id && !quoteRowRef.current?.committedBy && (
             <button
               className="btn btn-outline-red lightbox-action"
-              onClick={async (e) => {
-                e.stopPropagation();
+              onClick={async () => {
                 if (!window.confirm('Delete this photo? This can’t be undone.')) return;
                 try {
                   await api.deleteQuotePhoto({ id: lightbox.id });
@@ -1703,8 +1704,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
               🗑 DELETE PHOTO
             </button>
           )}
-        </div>
-      )}
+      </Lightbox>
     </div>
   );
 }
@@ -1712,7 +1712,7 @@ export default function IntakeScreen({ showToast, openVin, onOpenVinConsumed, op
 // Shared quote-list card (recent quotes on the landing + In-Take Quotes on the
 // Vehicles tab). The caller owns cover selection; Vehicles supplies the
 // canonical first surviving photo from the intake's exact gallery.
-export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
+export function RecentQuoteCard({ quote: q, onClick, onOpenCover, badge, footer }) {
   const hrs = q.totals?.hrs ?? q.hrs ?? 0;
   const lineCount = Number.isFinite(q.lineCount)
     ? q.lineCount
@@ -1720,13 +1720,13 @@ export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
   const stamp = q.ts ?? q.completedAt ?? null;
   const date = stamp ? new Date(stamp).toLocaleDateString() : (q.dateISO ? new Date(q.dateISO).toLocaleDateString() : '—');
   return (
-    <button className="card" onClick={onClick} style={{ textAlign: 'left', width: '100%', cursor: 'pointer', padding: 13, display: 'flex', gap: 11, alignItems: 'center' }}>
+    <div className="card" style={{ textAlign: 'left', width: '100%', padding: 13, display: 'flex', gap: 11, alignItems: 'center' }}>
       {q.cover ? (
-        <img src={q.cover} alt="" style={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', flex: '0 0 auto', border: '1px solid var(--border)' }} />
+        <PhotoButton src={q.cover} alt={`${q.vehicle || 'Recent quote'} cover photo`} onOpen={onOpenCover} style={{ flex: '0 0 auto' }} imageStyle={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', border: '1px solid var(--border)' }} />
       ) : (
         <div style={{ width: 46, height: 46, borderRadius: 8, flex: '0 0 auto', background: 'var(--panel)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted2)', fontSize: 18 }}>🚚</div>
       )}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <button type="button" onClick={onClick} style={{ flex: 1, minWidth: 0, padding: 0, border: 0, background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <span className="oswald" style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>{q.vehicle || 'Vehicle not decoded'}</span>
           {badge && <span style={{ fontSize: 8.5, fontWeight: 700, color: '#fff', background: 'var(--gold)', padding: '2px 7px', borderRadius: 4, flex: '0 0 auto' }}>{badge}</span>}
@@ -1738,8 +1738,8 @@ export function RecentQuoteCard({ quote: q, onClick, badge, footer }) {
           {hrs > 0 && <b>{hrs} hr</b>}
         </div>
         {footer && <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 6, color: 'var(--red)' }}>{footer}</div>}
-      </div>
-    </button>
+      </button>
+    </div>
   );
 }
 

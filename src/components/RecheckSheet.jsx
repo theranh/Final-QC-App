@@ -84,7 +84,7 @@ export default function RecheckSheet({ record, users, rcUid, onSetRcUid, marks, 
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8, background: '#F9F7F5', border: '1px solid var(--border2)', borderRadius: 8, padding: 8 }}>
               {(oi.photos || []).map((src, idx) => (
-                <div key={idx} className="photo-thumb" style={{ width: 46, height: 38, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
+                <button type="button" key={idx} aria-label={`Enlarge original failure photo ${idx + 1}`} className="photo-thumb" style={{ width: 46, height: 38, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
               ))}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 10, color: 'var(--brown)', lineHeight: 1.4 }}>&ldquo;{oi.note || '—'}&rdquo;</div>

@@ -5,14 +5,16 @@ export default function PhotoRow({ photos, onAdd, onRemove, onOpen, size = 56, h
   const w = size, h = height || Math.round(size * 0.79);
   return (
     <>
-      <div className="photo-add" style={{ width: w, height: h }} onClick={onAdd}>
+      <button type="button" className="photo-add" aria-label="Add photo" style={{ width: w, height: h }} onClick={onAdd}>
         📷
-      </div>
+      </button>
       {photos.map((src, idx) => (
-        <div
+        <button
+          type="button"
           key={idx}
           className="photo-thumb"
-          title="Tap to remove"
+          aria-label={onOpen ? `Enlarge photo ${idx + 1}` : `Remove photo ${idx + 1}`}
+          title={onOpen ? 'Enlarge photo' : 'Remove photo'}
           style={{ width: w, height: h, backgroundImage: `url('${photoSourceUrl(src)}')` }}
           onClick={(e) => {
             e.stopPropagation();

@@ -102,6 +102,7 @@ describe('QuoteScreen camera navigation', () => {
   });
 
   it('makes every stored photo reachable from a reopened saved quote', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
     api.quoterSync.mockResolvedValueOnce({
       quotes: [{
         id: 'FQ-with-saved-photos',
@@ -157,5 +158,8 @@ describe('QuoteScreen camera navigation', () => {
       'src',
       '/api/quoter/photo?id=walk-1&v=1',
     );
+    fireEvent.click(screen.getByRole('button', { name: 'Enlarge ext_front' }));
+    expect(screen.getByRole('dialog', { name: 'Photo viewer' })).toBeInTheDocument();
+    expect(screen.getByAltText('Quote photo')).toHaveAttribute('src', '/api/quoter/photo?id=walk-1&v=1');
   });
 });

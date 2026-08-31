@@ -906,6 +906,7 @@ function AuthedApp({ me, onAuthRefresh }) {
         onOpenIntake={openIntakeFor}
         onOpenRecord={openRecord}
         onOpenQuote={(q) => { setViewRec(null); setVehSel(null); setIntakeOpenVin(null); setIntakeOpenQuote(q); setTab('intake'); }}
+        onOpenLightbox={setLightbox}
         onDeleted={async () => {
           showToast('Deleted from Vehicles — history retained');
           await Promise.all([loadData(), refreshDash()]);

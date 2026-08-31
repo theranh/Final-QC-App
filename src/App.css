@@ -161,11 +161,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* ---------- photo tiles ---------- */
 .photo-add {
   border-radius: 7px; border: 1.5px dashed var(--muted2); display: flex; align-items: center; justify-content: center;
-  font-size: 16px; color: var(--muted); cursor: pointer; flex: 0 0 auto; background: transparent;
+  appearance: none; padding: 0; font-size: 16px; color: var(--muted); cursor: pointer; flex: 0 0 auto; background: transparent;
 }
 .photo-thumb {
-  border-radius: 7px; border: 1px solid #e0dad3; background-color: #ece7e1; background-size: cover; background-position: center;
+  appearance: none; padding: 0; border-radius: 7px; border: 1px solid #e0dad3; background-color: #ece7e1; background-size: cover; background-position: center;
   flex: 0 0 auto; cursor: pointer;
+}
+.photo-view-button {
+  appearance: none; display: block; min-width: 0; padding: 0; border: 0; border-radius: 7px;
+  background: transparent; color: inherit; font: inherit; cursor: zoom-in; position: relative; overflow: hidden;
+}
+.photo-view-button img { display: block; }
+@media (hover: hover) {
+  .photo-view-button img { transition: filter .15s ease, transform .15s ease; }
+  .photo-view-button:hover img { filter: brightness(.88); transform: scale(1.015); }
 }
 
 /* ---------- bottom nav ---------- */
@@ -188,12 +197,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 12px 14px; font-size: 12px; font-weight: 600; z-index: 60; box-shadow: 0 8px 24px rgba(38, 34, 32, 0.3); text-align: center;
 }
 .lightbox-overlay {
-  position: absolute; inset: 0; background: rgba(38, 34, 32, 0.88); z-index: 80; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 12px; cursor: pointer;
+  position: fixed; inset: 0; background: rgba(20, 18, 16, 0.94); z-index: 1000; display: flex;
+  align-items: center; justify-content: center;
   padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
 }
-.lightbox-img { flex: 1; min-height: 0; width: 100%; background-size: contain; background-position: center; background-repeat: no-repeat; }
+.lightbox-dialog { width: min(1100px, 100%); height: min(900px, 100%); display: flex; flex-direction: column; align-items: center; gap: 12px; position: relative; }
+.lightbox-img { flex: 1; min-height: 0; min-width: 0; max-width: 100%; width: auto; height: auto; object-fit: contain; border-radius: 4px; }
+.lightbox-close {
+  flex: none; align-self: flex-end; width: 44px; height: 44px; border: 1px solid rgba(255,255,255,.55);
+  border-radius: 50%; background: rgba(0,0,0,.45); color: #fff; cursor: pointer; font-size: 18px;
+}
+.lightbox-actions { flex: none; width: min(560px, 100%); display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .lightbox-action { flex: none; align-self: center; width: min(260px, 100%); }
+@media (prefers-reduced-motion: reduce) {
+  .photo-view-button img { transition: none; }
+}
 
 /* ---------- signature pad ---------- */
 .sig-pad { margin-top: 6px; position: relative; border: 1.5px dashed var(--muted2); border-radius: 9px; background: #fdfcfb; overflow: hidden; }

@@ -2,7 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./IntakeScreen', () => ({
-  RecentQuoteCard: ({ quote, onClick }) => <button onClick={onClick}>{quote.vehicle}</button>,
+  RecentQuoteCard: ({ quote, onClick, onOpenCover }) => (
+    <div>
+      {quote.cover && <button onClick={() => onOpenCover(quote.cover)}>Enlarge awaiting cover</button>}
+      <button onClick={onClick}>{quote.vehicle}</button>
+    </div>
+  ),
 }));
 vi.mock('./GlobalSearch', () => ({ default: () => null }));
 vi.mock('./SavedViews', () => ({ default: () => null }));
@@ -64,13 +69,14 @@ describe('VehiclesScreen completed vehicle navigation', () => {
     expect(screen.queryByText(/Archived truck/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Loading vehicles/i)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Fallback truck/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Fallback truck details' }));
     expect(onOpenRecord).toHaveBeenCalledWith('FQ-1888');
   });
 
   it('opens the intake overview instead of the damage-oriented vehicle detail', () => {
     const onOpenIntake = vi.fn();
     const onOpenVehicle = vi.fn();
+    const onOpenLightbox = vi.fn();
     const vehicle = {
       vin: '1HGCM82633A004352',
       stock: 'T-1234',
@@ -97,10 +103,11 @@ describe('VehiclesScreen completed vehicle navigation', () => {
         onOpenIntake={onOpenIntake}
         onOpenRecord={() => {}}
         onOpenQuote={() => {}}
+        onOpenLightbox={onOpenLightbox}
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /2021 Honda Accord/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open 2021 Honda Accord details' }));
 
     expect(onOpenIntake).toHaveBeenCalledWith(vehicle);
     expect(onOpenVehicle).not.toHaveBeenCalled();
@@ -108,20 +115,24 @@ describe('VehiclesScreen completed vehicle navigation', () => {
     expect(screen.getByText(/Inspector: Alex Smith/i)).toBeInTheDocument();
     expect(screen.getByText(/Estimator: Jamie Lee/i)).toBeInTheDocument();
     expect(screen.getByText(/3.5 hrs.*\$525.*2 lines/i)).toBeInTheDocument();
-    const cover = screen.getByTestId('completed-vehicle-cover');
+    const cover = document.querySelector('.completed-vehicle-cover');
     expect(cover).toHaveAttribute('src', '/api/quoter/photo?id=completed-first-photo');
     expect(cover.style.width).toBe('46px');
     expect(cover.style.height).toBe('46px');
+    fireEvent.click(screen.getByRole('button', { name: 'Enlarge 2021 Honda Accord cover photo' }));
+    expect(onOpenLightbox).toHaveBeenCalledWith('/api/quoter/photo?id=completed-first-photo');
   });
 
   it('preserves tap navigation when no swipe occurs', () => {
     const onOpenIntake = vi.fn();
+    const onOpenLightbox = vi.fn();
     const intake = {
       intakeId: 'intake-exact-1',
       vin: 'SAMEVIN1234567890',
       stock: 'A-1',
       vehicle: 'Awaiting truck',
       completedAt: 10,
+      cover: '/awaiting-cover.jpg',
     };
     render(
       <VehiclesScreen
@@ -133,11 +144,14 @@ describe('VehiclesScreen completed vehicle navigation', () => {
         onOpenIntake={onOpenIntake}
         onOpenRecord={() => {}}
         onOpenQuote={() => {}}
+        onOpenLightbox={onOpenLightbox}
       />,
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Awaiting truck' }));
     expect(onOpenIntake).toHaveBeenCalledWith(intake);
+    fireEvent.click(screen.getByRole('button', { name: 'Enlarge awaiting cover' }));
+    expect(onOpenLightbox).toHaveBeenCalledWith('/awaiting-cover.jpg');
   });
 
   it('keeps every swipe shell full-width and non-shrinking in the mobile list', () => {
@@ -282,7 +296,7 @@ describe('VehiclesScreen completed vehicle navigation', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Legacy Ford F-150/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Legacy Ford F-150 details' }));
 
     expect(onOpenRecord).toHaveBeenCalledWith('FQ-0999');
     expect(onOpenIntake).not.toHaveBeenCalled();

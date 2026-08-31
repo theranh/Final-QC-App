@@ -5,8 +5,12 @@
 // Task #87 regression: wideThumb (compressed data URL) must be stored in the
 // saved line so the WIDE thumbnail appears instantly on reopen, before the
 // async rehydrateWideShots fetch completes.
-import { describe, it, expect, vi } from 'vitest';
-import { rehydrateWideShots } from './QuoteScreen';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { defaultRates } from '../lib/quoterPricing';
+import { LineCard, rehydrateWideShots } from './QuoteScreen';
+
+afterEach(cleanup);
 
 // Minimal JPEG bytes — enough for Blob + FileReader to produce a valid data URL.
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
@@ -191,5 +195,34 @@ describe('rehydrateWideShots', () => {
     expect(src.startsWith('data:image/jpeg;base64,')).toBe(true);
     // Full-res is different from (longer than) the original compressed thumb.
     expect(src).not.toBe(WIDE_THUMB);
+  });
+
+  it('passes the full-resolution WIDE source to the viewer when both sources exist', () => {
+    const onEnlarge = vi.fn();
+    const full = 'fullresolutionbytes';
+    render(
+      <LineCard
+        line={{
+          id: 'rendered-wide',
+          status: 'done',
+          thumb: 'data:image/jpeg;base64,close',
+          wideThumb: 'data:image/jpeg;base64,smallthumb',
+          wideBase64: full,
+          cls: {
+            panel: 'hood',
+            damage_type: 'dent',
+            severity: 'minor',
+            paint_damaged: false,
+            ri_parts_needed: [],
+          },
+        }}
+        rates={defaultRates()}
+        locked
+        onEnlarge={onEnlarge}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enlarge Wide damage context photo' }));
+    expect(onEnlarge).toHaveBeenCalledWith(`data:image/jpeg;base64,${full}`);
   });
 });

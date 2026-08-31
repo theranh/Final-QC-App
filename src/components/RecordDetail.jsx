@@ -98,7 +98,7 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
           <div className="card">
             <div className="card-title">PROOF OF UNIT — VIN LABEL PHOTO</div>
             <div style={{ display: 'flex', gap: 9, marginTop: 8, alignItems: 'center' }}>
-              <div className="photo-thumb" style={{ width: 110, height: 80, backgroundImage: `url('${photoSourceUrl(r.vinPhoto)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(r.vinPhoto))} />
+              <button type="button" aria-label="Enlarge VIN label photo" className="photo-thumb" style={{ width: 110, height: 80, backgroundImage: `url('${photoSourceUrl(r.vinPhoto)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(r.vinPhoto))} />
               <div className="mono" style={{ fontSize: 11, color: 'var(--ink)', wordBreak: 'break-all', lineHeight: 1.5 }}>{r.vin || '—'}</div>
             </div>
           </div>
@@ -128,7 +128,7 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
                 {f.photos.length > 0 && (
                   <div style={{ display: 'flex', gap: 7, marginTop: 7, flexWrap: 'wrap' }}>
                     {f.photos.map((src, pi) => (
-                      <div key={pi} className="photo-thumb" style={{ width: 96, height: 74, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
+                       <button type="button" key={pi} aria-label={`Enlarge failure photo ${pi + 1}`} className="photo-thumb" style={{ width: 96, height: 74, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
                     ))}
                   </div>
                 )}
@@ -170,7 +170,7 @@ export default function RecordDetail({ record: r, onBack, onStartRecheck, onOpen
                 {(ki.photos || []).length > 0 && (
                   <div style={{ display: 'flex', gap: 7, marginTop: 6, flexWrap: 'wrap' }}>
                     {ki.photos.map((src, pi) => (
-                      <div key={pi} className="photo-thumb" style={{ width: 96, height: 74, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
+                       <button type="button" key={pi} aria-label={`Enlarge re-check photo ${pi + 1}`} className="photo-thumb" style={{ width: 96, height: 74, backgroundImage: `url('${photoSourceUrl(src)}')` }} onClick={() => onOpenLightbox(photoSourceUrl(src))} />
                     ))}
                   </div>
                 )}

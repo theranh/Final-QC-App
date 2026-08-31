@@ -20,6 +20,8 @@ import {
   CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CLASSIFY_PROMPT, CLASSIFY_PROMPT_PAIR, SECOND_LOOK_ADDENDUM,
 } from '../lib/quoterClassify';
 import { inferPhotoRole, photoRoleOf, photoUrl } from '../../shared/photoRoles';
+import Lightbox from './Lightbox';
+import PhotoButton from './PhotoButton';
 
 // Stable UUID generator for analysis tracking.  Uses the Web Crypto API when
 // available (all modern browsers / React Native); falls back to Math.random()
@@ -1413,8 +1415,8 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
               {lines.map((l) => (
                 <div key={l.id} style={{ position: 'relative', width: 64, height: 64, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
-                  {l.thumb && <img src={l.thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
-                  <div style={{ position: 'absolute', inset: 0, background: l.status === 'running' ? 'rgba(206,27,27,0.25)' : l.status === 'queued' ? 'rgba(38,34,32,0.35)' : 'transparent' }} />
+                  {l.thumb && <PhotoButton src={l.thumb} alt="Damage photo being analyzed" onOpen={setLightbox} style={{ width: '100%', height: '100%' }} imageStyle={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                  <div aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', background: l.status === 'running' ? 'rgba(206,27,27,0.25)' : l.status === 'queued' ? 'rgba(38,34,32,0.35)' : 'transparent' }} />
                 </div>
               ))}
             </div>
@@ -1437,6 +1439,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
             onTogglePart={togglePart}
             onAddMore={() => setStep('photos')}
             onViewPhotos={() => { setViewingAllSavedPhotos(true); setStep('photos'); }}
+            onEnlarge={setLightbox}
             savedPhotoCount={serverPhotos.length}
             walkPhotoCount={serverPhotos.filter((p) => photoRoleOf(p) === 'walk').length}
             flags={flags}
@@ -1506,11 +1509,7 @@ export default function QuoteScreen({ prefill, onClose, showToast, onQuoteId }) 
           onCancel={() => setScanningStock(false)}
         />
       )}
-      {lightbox && (
-        <div className="lightbox-overlay" onClick={() => setLightbox(null)}>
-          <div className="lightbox-img" style={{ backgroundImage: `url("${lightbox}")` }} />
-        </div>
-      )}
+      <Lightbox src={lightbox} alt="Quote photo" onClose={() => setLightbox(null)} />
     </div>
   );
 }
@@ -1722,13 +1721,13 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
         {walkShots.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {walkShots.map((p) => (
-              <img
+              <PhotoButton
                 key={p.id}
                 src={photoUrl(p)}
                 alt={p.slot || 'walk-around photo'}
-                loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
-                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
+                onOpen={onEnlarge}
+                style={{ width: '100%' }}
+                imageStyle={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)' }}
               />
             ))}
           </div>
@@ -1760,13 +1759,13 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
         {damageShots.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {damageShots.filter((p) => !photos.some((lp) => lp.id === p.id)).map((p) => (
-              <img
+              <PhotoButton
                 key={p.id}
                 src={photoUrl(p)}
                 alt="damage close-up"
-                loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
-                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)', cursor: 'pointer' }}
+                onOpen={onEnlarge}
+                style={{ width: '100%' }}
+                imageStyle={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--border)' }}
               />
             ))}
           </div>
@@ -1777,13 +1776,21 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
             {photos.map((p) => (
               <div key={p.id} style={{ position: 'relative', width: 84, height: 84, borderRadius: 9, overflow: 'hidden', border: '1px solid var(--border)' }}>
-                <img src={p.thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                <div
+                 <PhotoButton
+                   src={p.dataUrl || (p.base64 ? `data:image/jpeg;base64,${p.base64}` : p.thumb)}
+                   alt="Pending damage close-up"
+                   onOpen={onEnlarge}
+                   style={{ width: '100%', height: '100%' }}
+                   imageStyle={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                 />
+                 <button
+                   type="button"
+                   aria-label={armedDelete === p.id ? 'Confirm remove photo' : 'Remove photo'}
                   onClick={() => onRemove(p.id)}
-                  style={{ position: 'absolute', top: 3, right: 3, width: 22, height: 22, borderRadius: 6, background: 'rgba(38,34,32,0.7)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, cursor: 'pointer' }}
+                   style={{ position: 'absolute', top: 3, right: 3, width: 22, height: 22, border: 0, borderRadius: 6, background: 'rgba(38,34,32,0.7)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, cursor: 'pointer' }}
                 >
                    {armedDelete === p.id ? 'TAP AGAIN' : '✕'}
-                </div>
+                 </button>
               </div>
             ))}
           </div>
@@ -1798,13 +1805,13 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {damageWideShots.map((p) => (
-              <img
+              <PhotoButton
                 key={p.id}
                 src={photoUrl(p)}
                 alt="damage context"
-                loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
-                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+                onOpen={onEnlarge}
+                style={{ width: '100%' }}
+                imageStyle={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)' }}
               />
             ))}
           </div>
@@ -1819,13 +1826,13 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
             {unclassifiedShots.map((p) => (
-              <img
+              <PhotoButton
                 key={p.id}
                 src={photoUrl(p)}
                 alt="legacy unclassified"
-                loading="lazy"
-                onClick={() => onEnlarge && onEnlarge(photoUrl(p))}
-                style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)', cursor: 'pointer' }}
+                onOpen={onEnlarge}
+                style={{ width: '100%' }}
+                imageStyle={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 7, border: '1px solid var(--amber)' }}
               />
             ))}
           </div>
@@ -1853,7 +1860,7 @@ function PhotosStep({ photos, damageFocus = false, serverPhotos = [], pendingUpl
 }
 
 /* ---------- quote editor ---------- */
-function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onViewPhotos, savedPhotoCount = 0, walkPhotoCount = 0,
+function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onAddMore, onViewPhotos, onEnlarge, savedPhotoCount = 0, walkPhotoCount = 0,
   flags, keep, notes, notesOpen, flagPick, flagSearch,
   onOpenNotes, onCloseNotes, onNotesChange, onFlagPickOpen, onFlagPickClose, onFlagSearch, onAddFlag, onFlagDone, onRemoveFlag, onToggleKeep, onCopy, onImage, onPrint }) {
   const locked = !!committed;
@@ -1916,6 +1923,7 @@ function QuoteEditor({ lines, rates, totals, committed, onStartEdit, onCancelEdi
           onRerun={onRerun}
           onDelete={onDelete}
           onTogglePart={onTogglePart}
+           onEnlarge={onEnlarge}
         />
       ))}
 
@@ -2124,7 +2132,7 @@ function Bucket({ label, hrs }) {
   );
 }
 
-function LineCard({ line: l, rates, locked, reviewRef, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart }) {
+export function LineCard({ line: l, rates, locked, reviewRef, onStartEdit, onCancelEdit, onApplyEdit, onSetEdit, onEditBase, onRerun, onDelete, onTogglePart, onEnlarge }) {
   const isErr = l.status === 'error';
   const cls = l.cls;
   const h = cls ? lineHours(cls, rates) : null;
@@ -2137,14 +2145,14 @@ function LineCard({ line: l, rates, locked, reviewRef, onStartEdit, onCancelEdit
         {l.thumb && (
           <div style={{ display: 'flex', gap: 4, flex: '0 0 auto' }}>
             <div style={{ position: 'relative' }}>
-              <img src={l.thumb} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
+              <PhotoButton src={l.thumb} alt="Damage close-up" onOpen={onEnlarge} imageStyle={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover' }} />
               {l.wideBase64 && (
                 <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>CLOSE</span>
               )}
             </div>
             {(l.wideBase64 || l.wideThumb) && (
               <div style={{ position: 'relative' }}>
-                <img src={l.wideBase64 ? `data:image/jpeg;base64,${l.wideBase64}` : l.wideThumb} alt="" style={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover', display: 'block' }} />
+                <PhotoButton src={l.wideBase64 ? `data:image/jpeg;base64,${l.wideBase64}` : l.wideThumb} alt="Wide damage context photo" onOpen={onEnlarge} imageStyle={{ width: 58, height: 58, borderRadius: 8, objectFit: 'cover' }} />
                 <span style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', padding: '1px 4px', borderRadius: 3, letterSpacing: 0.3 }}>WIDE</span>
               </div>
             )}

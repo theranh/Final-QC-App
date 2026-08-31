@@ -8,6 +8,7 @@ import GlobalSearchResults from './GlobalSearch';
 import SavedViews from './SavedViews';
 import PinDialog from './PinDialog';
 import { api } from '../lib/api';
+import PhotoButton from './PhotoButton';
 
 const FILTERS = [
   ['awaitingFinalQc', 'In-Take Quotes'],
@@ -149,7 +150,7 @@ function fallbackVehicle(record) {
   };
 }
 
-export default function VehiclesScreen({ dash, records = [], filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote, onDeleted }) {
+export default function VehiclesScreen({ dash, records = [], filter, onFilter, q, onQ, onOpenIntake, onOpenRecord, onOpenQuote, onOpenLightbox, onDeleted }) {
   // Any non-intake filter value (old saved states like 'all', 'released', …)
   // falls into the Completed QC's bucket.
   const bucket = filter === 'awaitingFinalQc' ? 'awaitingFinalQc' : 'completed';
@@ -290,7 +291,7 @@ export default function VehiclesScreen({ dash, records = [], filter, onFilter, q
                 label: v.stock || v.vin || 'Intake',
               })}
             >
-              <RecentQuoteCard quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} />
+              <RecentQuoteCard quote={v} badge={v.inProgress ? 'IN PROGRESS' : undefined} onClick={() => onOpenIntake(v)} onOpenCover={onOpenLightbox} />
             </SwipeDeleteRow>
           ))}
         {bucket === 'completed' && list.length === 0 && (
@@ -323,17 +324,25 @@ export default function VehiclesScreen({ dash, records = [], filter, onFilter, q
                   label: v.stock || v.vin || v.qcNumber,
                 })}
               >
-                <button
-                  type="button"
-                  onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
-                  style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer', color: 'inherit', font: 'inherit', display: 'flex', gap: 11, alignItems: 'center' }}
-                >
+                <div style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', color: 'inherit', display: 'flex', gap: 11, alignItems: 'center' }}>
                   {v.cover ? (
-                    <img data-testid="completed-vehicle-cover" src={v.cover} alt="" style={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', flex: '0 0 auto', border: '1px solid var(--border)' }} />
+                    <PhotoButton
+                      src={v.cover}
+                      alt={`${v.vehicle || v.stock || 'Completed vehicle'} cover photo`}
+                      onOpen={onOpenLightbox}
+                      style={{ flex: '0 0 auto' }}
+                      imageClassName="completed-vehicle-cover"
+                      imageStyle={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', border: '1px solid var(--border)' }}
+                    />
                   ) : (
                     <div data-testid="completed-vehicle-cover-placeholder" style={{ width: 46, height: 46, borderRadius: 8, flex: '0 0 auto', background: 'var(--panel)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted2)', fontSize: 18 }}>🚚</div>
                   )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <button
+                    type="button"
+                    aria-label={`Open ${v.vehicle || v.stock || v.qcNumber} details`}
+                    onClick={() => v.intake ? onOpenIntake(v) : onOpenRecord(v.qcNumber)}
+                    style={{ flex: 1, minWidth: 0, padding: 0, border: 0, background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer' }}
+                  >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                   <span className="oswald" style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {v.stock || 'NO STOCK #'} · {v.vehicle || 'Vehicle not recorded'}
@@ -356,8 +365,8 @@ export default function VehiclesScreen({ dash, records = [], filter, onFilter, q
                   <span>{v.itemCount || 0} QC issue{v.itemCount === 1 ? '' : 's'}</span>
                   <span>{v.intake ? 'Tap for intake details + walk-around photos' : 'Digital intake unavailable · tap for full QC record'}</span>
                   </div>
-                  </div>
-                </button>
+                  </button>
+                </div>
               </SwipeDeleteRow>
             );
           })}
