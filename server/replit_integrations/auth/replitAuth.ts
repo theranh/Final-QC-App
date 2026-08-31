@@ -113,7 +113,7 @@ export function setupAuth(app: Express) {
     try {
       const strategyName = await ensureStrategy(req.hostname);
       passport.authenticate(strategyName, {
-        prompt: "login consent",
+        prompt: "login",
         scope: ["openid", "email", "profile", "offline_access"],
       })(req, res, next);
     } catch (error) {

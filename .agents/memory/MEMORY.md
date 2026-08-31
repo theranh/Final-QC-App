@@ -27,3 +27,4 @@
 - [PWA updates](pwa-updates.md) — active sessions receive an update prompt and are never silently reloaded by a newly published service worker.
 - [Photo object verification](photo-object-verification.md) — App Storage SDK lacks metadata checksums; verify every photo write by full read-back size and SHA-256.
 - [Photo viewer validation](photo-viewer-validation.md) — validate enlargement through the published PWA; direct click tests miss stale bundles and drag pointer capture.
+- [Replit login behavior](replit-login-behavior.md) — require explicit login when signed out, but never force repeat OAuth consent after initial approval.
